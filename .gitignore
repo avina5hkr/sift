@@ -18,3 +18,5 @@ web/.e2e-home/
 
 # private notes and unredacted copies (never committed)
 local/
+# the product spec is the maintainer's private document
+Sift — Product & Engineering Spec.md
