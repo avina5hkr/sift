@@ -67,6 +67,15 @@ test('device and job events invalidate the status query', () => {
   expect(spy).toHaveBeenCalledTimes(2)
 })
 
+test('hello invalidates the status query, so a reconnect heals at once', () => {
+  const qc = new QueryClient()
+  const spy = vi.spyOn(qc, 'invalidateQueries')
+  startEventStream(qc)
+  FakeEventSource.instances[0].emit('hello', { version: '0.1.0' })
+  expect(spy).toHaveBeenCalledTimes(1)
+  expect(spy).toHaveBeenCalledWith({ queryKey: ['status'] })
+})
+
 test('an error marks the stream disconnected', () => {
   const qc = new QueryClient()
   startEventStream(qc)

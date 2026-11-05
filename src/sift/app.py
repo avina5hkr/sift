@@ -10,7 +10,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +34,8 @@ from sift.core.instance import AlreadyRunningError, SingleInstanceLock
 from sift.core.logging import install_crash_handler, setup_logging, teardown_logging
 from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
+from sift.device.fake_tracker import FAKE_ANNOUNCE_AFTER_S, fake_tracker
+from sift.device.tracker import DeviceTracker, adb_tracker
 from sift.server.app import create_app
 
 _HOST = "127.0.0.1"
@@ -128,6 +130,40 @@ def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
     return handle
 
 
+def tracker_mode(*, fake_phone: bool, no_window: bool, env: Mapping[str, str]) -> str:
+    """Which device source to use: "adb" (default), "fake" or "off".
+
+    `--fake-phone` and `SIFT_TRACKER=fake` are honoured only with `--no-window`, like
+    SIFT_DEV_TOKEN: a normal Sift window always looks at the real phone. `SIFT_TRACKER=off`
+    runs no tracker at all (tests use it so nothing ever contacts the real adb server).
+    """
+    wanted = env.get("SIFT_TRACKER", "adb").strip().lower()
+    if no_window and (fake_phone or wanted == "fake"):
+        return "fake"
+    return "off" if wanted == "off" else "adb"
+
+
+def fake_announce_delay(env: Mapping[str, str]) -> float:
+    """Seconds before the fake phone appears: SIFT_FAKE_PHONE_DELAY_S, else 0.5.
+
+    The browser tests set it very high, so the "No phone" chip is there to be seen, and then
+    press Retry (which shows the phone at once) to watch the chip change without a reload.
+    """
+    try:
+        delay = float(env["SIFT_FAKE_PHONE_DELAY_S"])
+    except KeyError, ValueError:
+        return FAKE_ANNOUNCE_AFTER_S
+    return delay if 0 <= delay < float("inf") else FAKE_ANNOUNCE_AFTER_S
+
+
+def build_tracker(mode: str, ctx: AppContext, env: Mapping[str, str]) -> DeviceTracker | None:
+    if mode == "off":
+        return None
+    if mode == "fake":
+        return fake_tracker(ctx, announce_after_s=fake_announce_delay(env))
+    return adb_tracker(ctx)
+
+
 def find_web_dist() -> Path | None:
     """The built UI folder: SIFT_WEB_DIST, the bundled copy when frozen, or <repo>/web/dist."""
     candidates: list[Path] = []
@@ -198,6 +234,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sift", description="Back up an Android phone.")
     parser.add_argument("--no-window", action="store_true", help="serve the UI without a window")
     parser.add_argument("--port", type=int, default=0, help="port to listen on (default: any)")
+    parser.add_argument(
+        "--fake-phone",
+        action="store_true",
+        help="with --no-window: show a fake phone instead of looking for a real one (dev, tests)",
+    )
     args = parser.parse_args(argv)
 
     paths = AppPaths.default()
@@ -212,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     ctx: AppContext | None = None
     sock: socket.socket | None = None
     handle: ServerHandle | None = None
+    tracker: DeviceTracker | None = None
     logging_on = False
     try:
         install_crash_handler(paths)
@@ -255,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
         handle = start_server(ctx, sock)
+        mode = tracker_mode(fake_phone=args.fake_phone, no_window=args.no_window, env=os.environ)
+        tracker = build_tracker(mode, ctx, os.environ)
+        if tracker is not None:
+            ctx.tracker = tracker
+            tracker.start()
         url = f"{handle.url}/?t={token}"
         if args.no_window:
             print(f"Sift running at {url}", flush=True)
@@ -263,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
             _run_window(url)
         return 0
     finally:
+        if tracker is not None:
+            tracker.stop()  # before the database closes: the tracker writes to it
         if handle is not None:
             handle.stop()
         elif sock is not None:

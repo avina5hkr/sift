@@ -5,6 +5,8 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -15,8 +17,10 @@ from sift.app import (
     bind_socket,
     build_context,
     close_windows,
+    fake_announce_delay,
     main,
     start_server,
+    tracker_mode,
 )
 from sift.core.db import Database, DatabaseBusyError
 from sift.core.events import EventBus
@@ -275,3 +279,110 @@ def test_signal_in_window_mode_closes_windows(sig: signal.Signals) -> None:
             time.sleep(0.01)
     assert [w.destroyed for w in windows] == [1, 1]
     assert {s: signal.getsignal(s) for s in before} == before  # handlers restored
+
+
+# -- the device source (R26) ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("fake_phone", "no_window", "env", "expected"),
+    [
+        (False, True, {}, "adb"),
+        (False, False, {}, "adb"),
+        (True, True, {}, "fake"),
+        (True, False, {}, "adb"),  # --fake-phone needs --no-window
+        (False, True, {"SIFT_TRACKER": "fake"}, "fake"),
+        (False, False, {"SIFT_TRACKER": "fake"}, "adb"),  # so does SIFT_TRACKER=fake
+        (False, True, {"SIFT_TRACKER": "off"}, "off"),
+        (False, False, {"SIFT_TRACKER": "off"}, "off"),
+        (True, True, {"SIFT_TRACKER": "off"}, "fake"),  # the explicit flag wins
+        (False, True, {"SIFT_TRACKER": "adb"}, "adb"),
+        (False, True, {"SIFT_TRACKER": "nonsense"}, "adb"),
+    ],
+)
+def test_tracker_mode(
+    fake_phone: bool, no_window: bool, env: dict[str, str], expected: str
+) -> None:
+    assert tracker_mode(fake_phone=fake_phone, no_window=no_window, env=env) == expected
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, 0.5),
+        ({"SIFT_FAKE_PHONE_DELAY_S": "3600"}, 3600.0),
+        ({"SIFT_FAKE_PHONE_DELAY_S": "0"}, 0.0),
+        ({"SIFT_FAKE_PHONE_DELAY_S": "soon"}, 0.5),
+        ({"SIFT_FAKE_PHONE_DELAY_S": "-1"}, 0.5),
+        ({"SIFT_FAKE_PHONE_DELAY_S": "nan"}, 0.5),
+        ({"SIFT_FAKE_PHONE_DELAY_S": "inf"}, 0.5),
+    ],
+)
+def test_fake_announce_delay(env: dict[str, str], expected: float) -> None:
+    assert fake_announce_delay(env) == expected
+
+
+@contextmanager
+def _run_headless(args: list[str], env: dict[str, str]) -> Iterator[tuple[str, str]]:
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "sift", "--no-window", "--port", "0", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "SIFT_DEV_TOKEN": "dev-tok", **env},
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().strip()
+        base, _, token = line.removeprefix("Sift running at ").partition("/?t=")
+        yield base, token
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def _device(base: str, token: str) -> dict[str, object] | None:
+    r = httpx.get(f"{base}/api/status", headers={"X-Sift-Token": token})
+    device: dict[str, object] | None = r.json()["device"]
+    return device
+
+
+def test_headless_without_a_tracker_has_no_device(paths: AppPaths) -> None:
+    with _run_headless([], {}) as (base, token):  # conftest sets SIFT_TRACKER=off
+        assert _device(base, token) is None
+
+
+@pytest.mark.parametrize(("args", "env"), [(["--fake-phone"], {}), ([], {"SIFT_TRACKER": "fake"})])
+def test_headless_fake_phone_shows_up_and_stops_cleanly(
+    paths: AppPaths, args: list[str], env: dict[str, str]
+) -> None:
+    with _run_headless(args, env) as (base, token):
+        deadline = time.monotonic() + 10
+        device = _device(base, token)
+        while (device or {}).get("state") != "connected_usb":
+            assert time.monotonic() < deadline, device
+            time.sleep(0.1)
+            device = _device(base, token)
+        assert device is not None
+        assert device["model"] == "TestPhone"
+        devices = httpx.get(f"{base}/api/devices", headers={"X-Sift-Token": token}).json()
+        assert [d["serial"] for d in devices] == ["FAKE-0001"]
+
+
+def test_headless_fake_phone_with_a_long_delay_appears_on_retry(paths: AppPaths) -> None:
+    headers = {"X-Sift-Token": "dev-tok"}
+    with _run_headless(["--fake-phone"], {"SIFT_FAKE_PHONE_DELAY_S": "3600"}) as (base, token):
+        time.sleep(0.5)
+        device = _device(base, token)
+        assert device is not None and device["state"] == "no_device"
+        assert httpx.post(f"{base}/api/devices/retry", headers=headers).status_code == 204
+        deadline = time.monotonic() + 5
+        while (_device(base, token) or {}).get("state") != "connected_usb":
+            assert time.monotonic() < deadline
+            time.sleep(0.1)

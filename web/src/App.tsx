@@ -1,6 +1,7 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Navigate, Route, Routes, useNavigate } from 'react-router'
 import { ConfigWarnings } from './components/ConfigWarnings'
+import { DeviceBanner } from './components/DeviceBanner'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
 import { ApiError, apiFetch } from './lib/api'
@@ -19,6 +20,13 @@ export default function App() {
     refetchInterval: 30_000,
   })
 
+  const qc = useQueryClient()
+  const retry = useMutation({
+    mutationFn: () => apiFetch<void>('/api/devices/retry', { method: 'POST' }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['status'] }),
+  })
+  const onRetry = () => retry.mutate()
+
   const errorMessage = status.error
     ? status.error instanceof ApiError
       ? status.error.message
@@ -27,7 +35,8 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col">
-      <StatusBar status={status.data} onOpenSettings={() => navigate('/settings')} />
+      <StatusBar status={status.data} onOpenSettings={() => navigate('/settings')} onRetry={onRetry} />
+      <DeviceBanner device={status.data?.device} onRetry={onRetry} />
       <ConfigWarnings warnings={status.data?.app.config_warnings} />
       {errorMessage && (
         <div

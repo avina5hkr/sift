@@ -25,7 +25,8 @@ export function startEventStream(qc: QueryClient): () => void {
       useEventStore.setState(
         name === 'hello' ? { connected: true, last: { name, data } } : { last: { name, data } },
       )
-      if (name === 'device' || name === 'job') {
+      // "hello" also arrives after a reconnect, so a missed device event heals at once.
+      if (name === 'hello' || name === 'device' || name === 'job') {
         void qc.invalidateQueries({ queryKey: ['status'] })
       }
     })

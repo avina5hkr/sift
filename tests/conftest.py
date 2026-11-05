@@ -31,6 +31,15 @@ def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def _no_real_adb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test (nor a `sift --no-window` subprocess it starts) may reach the real adb server.
+
+    Tests that need the fake phone set SIFT_TRACKER=fake or pass --fake-phone explicitly.
+    """
+    monkeypatch.setenv("SIFT_TRACKER", "off")
+
+
 @pytest.fixture
 def paths(_isolate_home: Path) -> AppPaths:
     """AppPaths.default() under the isolated SIFT_HOME, with every folder created."""

@@ -35,7 +35,7 @@ trap 'cleanup; exit 0' INT
 trap 'cleanup; exit 143' TERM
 trap 'cleanup' EXIT
 
-SIFT_HOME=.dev SIFT_DEV_TOKEN=dev uv run sift --no-window --port 8765 &
+SIFT_HOME=.dev SIFT_DEV_TOKEN=dev uv run sift --no-window --fake-phone --port 8765 &
 backend_pid=$!
 npm --prefix web run dev &
 vite_pid=$!

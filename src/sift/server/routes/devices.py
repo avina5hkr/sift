@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, StrictBool
 
 from sift.device.adb_manager import AdbDownloadError, AdbError, AdbLocation, AdbManager
@@ -58,3 +58,30 @@ def download_adb(manager: AdbManagerDep, body: DownloadRequest | None = None) ->
         raise ApiError(502, "adb_download_failed", e.message) from e
     except AdbError as e:
         raise ApiError(500, "adb_error", e.message) from e
+
+
+class StoredDevice(BaseModel):
+    uuid: str
+    serial: str | None
+    model: str | None
+    android_version: str | None
+    last_seen_at: int | None
+
+
+@router.get("/devices")
+def list_devices(ctx: Ctx) -> list[StoredDevice]:
+    """The phones Sift has stored. Read-only; nothing else about a phone leaves the database."""
+    with ctx.db.read() as conn:
+        rows = conn.execute(
+            "SELECT uuid, serial, model, android_version, last_seen_at FROM device ORDER BY id"
+        ).fetchall()
+    return [StoredDevice(**dict(zip(StoredDevice.model_fields, row, strict=True))) for row in rows]
+
+
+@router.post("/devices/retry", status_code=204)
+def retry_device(ctx: Ctx) -> Response:
+    """Look for the phone again now (reopen the device list, read the phone afresh)."""
+    if ctx.tracker is None:
+        raise ApiError(409, "no_tracker", "Sift is not looking for a phone right now.")
+    ctx.tracker.retry()
+    return Response(status_code=204)
