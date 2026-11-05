@@ -699,7 +699,8 @@ def test_link_health_over_usb(transport: AdbTransport) -> None:
 
 
 @pytest.mark.parametrize(
-    "serial", ["192.0.2.10:5555", "adb-FAKESERIAL-AbCdEf._adb-tls-connect._tcp"]
+    "serial",
+    ["192.0.2.10:5555", "[fe80::1]:5555", "adb-FAKESERIAL-AbCdEf._adb-tls-connect._tcp"],
 )
 def test_link_health_over_wifi(serial: str) -> None:
     with FakeAdbServer(serial=serial) as srv:
@@ -707,6 +708,23 @@ def test_link_health_over_wifi(serial: str) -> None:
         transport = AdbTransport(serial, srv.port, limits=FAST, host="127.0.0.1")
         health = transport.link_health()
         assert health == LinkHealth("wifi", None, health.latency_ms)
+
+
+@pytest.mark.parametrize(
+    ("serial", "wifi"),
+    [
+        ("192.0.2.10:5555", True),
+        ("[fe80::1]:5555", True),
+        ("[2001:db8::7%en0]:37199", True),
+        ("adb-FAKESERIAL-AbCdEf._adb-tls-connect._tcp", True),
+        ("FAKESERIAL", False),
+        ("emulator-5554", False),
+        ("[fe80::1]", False),
+        ("fe80::1:5555", False),
+    ],
+)
+def test_is_wifi_serial(serial: str, wifi: bool) -> None:
+    assert adb_transport.is_wifi_serial(serial) is wifi
 
 
 # -- errors -------------------------------------------------------------------------------------

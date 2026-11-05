@@ -25,6 +25,9 @@ from sift.device.fake_transport import FakeTransport, ManualClock
 from sift.device.track_devices import Snapshot
 from sift.device.tracker import (
     HELD_BY_OTHER_MESSAGE,
+    MULTIPLE_MESSAGE,
+    NO_DEVICE_MESSAGE,
+    NOT_ANSWERING_MESSAGE,
     OFFLINE_MESSAGE,
     UNAUTHORIZED_MESSAGE,
     ConnectionState,
@@ -390,6 +393,14 @@ def test_transport_error_is_retried_on_the_next_event(ctx: AppContext) -> None:
     assert r.bus.states()[-2] == "connected_usb"  # the event did, at once
 
 
+def test_offline_messages() -> None:
+    expected = (
+        "The phone is connected but not responding. Unlock it, or unplug and reconnect the "
+        "cable. On Samsung phones also check that Auto Blocker is off."
+    )
+    assert expected == OFFLINE_MESSAGE == NOT_ANSWERING_MESSAGE
+
+
 def test_info_error_is_offline(ctx: AppContext) -> None:
     r = rig(ctx)
     transport = r.phones[USB]
@@ -473,19 +484,35 @@ def test_backoff_schedule(ctx: AppContext) -> None:
     assert _deltas(r.events.opened_at) == [1, 2, 4, 8, 16, 30, 30]
 
 
-def test_stream_drop_reconnects_with_backoff_and_a_snapshot_resets_it(ctx: AppContext) -> None:
+def test_a_stream_that_dies_quickly_keeps_growing_the_backoff(ctx: AppContext) -> None:
     r = rig(ctx)
     drop = DeviceDisconnected("adb server went away")
     r.run(
-        [{USB: "device"}, drop],  # works, then drops
+        [{USB: "device"}, drop],  # one snapshot, then dies
         drop,
         drop,
-        [{USB: "device"}],  # works again, then ends (also a drop)
+        [{USB: "device"}],  # one snapshot again, then ends (also a drop)
         [STOP],
     )
-    assert _deltas(r.events.opened_at) == [1, 2, 4, 1]
+    assert _deltas(r.events.opened_at) == [1, 2, 4, 8]  # ensure_server is not hammered
     # Never left showing "connected" while adb is gone; connected again once it is back.
     assert r.bus.states() == ["connected_usb", "offline", "connected_usb", "offline"]
+
+
+def test_a_stream_that_stayed_up_30_s_resets_the_backoff(ctx: AppContext) -> None:
+    r = rig(ctx)
+    drop = DeviceDisconnected("adb server went away")
+    up_29s: list[Item] = [{USB: "device"}] + [tick(r.clock, 1.0), None] * 29
+    r.run(
+        drop,
+        drop,
+        [*up_29s, drop],  # up 29 s: not long enough
+        [*up_29s, tick(r.clock, 1.0), None, drop],  # up 30 s
+        [STOP],
+    )
+    deltas = _deltas(r.events.opened_at)
+    assert deltas[:3] == [1, 2, 29 + 4]
+    assert deltas[3] == 30 + 1
 
 
 def test_retry_resets_backoff(ctx: AppContext) -> None:
@@ -503,6 +530,20 @@ def test_retry_resets_backoff(ctx: AppContext) -> None:
     assert deltas[:2] == [1, 2]
     assert r.events.opened_at[3] == pressed[0]  # reconnected now, not after the other 3 s
     assert deltas[3:] == [1, 2]  # and the schedule started over
+
+
+def test_retry_pressed_while_the_list_opens_keeps_the_fresh_list(ctx: AppContext) -> None:
+    r = rig(ctx)
+    real_factory = r.tracker._events
+
+    def press_retry_then_open() -> Any:
+        r.tracker.retry()
+        return real_factory()
+
+    r.tracker._events = press_retry_then_open
+    r.run([{USB: "device"}, STOP])
+    assert len(r.events.opened_at) == 1  # the fresh list was used, not thrown away
+    assert r.tracker.status().state is S.connected_usb
 
 
 def test_retry_reconnects_the_stream_and_rereads_the_phone(ctx: AppContext) -> None:
@@ -568,6 +609,206 @@ def test_usb2_hint(ctx: AppContext, link: int | None, hint: bool) -> None:
     assert status.link_mbps == link
     assert status.usb2_hint is hint
     assert r.link_calls == [USB]
+
+
+# -- which phone (R24) --------------------------------------------------------------------------
+
+
+def test_an_emulator_is_ignored(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.run([{"emulator-5554": "device"}, STOP])
+    assert r.tracker.status().state is S.no_device
+    assert r.tracker.status().message == NO_DEVICE_MESSAGE
+    assert device_rows(ctx) == []
+
+
+def test_an_emulator_next_to_a_phone_is_not_a_second_phone(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.run([{"emulator-5554": "device", "emulator-5556": "offline", USB: "device"}, STOP])
+    assert r.tracker.status().state is S.connected_usb
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]
+
+
+def test_two_ready_phones_on_first_run_store_nothing(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.phones["AAA-0003"] = FakeTransport(FakePhone(serial="AAA-0003"))
+    seen: list[DeviceStatus] = []
+    r.run([{"AAA-0003": "device", USB: "device"}, lambda: seen.append(r.tracker.status()), STOP])
+    assert seen[0].state is S.no_device
+    assert seen[0].message == MULTIPLE_MESSAGE
+    assert device_rows(ctx) == []
+
+
+def test_two_ready_phones_then_one_stores_that_one(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.phones["AAA-0003"] = FakeTransport(FakePhone(serial="AAA-0003"))
+    r.run([{"AAA-0003": "device", USB: "device"}, {USB: "device"}, STOP])
+    assert r.tracker.status().state is S.connected_usb
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]
+
+
+def test_the_stored_phone_wins_over_one_that_sorts_first(ctx: AppContext) -> None:
+    rig(ctx).run([{USB: "device"}, STOP])  # FAKE-0001 is stored
+    r = rig(ctx)
+    r.phones["AAA-0003"] = FakeTransport(FakePhone(serial="AAA-0003"))
+    r.run([{"AAA-0003": "device", USB: "device"}, STOP])
+    status = r.tracker.status()
+    assert status.state is S.connected_usb
+    assert status.serial == USB
+    assert "wrong_device" not in r.bus.states()
+
+
+def test_a_different_phone_alone_is_still_the_wrong_device(ctx: AppContext) -> None:
+    rig(ctx).run([{USB: "device"}, STOP])
+    r = rig(ctx)
+    r.phones["AAA-0003"] = FakeTransport(FakePhone(serial="AAA-0003"))
+    r.run([{"AAA-0003": "device"}, STOP])
+    assert r.tracker.status().state is S.wrong_device
+
+
+# -- refresh while connected (R23) ---------------------------------------------------------------
+
+
+class Flaky:
+    """A transport whose `info()` fails `fail` more times before working again."""
+
+    def __init__(self, inner: FakeTransport) -> None:
+        self.inner = inner
+        self.fail = 0
+        self.calls = 0
+
+    def info(self) -> Any:
+        self.calls += 1
+        if self.fail > 0:
+            self.fail -= 1
+            raise DeviceTimeout("The phone did not finish in 10 s.")
+        return self.inner.info()
+
+
+def _flaky_rig(ctx: AppContext) -> tuple[Rig, Flaky, FakePhone]:
+    r = rig(ctx)
+    inner = r.phones[USB]
+    assert isinstance(inner, FakeTransport)
+    flaky = Flaky(inner)
+    r.phones[USB] = flaky  # type: ignore[assignment]
+    return r, flaky, inner.phone
+
+
+def _ticks(r: Rig, seconds: int) -> list[Item]:
+    return [tick(r.clock, 1.0), None] * seconds
+
+
+def test_refresh_updates_battery_and_storage_after_60_s(ctx: AppContext) -> None:
+    r, flaky, phone = _flaky_rig(ctx)
+    seen: list[DeviceStatus] = []
+    note = lambda: seen.append(r.tracker.status())  # noqa: E731
+
+    def drain() -> None:
+        phone.battery_pct = 41
+        phone.add_file("/sdcard/new.bin", size=10**9)
+
+    r.run([{USB: "device"}, note, drain, *_ticks(r, 59), note, *_ticks(r, 1), note, STOP])
+    assert seen[0].battery_pct == 80
+    assert seen[1] == seen[0]  # nothing re-read before 60 s
+    assert seen[2].battery_pct == 41
+    assert seen[0].free_bytes is not None and seen[2].free_bytes is not None
+    assert seen[2].free_bytes == seen[0].free_bytes - 10**9
+    assert seen[2].link_mbps == 480 and seen[2].usb2_hint
+    assert r.link_calls == [USB]  # the link speed is not asked again on refreshes
+    assert flaky.calls == 2
+    assert r.bus.states() == ["connected_usb", "connected_usb"]  # published: it changed
+
+
+def test_unchanged_refresh_publishes_nothing(ctx: AppContext) -> None:
+    r, flaky, _ = _flaky_rig(ctx)
+    r.run([{USB: "device"}, *_ticks(r, 180), STOP])
+    assert flaky.calls == 4
+    assert r.bus.states() == ["connected_usb"]
+
+
+def test_one_failed_refresh_keeps_connected(ctx: AppContext) -> None:
+    r, flaky, _ = _flaky_rig(ctx)
+    fail_once = lambda: setattr(flaky, "fail", 1)  # noqa: E731
+    r.run([{USB: "device"}, fail_once, *_ticks(r, 60), STOP])
+    assert flaky.calls == 2
+    assert r.bus.states() == ["connected_usb"]
+
+
+def test_two_failed_refreshes_in_a_row_go_offline(ctx: AppContext) -> None:
+    r, flaky, _ = _flaky_rig(ctx)
+    fail_twice = lambda: setattr(flaky, "fail", 2)  # noqa: E731
+    seen: list[DeviceStatus] = []
+    r.run(
+        [
+            {USB: "device"},
+            fail_twice,
+            *_ticks(r, 120),
+            lambda: seen.append(r.tracker.status()),
+            *_ticks(r, 2),  # its read is retried after the backoff, and works
+            STOP,
+        ]
+    )
+    assert seen[0].state is S.offline
+    assert seen[0].message == OFFLINE_MESSAGE
+    assert r.bus.states() == ["connected_usb", "offline", "connected_usb"]
+
+
+def test_failures_must_be_in_a_row(ctx: AppContext) -> None:
+    r, flaky, _ = _flaky_rig(ctx)
+    fail_once = lambda: setattr(flaky, "fail", 1)  # noqa: E731
+    r.run([{USB: "device"}, fail_once, *_ticks(r, 120), fail_once, *_ticks(r, 60), STOP])
+    assert flaky.calls == 4  # read, failed at 60 s, fine at 120 s, failed at 180 s
+    assert r.bus.states() == ["connected_usb"]
+
+
+def test_a_changed_identity_on_refresh_is_the_wrong_device(ctx: AppContext) -> None:
+    r, _, phone = _flaky_rig(ctx)
+
+    def swap() -> None:
+        phone.serial = "OTHER-0002"
+
+    r.run([{USB: "device"}, swap, *_ticks(r, 60), STOP])
+    assert r.bus.states() == ["connected_usb", "wrong_device"]
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]
+
+
+def test_refreshes_write_last_seen_at_most_every_10_minutes(ctx: AppContext) -> None:
+    r, _, _ = _flaky_rig(ctx)
+    stamps: list[int] = []
+    note = lambda: stamps.append(device_rows(ctx)[0][5])  # noqa: E731
+    r.run([{USB: "device"}, note, *_ticks(r, 540), note, *_ticks(r, 60), note, STOP])
+    first = 1_700_000_000 + 1000
+    assert stamps == [first, first, first + 600]
+
+
+# -- stop -------------------------------------------------------------------------------------
+
+
+def test_nothing_is_written_or_published_after_stop(ctx: AppContext) -> None:
+    r = rig(ctx)
+    inner = r.phones[USB]
+
+    class StopsDuringInfo:
+        def info(self) -> Any:
+            r.tracker.stop()
+            return inner.info()
+
+    r.phones[USB] = StopsDuringInfo()  # type: ignore[assignment]
+    r.run([{}, {USB: "device"}])
+    assert device_rows(ctx) == []
+    assert r.bus.states() == ["no_device"]
+
+
+def test_a_refresh_after_stop_writes_nothing(ctx: AppContext) -> None:
+    r, _, phone = _flaky_rig(ctx)
+
+    def stop_then_change() -> None:
+        phone.battery_pct = 12
+        r.tracker.stop()
+
+    r.run([{USB: "device"}, *_ticks(r, 599), stop_then_change, *_ticks(r, 1)])
+    assert r.bus.states() == ["connected_usb"]
+    assert device_rows(ctx)[0][5] == 1_700_000_000 + 1000
 
 
 # -- the thread --------------------------------------------------------------------------------

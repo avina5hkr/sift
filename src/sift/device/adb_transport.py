@@ -89,11 +89,12 @@ _MAX_REQUEST_BYTES = 0xFFFF  # an adb host request's length is 4 hex digits
 _MAX_SYNC_PAYLOAD = 64 * 1024  # adbd's SYNC_DATA_MAX; also the cap for a FAIL message
 _U32 = struct.Struct("<I")
 _RAW_CHUNK = 1 << 16
-_NETWORK_SERIAL = re.compile(r"^[^:\s]+:\d+$|_adb-tls-connect\._tcp")
+# host:port (an IPv6 host in brackets), or an mDNS service name.
+_NETWORK_SERIAL = re.compile(r"^(?:\[[^\]\s]+\]|[^:\s\[\]]+):\d+$|_adb-tls-connect\._tcp")
 
 
 def is_wifi_serial(serial: str) -> bool:
-    """True for a Wi-Fi adb serial: `host:port`, or an mDNS `adb-…._adb-tls-connect._tcp` name."""
+    """True for a Wi-Fi adb serial: `host:port`, `[ipv6]:port`, or an mDNS adb-tls-connect name."""
     return _NETWORK_SERIAL.search(serial) is not None
 
 

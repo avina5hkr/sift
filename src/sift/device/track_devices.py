@@ -10,6 +10,7 @@ once: it shuts the socket down, which wakes the `recv`.
 """
 
 import contextlib
+import re
 import socket
 import threading
 from collections.abc import Iterator
@@ -20,6 +21,7 @@ from sift.device.transport import DeviceDisconnected
 
 _REQUEST = b"host:track-devices"
 _RECV_CHUNK = 4096
+_LENGTH = re.compile(rb"[0-9a-fA-F]{4}")
 
 # serial -> adb state ("device", "unauthorized", "offline", "authorizing", ...)
 Snapshot = dict[str, str]
@@ -126,10 +128,10 @@ class TrackDevices:
         """The next whole message in `buf` (removed from it), or None if it is not all there."""
         if len(buf) < 4:
             return None
-        try:
-            length = int(bytes(buf[:4]), 16)
-        except ValueError as e:
-            raise DeviceDisconnected(f"The adb server sent a garbled length: {buf[:4]!r}") from e
+        head = bytes(buf[:4])
+        if _LENGTH.fullmatch(head) is None:  # int() would also take "-001", " 01a" or "0_1a"
+            raise DeviceDisconnected(f"The adb server sent a garbled length: {head!r}")
+        length = int(head, 16)
         if len(buf) < 4 + length:
             return None
         payload = bytes(buf[4 : 4 + length])

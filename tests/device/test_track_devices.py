@@ -177,6 +177,17 @@ def test_garbled_length_raises_disconnected() -> None:
         next(iter(stream))
 
 
+@pytest.mark.parametrize("length", [b"-001", b" 01a", b"0_1a", b"0x1a", b"+01a"])
+def test_lengths_must_be_four_hex_digits(length: bytes) -> None:
+    replies = [b"OKAY", length + b"A\tdevice\n" + b"x" * 32]
+    with (
+        TrackServer(replies) as srv,
+        TrackDevices("127.0.0.1", srv.port) as stream,
+        pytest.raises(DeviceDisconnected, match="garbled"),
+    ):
+        next(iter(stream))
+
+
 def test_close_ends_a_blocked_reader_promptly() -> None:
     with TrackServer([b"OKAY"]) as srv:
         stream = TrackDevices("127.0.0.1", srv.port, idle_s=30)
