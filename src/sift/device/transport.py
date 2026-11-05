@@ -89,7 +89,11 @@ class Transport(Protocol):
         ...
 
     def open_read(self, path: str, offset: int = 0) -> BinaryIO:
-        """A stream of the file's bytes starting at byte `offset`; the caller must close it."""
+        """A stream of the file's bytes starting at byte `offset`; the caller must close it.
+
+        Like any raw stream, `read(n)` may return fewer than `n` bytes before the end: loop
+        until it returns b"". `read()` with no size returns everything that is left.
+        """
         ...
 
     def sha256(self, paths: list[str]) -> dict[str, str | None]:

@@ -27,10 +27,13 @@ def encode_command(command: str) -> bytes:
 
 
 def tail_command(path: str, offset: int) -> str:
-    """Print a file from byte `offset` (0-based) on. `tail -c +K` counts from 1."""
+    """Print a file from byte `offset` (0-based) on. `tail -c +K` counts from 1.
+
+    `--` ends the options, so no path can be read as one.
+    """
     if offset < 0:
         raise ValueError(f"offset must not be negative: {offset}")
-    return f"tail -c +{offset + 1} {shlex.quote(path)}"
+    return f"tail -c +{offset + 1} -- {shlex.quote(path)}"
 
 
 def build_sha256_script(paths: list[str]) -> str:

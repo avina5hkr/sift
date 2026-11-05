@@ -217,3 +217,19 @@ def test_failed_calls_are_journalled_too() -> None:
     with pytest.raises(RemoteError):
         transport.delete(PATH)
     assert transport.journal == [JournalEntry("delete", PATH, True)]
+
+
+def test_short_reads_return_less_than_asked_but_everything_in_the_end() -> None:
+    transport, _, _ = make(FaultPlan(short_reads=True))
+    with transport.open_read(PATH) as stream:
+        assert len(stream.read(9)) == 3
+        assert len(stream.read(1)) == 1
+        while chunk := stream.read(100):
+            assert len(chunk) < 100
+    with transport.open_read(PATH) as stream:
+        assert stream.read() == DATA
+    with transport.open_read(PATH, 4) as stream:
+        whole = b""
+        while chunk := stream.read(64):
+            whole += chunk
+    assert whole == DATA[4:]

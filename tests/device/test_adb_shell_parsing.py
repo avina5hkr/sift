@@ -101,9 +101,9 @@ def test_parse_battery_gives_none_for_unusable_output(out: str) -> None:
 
 def test_tail_command_is_one_based() -> None:
     # `tail -c +K` starts at the K-th byte, counting from 1 (checked on a phone).
-    assert tail_command("/sdcard/a.jpg", 0) == "tail -c +1 /sdcard/a.jpg"
-    assert tail_command("/sdcard/a.jpg", 1) == "tail -c +2 /sdcard/a.jpg"
-    assert tail_command("/sdcard/a b.jpg", 4096) == "tail -c +4097 '/sdcard/a b.jpg'"
+    assert tail_command("/sdcard/a.jpg", 0) == "tail -c +1 -- /sdcard/a.jpg"
+    assert tail_command("/sdcard/a.jpg", 1) == "tail -c +2 -- /sdcard/a.jpg"
+    assert tail_command("/sdcard/a b.jpg", 4096) == "tail -c +4097 -- '/sdcard/a b.jpg'"
 
 
 def test_tail_command_rejects_negative_offsets() -> None:
@@ -173,7 +173,7 @@ _names = st.one_of(
 def test_every_shell_path_is_quoted(name: str, offset: int) -> None:
     path = f"/sdcard/Download/{name}"
     # A POSIX shell splits the tail command back into exactly these words.
-    assert shlex.split(tail_command(path, offset)) == ["tail", "-c", f"+{offset + 1}", path]
+    assert shlex.split(tail_command(path, offset)) == ["tail", "-c", f"+{offset + 1}", "--", path]
     paths = [path, "/sdcard/plain.jpg", path + "2"]
     words = shlex.split(build_sha256_script(paths))
     assert len(words) == 7 * len(paths)

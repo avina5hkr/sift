@@ -38,6 +38,7 @@ class FaultPlan:
     offline_for_s: float | None = None  # every call raises DeviceDisconnected for this long
     identity: str | None = None  # report a different serial
     garbage_output: bool = False  # shell-like calls return unparseable text
+    short_reads: bool = False  # read(n) returns about a third of n (at least 1 byte)
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,8 @@ class _FakeStream(io.RawIOBase):
         if self._path in t.faults.hang_on:
             t.wait_for_stall()
         count = min(wanted, self._end - self._pos)
+        if t.faults.short_reads:
+            count = max(1, count // 3)
         limit = t.faults.disconnect_after_bytes
         if limit is not None and not t.disconnect_spent:
             remaining = limit - t.bytes_served

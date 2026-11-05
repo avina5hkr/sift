@@ -3,6 +3,7 @@
 Nothing here may start a process: `subprocess.run` and `subprocess.Popen` fail if called.
 """
 
+import gc
 import hashlib
 import shlex
 import socket
@@ -13,9 +14,16 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import pytest
+from adbutils import _adb
 
 from sift.device import adb_transport
-from sift.device.adb_transport import AdbTransport, Limits, StallGuardedStream, plan_sha_batches
+from sift.device.adb_transport import (
+    AdbTransport,
+    Limits,
+    StallGuardedStream,
+    plan_sha_batches,
+    resume_allowance_s,
+)
 from sift.device.transport import (
     DeviceDisconnected,
     DeviceTimeout,
@@ -23,6 +31,7 @@ from sift.device.transport import (
     RemoteEntry,
     RemoteError,
     Transport,
+    TransportError,
 )
 from tests.device.fake_adb_server import S_IFDIR, FakeAdbServer, FakeStat
 
@@ -88,8 +97,8 @@ class Phone:
         }
         if text in fixed:
             return [fixed[text]]
-        if words[:2] == ["tail", "-c"] and words[4:] == ["2>/dev/null"]:
-            data = self.server.files.get(words[3].encode("utf-8", "surrogateescape"), b"")
+        if words[:2] == ["tail", "-c"] and words[3] == "--" and words[5:] == ["2>/dev/null"]:
+            data = self.server.files.get(words[4].encode("utf-8", "surrogateescape"), b"")
             return [data[int(words[2].lstrip("+")) - 1 :]]
         if words and words[0] == "sha256sum":
             return [self._hashes(words)]
@@ -261,11 +270,11 @@ def test_walk_is_depth_first_files_and_symlinks_only(
         "/sdcard/top.txt",
     ]
     assert entries[3].is_symlink
-    # Each folder is checked with LST2 before its LIS2, and every listing is read to the end
-    # on its own connection.
+    # Each folder is checked with LST2 before its LIS2, one folder after another, all on one
+    # sync connection for the whole walk.
     assert server.commands.count(b"LIS2") == 4
     assert server.commands.count(b"LST2") == 4
-    assert server.requests.count(b"sync:") == 4
+    assert server.requests.count(b"sync:") == 1
 
 
 def test_walk_of_a_missing_root_raises_naming_it(transport: AdbTransport) -> None:
@@ -314,7 +323,7 @@ def test_open_read_from_an_offset_uses_one_based_tail(
     with transport.open_read("/sdcard/it's $here.bin", offset) as stream:
         assert stream.read() == data[offset:]
     [request] = [r for r in server.requests if r.startswith(b"exec:")]
-    assert request.startswith(b"exec:tail -c +%d " % (offset + 1))
+    assert request.startswith(b"exec:tail -c +%d -- " % (offset + 1))
     assert b"RECV" not in server.commands
 
 
@@ -717,3 +726,205 @@ def test_a_remote_error_mid_stream_keeps_its_path_on_every_read() -> None:
             stream.read(1)
         assert info.value.path == "/sdcard/a.bin"
     stream.close()
+
+
+# -- fix round 1 --------------------------------------------------------------------------------
+
+
+def test_resume_allowance_covers_the_bytes_tail_must_skip() -> None:
+    limits = Limits()
+    assert resume_allowance_s(0, limits) == 30
+    assert resume_allowance_s(3 * 10**9, limits) == 30
+    assert resume_allowance_s(6 * 10**9, limits) == 60
+
+
+def _clocked_stream(chunks: Iterator[bytes], now: list[float], aborted: threading.Event):
+    return StallGuardedStream(
+        chunks,
+        path="/p",
+        expected_size=None,
+        stall_s=30,
+        first_chunk_stall_s=60,
+        abort=aborted.set,
+        clock=lambda: now[0],
+        poll_s=0.01,
+    )
+
+
+def test_first_chunk_after_the_stall_limit_but_within_the_allowance_is_fine() -> None:
+    now = [0.0]
+    aborted = threading.Event()
+
+    def chunks() -> Iterator[bytes]:
+        now[0] = 45.0  # tail is still skipping: past stall_s, within the allowance
+        time.sleep(0.1)  # give the watchdog time to look
+        yield b"first"
+
+    stream = _clocked_stream(chunks(), now, aborted)
+    assert stream.read() == b"first"
+    assert not aborted.is_set()
+    stream.close()
+
+
+def test_first_chunk_past_the_allowance_times_out() -> None:
+    now = [0.0]
+    aborted = threading.Event()
+
+    def chunks() -> Iterator[bytes]:
+        now[0] = 61.0
+        aborted.wait(5)
+        raise DeviceDisconnected("connection closed")
+        yield b""  # pragma: no cover
+
+    stream = _clocked_stream(chunks(), now, aborted)
+    with pytest.raises(DeviceTimeout):
+        stream.read(1)
+    assert aborted.is_set()
+    stream.close()
+
+
+def test_after_the_first_chunk_the_normal_stall_limit_applies() -> None:
+    now = [0.0]
+    aborted = threading.Event()
+
+    def chunks() -> Iterator[bytes]:
+        yield b"first"
+        now[0] += 31.0  # under the allowance, over stall_s
+        aborted.wait(5)
+        raise DeviceDisconnected("connection closed")
+
+    stream = _clocked_stream(chunks(), now, aborted)
+    assert stream.read(5) == b"first"
+    with pytest.raises(DeviceTimeout):
+        stream.read(1)
+    assert aborted.is_set()
+    stream.close()
+
+
+def test_offset_read_waits_for_tail_to_skip(server: FakeAdbServer, phone: Phone) -> None:
+    # read_stall_s is 0.2 s, but skipping 99 bytes at 100 B/s is allowed 0.99 s.
+    limits = Limits(stat_s=2, list_s=2, read_stall_s=0.2, sha_assumed_bps=100)
+    transport = AdbTransport(server.serial, server.port, limits=limits, host="127.0.0.1")
+    data = bytes(range(200))
+    phone.add_file(b"/sdcard/big.bin", data)
+
+    def slow_tail(command: bytes) -> Iterator[bytes]:
+        time.sleep(0.5)
+        yield data[99:]
+
+    server.exec_handler = slow_tail
+    with transport.open_read("/sdcard/big.bin", 99) as stream:
+        assert stream.read() == data[99:]
+
+
+def test_an_abandoned_stream_is_collected_and_frees_everything(
+    server: FakeAdbServer, phone: Phone, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limits = Limits(stat_s=0.5, list_s=0.5, read_stall_s=2, max_connections=1)
+    transport = AdbTransport(server.serial, server.port, limits=limits, host="127.0.0.1")
+    phone.add_file(b"/sdcard/a.bin", b"x" * 200_000)
+    sockets: list[socket.socket] = []
+    create = _adb.AdbConnection._create_socket
+
+    def tracking(self: object) -> socket.socket:
+        s: socket.socket = create(self)
+        sockets.append(s)
+        return s
+
+    monkeypatch.setattr(_adb.AdbConnection, "_create_socket", tracking)
+    stream = transport.open_read("/sdcard/a.bin")
+    assert stream.read(10) == b"x" * 10
+    del stream
+    gc.collect()
+    assert sockets
+    assert all(s.fileno() == -1 for s in sockets)
+    assert _no_watchdogs_left()
+    assert transport.stat("/sdcard/a.bin") is not None  # the only slot is free again
+
+
+def test_close_from_another_thread_wakes_a_blocked_reader(
+    server: FakeAdbServer, phone: Phone
+) -> None:
+    limits = Limits(stat_s=2, list_s=2, read_stall_s=30)
+    transport = AdbTransport(server.serial, server.port, limits=limits, host="127.0.0.1")
+    phone.add_file(b"/sdcard/a.bin", b"x" * 1000)
+    server.recv_stall_after = 100
+    stream = transport.open_read("/sdcard/a.bin")
+    assert stream.read(100) == b"x" * 100
+    outcome: list[object] = []
+
+    def reader() -> None:
+        try:
+            outcome.append(stream.read(100))
+        except (TransportError, ValueError) as e:
+            outcome.append(e)
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    time.sleep(0.1)  # the reader is now blocked waiting for the phone
+    started = time.monotonic()
+    stream.close()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert time.monotonic() - started < 2
+    assert len(outcome) == 1
+    assert _no_watchdogs_left()
+
+
+@pytest.mark.parametrize("ident", [b"DATA", b"FAIL"])
+def test_oversized_sync_lengths_are_refused(ident: bytes) -> None:
+    a, b = socket.socketpair()
+    with a, b:
+        b.sendall(adb_transport._U32.pack(64 * 1024 + 1))
+        with pytest.raises(TransportError, match="too long") as info:
+            next(adb_transport._recv_chunks(a, "/p", ident))
+        assert type(info.value) is TransportError
+
+
+def test_a_full_64k_data_packet_is_accepted() -> None:
+    a, b = socket.socketpair()
+    with a, b:
+        packet = adb_transport._U32.pack(64 * 1024) + b"z" * 64 * 1024
+        sender = threading.Thread(target=b.sendall, args=(packet,))  # more than the buffer
+        sender.start()
+        assert next(adb_transport._recv_chunks(a, "/p", b"DATA")) == b"z" * 64 * 1024
+        sender.join()
+
+
+_RELATIVE_CALLS = {
+    "stat": lambda t, p: t.stat(p),
+    "list_dir": lambda t, p: t.list_dir(p),
+    "walk": lambda t, p: list(t.walk(p)),
+    "open_read": lambda t, p: t.open_read(p),
+    "open_read_offset": lambda t, p: t.open_read(p, 5),
+    "sha256": lambda t, p: t.sha256(["/sdcard/ok.jpg", p]),
+}
+
+
+@pytest.mark.parametrize("call", list(_RELATIVE_CALLS))
+@pytest.mark.parametrize("path", ["sdcard/a.jpg", "", "-n"])
+def test_relative_paths_are_refused_before_anything_is_sent(
+    transport: AdbTransport, server: FakeAdbServer, call: str, path: str
+) -> None:
+    with pytest.raises(RemoteError) as info:
+        _RELATIVE_CALLS[call](transport, path)
+    assert info.value.path == path
+    assert server.requests == []
+
+
+def test_an_abandoned_walk_frees_its_connection(server: FakeAdbServer, phone: Phone) -> None:
+    limits = Limits(stat_s=0.5, list_s=0.5, read_stall_s=2, max_connections=1)
+    transport = AdbTransport(server.serial, server.port, limits=limits, host="127.0.0.1")
+    phone.add_dir(b"/sdcard/A")
+    phone.add_file(b"/sdcard/A/1.jpg", b"1")
+    phone.add_file(b"/sdcard/A/2.jpg", b"2")
+    unstarted = transport.walk("/sdcard")  # holds nothing until the first next()
+    assert transport.stat("/sdcard/A/1.jpg") is not None
+    del unstarted
+    walking = transport.walk("/sdcard")
+    assert next(walking).path == "/sdcard/A/1.jpg"
+    with pytest.raises(DeviceTimeout, match="connections"):
+        transport.stat("/sdcard/A/2.jpg")  # the walk holds the only connection
+    del walking
+    gc.collect()
+    assert transport.stat("/sdcard/A/2.jpg") is not None

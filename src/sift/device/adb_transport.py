@@ -84,6 +84,7 @@ _ENOTDIR = 20
 _ERRNO_TEXT = {2: "no such file or folder", 13: "permission denied", 20: "not a folder"}
 _MAX_PATH_BYTES = 1024  # adb's limit for a sync path
 _MAX_REQUEST_BYTES = 0xFFFF  # an adb host request's length is 4 hex digits
+_MAX_SYNC_PAYLOAD = 64 * 1024  # adbd's SYNC_DATA_MAX; also the cap for a FAIL message
 _U32 = struct.Struct("<I")
 _RAW_CHUNK = 1 << 16
 _NETWORK_SERIAL = re.compile(r"^[^:\s]+:\d+$|_adb-tls-connect\._tcp")
@@ -131,6 +132,16 @@ def sha_batch_timeout(total_bytes: int, limits: Limits) -> float:
     return max(limits.sha_min_s, total_bytes / limits.sha_assumed_bps)
 
 
+def resume_allowance_s(offset: int, limits: Limits) -> float:
+    """How long a read from `offset` may wait for its first bytes.
+
+    `tail -c +N` reads and throws away the first N-1 bytes before it prints anything, so a
+    resume deep into a big file is silent for a while: `max(read_stall_s, offset /
+    sha_assumed_bps)`. After the first bytes arrive the normal `read_stall_s` applies.
+    """
+    return max(limits.read_stall_s, offset / limits.sha_assumed_bps)
+
+
 def _norm(path: str) -> str:
     return path if path == "/" else path.rstrip("/")
 
@@ -139,8 +150,14 @@ def _join(folder: str, name: str) -> str:
     return f"{folder.rstrip('/')}/{name}"
 
 
+def _require_absolute(path: str) -> None:
+    if not path.startswith("/"):
+        raise RemoteError("Phone paths must start with '/'.", path)
+
+
 def _encode_path(path: str) -> bytes:
     """The bytes of a remote path; RemoteError if it cannot name anything on the phone."""
+    _require_absolute(path)
     try:
         raw = path.encode("utf-8", "surrogateescape")
     except UnicodeEncodeError:
@@ -168,19 +185,98 @@ def _noop() -> None:
     return None
 
 
+class _Watchdog:
+    """The state a stream shares with its watchdog thread.
+
+    The thread runs `_Watchdog.run` and holds only this object, never the stream, so a stream
+    the caller drops is collected (and closed, which stops the thread) like any other object.
+    """
+
+    def __init__(
+        self,
+        *,
+        abort: Callable[[], None],
+        clock: Callable[[], float],
+        poll_s: float,
+        path: str,
+    ) -> None:
+        self._abort = abort
+        self._clock = clock
+        self._poll_s = poll_s
+        self._path = path
+        self._cond = threading.Condition()
+        self._waiting_since: float | None = None
+        self._limit_s = 0.0
+        self._stalled = False
+        self._finished = False
+        self._thread: threading.Thread | None = None
+
+    @property
+    def stalled(self) -> bool:
+        with self._cond:
+            return self._stalled
+
+    def begin_wait(self, limit_s: float) -> None:
+        """The reader is about to wait for the phone, for at most `limit_s` of silence."""
+        with self._cond:
+            self._waiting_since = self._clock()
+            self._limit_s = limit_s
+            if self._thread is None and not self._finished:
+                self._thread = threading.Thread(
+                    target=self.run, name="sift-read-watchdog", daemon=True
+                )
+                self._thread.start()
+            self._cond.notify_all()
+
+    def end_wait(self) -> None:
+        with self._cond:
+            self._waiting_since = None
+
+    def stop(self) -> None:
+        with self._cond:
+            self._finished = True
+            self._cond.notify_all()
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+
+    def run(self) -> None:
+        with self._cond:
+            while not self._finished:
+                since = self._waiting_since
+                if since is None:
+                    self._cond.wait()
+                    continue
+                if self._clock() - since >= self._limit_s:
+                    self._stalled = True
+                    break
+                self._cond.wait(self._poll_s)
+            else:
+                return
+        try:
+            self._abort()
+        except Exception:
+            log.exception("Could not abort a stalled read of %s", self._path)
+
+
 class StallGuardedStream(io.RawIOBase):
     """A read-only stream over an iterator of byte chunks coming from the phone.
 
+    Reads may return fewer bytes than asked for (RawIOBase semantics); callers loop.
+
     - Stall watchdog: while the stream waits for the next chunk, a watchdog thread (one per
       stream, started on the first read, joined on close) checks `clock`. If no chunk arrives
-      within `stall_s`, it calls `abort` (which must unblock the waiting read, e.g. by shutting
-      the socket down; it runs on the watchdog thread and must not free anything the reader
-      may still touch). The read then raises `DeviceTimeout`, and so does every later read.
-      Time the caller spends between reads never counts as a stall.
+      within `stall_s` (or `first_chunk_stall_s` while nothing has arrived yet), it calls
+      `abort`, which must unblock the waiting read (e.g. by shutting the socket down; it runs
+      on the watchdog thread and must not free anything the reader may still touch). The read
+      then raises `DeviceTimeout`, and so does every later read. Time the caller spends
+      between reads never counts as a stall.
     - Early end: if the chunks end before `expected_size` bytes, the read raises
       `DeviceDisconnected` (again on every later read). More bytes than expected is fine (the
       file grew).
-    - `close()` stops the watchdog, closes the chunk iterator and calls `release` exactly once.
+    - `close()` first calls `abort` (so a read blocked on another thread wakes up), then stops
+      the watchdog, closes the chunk iterator and calls `release` exactly once. A stream that
+      is dropped without `close()` is closed when it is collected.
     """
 
     def __init__(
@@ -191,6 +287,7 @@ class StallGuardedStream(io.RawIOBase):
         expected_size: int | None,
         stall_s: float,
         abort: Callable[[], None],
+        first_chunk_stall_s: float | None = None,
         release: Callable[[], None] = _noop,
         clock: Callable[[], float] = time.monotonic,
         poll_s: float | None = None,
@@ -200,19 +297,21 @@ class StallGuardedStream(io.RawIOBase):
         self._path = path
         self._expected = expected_size
         self._stall_s = stall_s
+        self._first_stall_s = stall_s if first_chunk_stall_s is None else first_chunk_stall_s
         self._abort = abort
         self._release: Callable[[], None] | None = release
-        self._clock = clock
-        self._poll_s = poll_s if poll_s is not None else max(min(stall_s / 4, 1.0), 0.001)
         self._pending = memoryview(b"")
         self._received = 0
+        self._got_first = False
         self._ended = False
         self._failure: TransportError | None = None  # re-raised (as a copy) on every read
-        self._cond = threading.Condition()
-        self._waiting_since: float | None = None
-        self._stalled = False
-        self._finished = False
-        self._watchdog: threading.Thread | None = None
+        self._waited_limit_s = stall_s
+        self._watchdog = _Watchdog(
+            abort=abort,
+            clock=clock,
+            poll_s=poll_s if poll_s is not None else max(min(stall_s / 4, 1.0), 0.001),
+            path=path,
+        )
 
     def readable(self) -> bool:
         return True
@@ -245,13 +344,12 @@ class StallGuardedStream(io.RawIOBase):
     def close(self) -> None:
         if self.closed:
             return
-        with self._cond:
-            self._finished = True
-            self._cond.notify_all()
-        watchdog = self._watchdog
-        if watchdog is not None and watchdog is not threading.current_thread():
-            watchdog.join()
         try:
+            try:
+                self._abort()  # wakes a read blocked on another thread
+            except Exception:
+                log.exception("Could not abort the read of %s", self._path)
+            self._watchdog.stop()
             close_chunks = getattr(self._chunks, "close", None)
             if close_chunks is not None:
                 with suppress(ValueError):  # "generator already executing" on another thread
@@ -272,8 +370,10 @@ class StallGuardedStream(io.RawIOBase):
         self._failure = error
         self._raise_failure()
 
-    def _timeout_message(self) -> str:
-        return f"The phone sent nothing for {self._stall_s:g} s while reading {self._path}."
+    def _timeout(self) -> DeviceTimeout:
+        return DeviceTimeout(
+            f"The phone sent nothing for {self._waited_limit_s:g} s while reading {self._path}."
+        )
 
     def _next_chunk(self) -> bytes | None:
         """The next non-empty chunk, or None at a complete end of stream."""
@@ -281,23 +381,25 @@ class StallGuardedStream(io.RawIOBase):
         if self._ended:
             return None
         while True:
-            self._begin_wait()
+            self._waited_limit_s = self._stall_s if self._got_first else self._first_stall_s
+            self._watchdog.begin_wait(self._waited_limit_s)
             try:
                 chunk = next(self._chunks, None)
             except (TransportError, OSError, EOFError) as e:
-                if self._is_stalled():
-                    self._fail(DeviceTimeout(self._timeout_message()))
+                if self._watchdog.stalled:
+                    self._fail(self._timeout())
                 if isinstance(e, TransportError):
                     self._failure = e
                     raise
                 self._fail(DeviceDisconnected(f"Lost the connection while reading {self._path}."))
             finally:
-                self._end_wait()
-            if self._is_stalled():
-                self._fail(DeviceTimeout(self._timeout_message()))
+                self._watchdog.end_wait()
+            if self._watchdog.stalled:
+                self._fail(self._timeout())
             if chunk is None:
                 break
             if chunk:
+                self._got_first = True
                 self._received += len(chunk)
                 return chunk
         self._ended = True
@@ -309,42 +411,6 @@ class StallGuardedStream(io.RawIOBase):
                 )
             )
         return None
-
-    def _is_stalled(self) -> bool:
-        with self._cond:
-            return self._stalled
-
-    def _begin_wait(self) -> None:
-        with self._cond:
-            self._waiting_since = self._clock()
-            if self._watchdog is None:
-                self._watchdog = threading.Thread(
-                    target=self._watch, name="sift-read-watchdog", daemon=True
-                )
-                self._watchdog.start()
-            self._cond.notify_all()
-
-    def _end_wait(self) -> None:
-        with self._cond:
-            self._waiting_since = None
-
-    def _watch(self) -> None:
-        with self._cond:
-            while not self._finished:
-                since = self._waiting_since
-                if since is None:
-                    self._cond.wait()
-                    continue
-                if self._clock() - since >= self._stall_s:
-                    self._stalled = True
-                    break
-                self._cond.wait(self._poll_s)
-            else:
-                return
-        try:
-            self._abort()
-        except Exception:
-            log.exception("Could not abort a stalled read of %s", self._path)
 
 
 def _host_request(sock: socket.socket, payload: bytes, *, fail: type[TransportError]) -> None:
@@ -374,19 +440,26 @@ def _raw_chunks(sock: socket.socket) -> Iterator[bytes]:
         yield chunk
 
 
+def _sync_length(sock: socket.socket, what: str) -> int:
+    """A sync packet's u32 length, refused above 64 KiB rather than read into memory."""
+    length: int = _U32.unpack(_recv_exact(sock, _U32.size))[0]
+    if length > _MAX_SYNC_PAYLOAD:
+        raise TransportError(f"The phone sent a {what} that is too long ({length} bytes).")
+    return length
+
+
 def _recv_chunks(sock: socket.socket, path: str, first: bytes) -> Iterator[bytes]:
     """The DATA payloads of a sync RECV reply whose first 4-byte id was `first`."""
     ident = first
     while True:
         if ident == b"DATA":
-            (length,) = _U32.unpack(_recv_exact(sock, _U32.size))
-            yield _recv_exact(sock, length)
+            yield _recv_exact(sock, _sync_length(sock, "data packet"))
         elif ident == b"DONE":
             _recv_exact(sock, _U32.size)
             return
         elif ident == b"FAIL":
-            (length,) = _U32.unpack(_recv_exact(sock, _U32.size))
-            raise RemoteError(_recv_exact(sock, length).decode("utf-8", "replace"), path)
+            message = _recv_exact(sock, _sync_length(sock, "error message"))
+            raise RemoteError(message.decode("utf-8", "replace"), path)
         else:
             raise TransportError(f"Unexpected sync reply: {ident!r}")
         ident = _recv_exact(sock, 4)
@@ -533,36 +606,46 @@ class AdbTransport:
     def walk(self, root: str) -> Iterator[RemoteEntry]:
         """Depth-first files and symlinks under `root`; symlinks are never descended into.
 
-        `root` itself is listed at call time (so a missing root raises here). If `root` is a
-        symlink to a folder, as `/sdcard` is on a phone, the folder it points at is listed.
-        Each folder is listed completely, on its own connection, before anything inside it
-        is yielded, so no connection stays open while the caller holds the iterator.
+        If `root` is a symlink to a folder, as `/sdcard` is on a phone, the folder it points
+        at is listed. The walk starts on the first `next()`. It uses one sync connection (and
+        one connection slot) for the whole walk, from the first `next()` until the iterator
+        is exhausted, closed or collected. Folders are handled one after another on it: each
+        is checked with LST2, then its LIS2 listing is read to the end before anything else
+        is sent, so nothing ever overlaps on the connection.
         """
-        return self._walk(self._list_folder(_norm(root)))
+        return self._walk(_norm(root))
 
-    def _walk(self, top: list[RemoteEntry]) -> Iterator[RemoteEntry]:
-        stack = [iter(top)]
-        while stack:
-            entry = next(stack[-1], None)
-            if entry is None:
-                stack.pop()
-            elif entry.is_dir:
-                stack.append(iter(self._list_folder(entry.path)))
-            else:
-                yield entry
+    def _walk(self, root: str) -> Iterator[RemoteEntry]:
+        _encode_path(root)  # refuse a bad root before connecting
+        with self._sync(self.limits.list_s) as sync:
+            stack = [iter(self._list_with(sync, root))]
+            while stack:
+                entry = next(stack[-1], None)
+                if entry is None:
+                    stack.pop()
+                elif entry.is_dir:
+                    stack.append(iter(self._list_with(sync, entry.path)))
+                else:
+                    yield entry
 
     def _list_folder(self, folder: str) -> list[RemoteEntry]:
-        """Check `folder` with LST2, then list it with LIS2 on the same, fresh connection."""
-        raw = _encode_path(folder)
+        """Check and list one folder on a connection of its own."""
+        _encode_path(folder)
         with self._sync(self.limits.list_s) as sync:
-            st = sync.stat(raw)
-            if st.error == 0 and stat_mode.S_ISLNK(st.mode):
-                st = sync.stat(raw + b"/")  # a trailing slash makes lstat follow the link
-            if st.error:
-                raise RemoteError(f"Cannot list {folder}: {_describe(st.error)}.", folder)
-            if not stat_mode.S_ISDIR(st.mode):
-                raise RemoteError(f"Cannot list {folder}: it is not a folder.", folder)
-            listed = sorted(sync.list(raw))
+            return self._list_with(sync, folder)
+
+    @staticmethod
+    def _list_with(sync: Sync2, folder: str) -> list[RemoteEntry]:
+        """Check `folder` with LST2, then list it with LIS2 (read to the end) on `sync`."""
+        raw = _encode_path(folder)
+        st = sync.stat(raw)
+        if st.error == 0 and stat_mode.S_ISLNK(st.mode):
+            st = sync.stat(raw + b"/")  # a trailing slash makes lstat follow the link
+        if st.error:
+            raise RemoteError(f"Cannot list {folder}: {_describe(st.error)}.", folder)
+        if not stat_mode.S_ISDIR(st.mode):
+            raise RemoteError(f"Cannot list {folder}: it is not a folder.", folder)
+        listed = sorted(sync.list(raw))
         entries: list[RemoteEntry] = []
         for name, child_stat in listed:
             child = _join(folder, name.decode("utf-8", "surrogateescape"))
@@ -609,8 +692,10 @@ class AdbTransport:
                 # shows up as a short stream, which raises DeviceDisconnected.
                 chunks = _raw_chunks(sock)
                 expected = max(entry.size - offset, 0)
+            # tail is silent while it skips `offset` bytes, so the first chunk gets longer.
+            first_chunk_s = resume_allowance_s(offset, self.limits)
             # The watchdog is the stall detector; the socket timeout is only a backstop.
-            sock.settimeout(self.limits.read_stall_s * 2)
+            sock.settimeout(first_chunk_s * 2)
         except BaseException:
             try:
                 conn.close()
@@ -633,6 +718,7 @@ class AdbTransport:
             path=path,
             expected_size=expected,
             stall_s=self.limits.read_stall_s,
+            first_chunk_stall_s=first_chunk_s,
             abort=abort,
             release=release,
         )
@@ -640,6 +726,8 @@ class AdbTransport:
 
     def sha256(self, paths: list[str]) -> dict[str, str | None]:
         """Hashes computed on the phone; None for missing, unreadable, folders and symlinks."""
+        for path in paths:
+            _require_absolute(path)
         result: dict[str, str | None] = dict.fromkeys(paths)
         sizes: dict[str, int] = {}
         sendable: list[tuple[str, bytes]] = []

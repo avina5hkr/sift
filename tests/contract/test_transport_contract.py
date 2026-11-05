@@ -11,7 +11,7 @@ from sift.device.fake_phone import (
     ZERO_BYTE_FILE,
 )
 from sift.device.transport import RemoteEntry, RemoteError, Transport
-from tests.contract.conftest import realphone_sample_dir
+from tests.contract.helpers import realphone_sample_dir
 
 CANDIDATE_ROOTS = [
     "/sdcard/DCIM",
