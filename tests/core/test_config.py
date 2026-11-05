@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from sift.core.config import Config, load_config, save_config
+import pytest
+from pydantic import ValidationError
+
+from sift.core.config import BackupSet, Config, load_config, save_config
 
 
 def test_missing_file_gives_spec_defaults(tmp_path: Path) -> None:
@@ -146,31 +149,82 @@ def test_invalid_set_entry_dropped_others_kept(tmp_path: Path) -> None:
     assert any("duplicate" in x for x in w)
 
 
-def test_set_exclude_must_start_with_sdcard(tmp_path: Path) -> None:
+def _write_set(f: Path, body: str, name: str = "Camera") -> None:
+    f.write_text(f'[[backup.sets]]\nname = "{name}"\n{body}enabled = true\ndeletable = true\n')
+
+
+def test_set_exclude_outside_sdcard_is_dropped_set_kept(tmp_path: Path) -> None:
     f = tmp_path / "config.toml"
-    f.write_text(
-        '[[backup.sets]]\nname = "A"\npaths = ["/sdcard/DCIM"]\nexclude = ["/tmp/x"]\n'
-        "enabled = true\ndeletable = true\n"
-        '[[backup.sets]]\nname = "B"\npaths = ["/sdcard/Music"]\nenabled = true\n'
-        "deletable = true\n"
-    )
+    _write_set(f, 'paths = ["/sdcard/DCIM"]\nexclude = ["/tmp/x"]\n', name="A")
     cfg, w = load_config(f)
-    assert [s.name for s in cfg.backup.sets] == ["B"]
-    assert any('backup.sets[0] ("A")' in x for x in w)
+    assert [(s.name, s.exclude) for s in cfg.backup.sets] == [("A", [])]
+    assert 'backup.sets[0] ("A").exclude: "/tmp/x" is not allowed (outside /sdcard); dropped' in w
 
 
-def test_no_valid_sets_uses_defaults(tmp_path: Path) -> None:
+FALLBACK_WARNING = (
+    "no valid backup sets; using the default sets with deleting turned off "
+    "until the settings are fixed"
+)
+DEFAULT_NAMES = [s.name for s in Config().backup.sets]
+
+
+def test_no_valid_sets_falls_back_with_deleting_off(tmp_path: Path) -> None:
     f = tmp_path / "config.toml"
     f.write_text('[[backup.sets]]\nname = "Bad"\npaths = []\nenabled = true\ndeletable = true\n')
     cfg, w = load_config(f)
-    assert cfg.backup.sets == Config().backup.sets
-    assert "no valid backup sets; using the default sets" in w
+    assert [s.name for s in cfg.backup.sets] == DEFAULT_NAMES
+    assert all(not s.deletable for s in cfg.backup.sets)
+    assert FALLBACK_WARNING in w
     assert any('"Bad"' in x for x in w)
 
     f.write_text("[backup]\nsets = []\n")
     cfg, w = load_config(f)
-    assert cfg.backup.sets == Config().backup.sets
-    assert "no valid backup sets; using the default sets" in w
+    assert [s.name for s in cfg.backup.sets] == DEFAULT_NAMES
+    assert all(not s.deletable for s in cfg.backup.sets)
+    assert FALLBACK_WARNING in w
+
+    f.write_text('[backup]\nsets = "oops"\n')
+    cfg, w = load_config(f)
+    assert all(not s.deletable for s in cfg.backup.sets)
+    assert FALLBACK_WARNING in w
+
+
+def test_fallback_does_not_mutate_default_sets(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text("[backup]\nsets = []\n")
+    load_config(f)
+    by = {s.name: s for s in Config().backup.sets}
+    assert by["Camera"].deletable
+    assert not by["Documents"].deletable
+
+
+def test_no_sets_key_keeps_spec_deletable_values(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text('[backup]\ndevice_label = "X"\n')
+    cfg, w = load_config(f)
+    by = {s.name: s for s in cfg.backup.sets}
+    assert by["Camera"].deletable
+    assert not by["Documents"].deletable
+    assert FALLBACK_WARNING not in w
+    cfg, w = load_config(tmp_path / "missing.toml")
+    assert cfg.backup.sets[0].deletable
+    assert w == []
+
+
+def test_all_valid_sets_disabled_are_kept(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[[backup.sets]]\nname = "A"\npaths = ["/sdcard/DCIM"]\nenabled = false\n'
+        "deletable = true\n"
+        '[[backup.sets]]\nname = "B"\npaths = ["/sdcard/Music"]\nenabled = false\n'
+        "deletable = false\n"
+    )
+    cfg, w = load_config(f)
+    assert [(s.name, s.enabled, s.deletable) for s in cfg.backup.sets] == [
+        ("A", False, True),
+        ("B", False, False),
+    ]
+    assert w == []
 
 
 def test_unknown_key_in_set_warns_but_keeps_entry(tmp_path: Path) -> None:
@@ -241,3 +295,112 @@ def test_save_into_file_with_sets_keeps_keys_out_of_the_sets(tmp_path: Path) -> 
     assert w == []
     assert again == cfg
     assert [s.name for s in again.backup.sets] == ["Camera"]
+
+
+def test_storage_emulated_prefix_is_rewritten(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(
+        f,
+        'paths = ["/storage/emulated/0/DCIM"]\n'
+        'exclude = ["/storage/emulated/0/DCIM/Screenshots"]\n',
+    )
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].paths == ["/sdcard/DCIM"]
+    assert cfg.backup.sets[0].exclude == ["/sdcard/DCIM/Screenshots"]
+    assert w == []
+
+
+@pytest.mark.parametrize(
+    ("bad", "reason"),
+    [
+        ("/data/local", "outside /sdcard"),
+        ("/sdcardX/DCIM", "outside /sdcard"),
+        ("/sdcard/", "no folder after /sdcard/"),
+        ("/sdcard", "no folder after /sdcard/"),
+        ("/storage/emulated/0/", "no folder after /sdcard/"),
+        ("/sdcard/DCIM/../Documents", '".." segment'),
+        ("/sdcard/./DCIM", '"." segment'),
+        ("/sdcard/DCIM//Camera", "empty segment"),
+        ("/sdcard/DCIM/", "trailing slash"),
+    ],
+)
+def test_bad_path_entry_dropped_rest_of_set_kept(tmp_path: Path, bad: str, reason: str) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(f, f'paths = ["{bad}", "/sdcard/Music"]\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].paths == ["/sdcard/Music"]
+    assert f'backup.sets[0] ("Camera").paths: "{bad}" is not allowed ({reason}); dropped' in w
+    assert len(w) == 1
+
+
+def test_set_losing_all_paths_is_dropped(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[[backup.sets]]\nname = "Bad"\npaths = ["/sdcard/../x", "/etc"]\n'
+        "enabled = true\ndeletable = true\n"
+        '[[backup.sets]]\nname = "Ok"\npaths = ["/sdcard/DCIM"]\nenabled = true\n'
+        "deletable = true\n"
+    )
+    cfg, w = load_config(f)
+    assert [s.name for s in cfg.backup.sets] == ["Ok"]
+    assert sum("backup.sets[0]" in x and ".paths:" in x for x in w) == 2
+    assert any(x.startswith('backup.sets[0] ("Bad"):') and x.endswith("dropped") for x in w)
+    assert FALLBACK_WARNING not in w
+
+    f.write_text(
+        '[[backup.sets]]\nname = "Bad"\npaths = ["/etc"]\nenabled = true\ndeletable = true\n'
+    )
+    cfg, w = load_config(f)
+    assert [s.name for s in cfg.backup.sets] == DEFAULT_NAMES
+    assert FALLBACK_WARNING in w
+
+
+@pytest.mark.parametrize(
+    "bad", ["/sdcard/Music", "/sdcard/DCIMX", "/sdcard/DCIMX/Cam", "/sdcard/DCIM"]
+)
+def test_exclude_must_lie_inside_the_sets_paths(tmp_path: Path, bad: str) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(f, f'paths = ["/sdcard/DCIM"]\nexclude = ["{bad}", "/sdcard/DCIM/Screenshots"]\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].exclude == ["/sdcard/DCIM/Screenshots"]
+    assert (
+        f'backup.sets[0] ("Camera").exclude: "{bad}" is not inside any of the set\'s paths; dropped'
+        in w
+    )
+
+
+def test_bad_exclude_entries_use_path_rules(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(f, 'paths = ["/sdcard/DCIM"]\nexclude = ["/sdcard/DCIM/../x", "/sdcard/DCIM/a/"]\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].exclude == []
+    assert any('".." segment' in x for x in w)
+    assert any("trailing slash" in x for x in w)
+
+
+def test_legacy_roots_follow_the_path_rules(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text('[backup]\nroots = ["/storage/emulated/0/DCIM", "/sdcard/..", "/sdcard/Music/"]\n')
+    cfg, w = load_config(f)
+    assert [(s.name, s.paths) for s in cfg.backup.sets] == [("Custom", ["/sdcard/DCIM"])]
+    assert any('"/sdcard/.."' in x for x in w)
+    assert any("trailing slash" in x for x in w)
+    assert any("backup.roots is replaced by backup.sets" in x for x in w)
+
+    f.write_text('[backup]\nroots = ["/etc"]\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.sets == Config().backup.sets  # spec defaults, not the fallback
+    assert any("backup.roots" in x and "ignored" in x for x in w)
+
+
+def test_model_rejects_bad_paths_directly() -> None:
+    with pytest.raises(ValidationError):
+        BackupSet(name="A", paths=["/sdcard/../x"], enabled=True, deletable=True)
+    with pytest.raises(ValidationError):
+        BackupSet(
+            name="A",
+            paths=["/sdcard/DCIM"],
+            exclude=["/sdcard/DCIMX"],
+            enabled=True,
+            deletable=True,
+        )

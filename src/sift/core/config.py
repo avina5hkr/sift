@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
 import tomlkit
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from tomlkit.exceptions import TOMLKitError
 
 SDCARD_PREFIX = "/sdcard/"
@@ -35,11 +35,34 @@ class _Section(BaseModel):
     model_config = ConfigDict(strict=True, validate_assignment=True)
 
 
-def _check_sdcard_paths(values: list[str]) -> list[str]:
-    for v in values:
-        if not v.startswith(SDCARD_PREFIX):
-            raise ValueError(f"{v!r} must start with {SDCARD_PREFIX!r}")
-    return values
+STORAGE_PREFIX = "/storage/emulated/0/"
+
+
+def normalize_set_path(value: str) -> str:
+    """Return the stored form of a set path, or raise ValueError saying why it is not allowed.
+
+    Rules: under /sdcard/ (a /storage/emulated/0/ prefix is rewritten to /sdcard/), at least one
+    segment after it, no trailing slash, and no empty, "." or ".." segment.
+    """
+    if value.startswith(STORAGE_PREFIX):
+        value = SDCARD_PREFIX + value[len(STORAGE_PREFIX) :]
+    if value.rstrip("/") == "/sdcard":
+        raise ValueError("no folder after /sdcard/")
+    if not value.startswith(SDCARD_PREFIX):
+        raise ValueError("outside /sdcard")
+    if value.endswith("/"):
+        raise ValueError("trailing slash")
+    for seg in value[len(SDCARD_PREFIX) :].split("/"):
+        if seg == "":
+            raise ValueError("empty segment")
+        if seg in ("..", "."):
+            raise ValueError(f'"{seg}" segment')
+    return value
+
+
+def _is_inside(path: str, root: str) -> bool:
+    """True when `path` is below `root` by whole segments (so /sdcard/DCIMX is not inside DCIM)."""
+    return path.startswith(root + "/")
 
 
 class BackupSet(_Section):
@@ -59,8 +82,21 @@ class BackupSet(_Section):
 
     @field_validator("paths", "exclude")
     @classmethod
-    def _under_sdcard(cls, v: list[str]) -> list[str]:
-        return _check_sdcard_paths(v)
+    def _normalized(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for item in v:
+            try:
+                out.append(normalize_set_path(item))
+            except ValueError as err:
+                raise ValueError(f"{item!r} is not allowed ({err})") from err
+        return out
+
+    @model_validator(mode="after")
+    def _exclude_inside_paths(self) -> BackupSet:
+        for ex in self.exclude:
+            if not any(_is_inside(ex, root) for root in self.paths):
+                raise ValueError(f"exclude {ex!r} is not inside any of the set's paths")
+        return self
 
 
 # Spec section 7, "Backup sets" table, in table order. "Custom" has no paths so it is not here.
@@ -114,6 +150,11 @@ DEFAULT_SETS: list[BackupSet] = [
 
 def _default_sets() -> list[BackupSet]:
     return [s.model_copy(deep=True) for s in DEFAULT_SETS]
+
+
+def _fallback_sets() -> list[BackupSet]:
+    """Default sets for a broken config: same sets, but nothing may be deleted."""
+    return [s.model_copy(deep=True, update={"deletable": False}) for s in DEFAULT_SETS]
 
 
 class PhoneConfig(_Section):
@@ -308,10 +349,67 @@ def _valid_items(
     return kept
 
 
+_FALLBACK_WARNING = (
+    "no valid backup sets; using the default sets with deleting turned off "
+    "until the settings are fixed"
+)
+
+
+def _clean_paths(
+    raw: object, where: str, warnings: list[str], inside: list[str] | None = None
+) -> object:
+    """Drop each invalid entry of a paths/exclude list with its own warning.
+
+    `inside` (for exclude) is the set's cleaned paths; an entry outside all of them is dropped.
+    Anything that is not a list of strings is returned untouched for the model to reject.
+    """
+    if not isinstance(raw, list):
+        return raw
+    kept: list[Any] = []
+    for item in raw:
+        if not isinstance(item, str):
+            kept.append(item)
+            continue
+        try:
+            norm = normalize_set_path(item)
+        except ValueError as err:
+            warnings.append(f'{where}: "{item}" is not allowed ({err}); dropped')
+            continue
+        if inside is not None and not any(_is_inside(norm, root) for root in inside):
+            warnings.append(f'{where}: "{item}" is not inside any of the set\'s paths; dropped')
+            continue
+        kept.append(norm)
+    return kept
+
+
+def _build_set(
+    entry: dict[str, Any], label: str, paths_where: str, warnings: list[str]
+) -> BackupSet | None:
+    known: dict[str, Any] = {}
+    for key, value in entry.items():
+        if key in BackupSet.model_fields:
+            known[key] = value
+        else:
+            warnings.append(f"{label}.{key}: unknown setting, ignored")
+    if "paths" in known:
+        known["paths"] = _clean_paths(known["paths"], paths_where, warnings)
+    if "exclude" in known:
+        roots = known.get("paths")
+        inside = [p for p in roots if isinstance(p, str)] if isinstance(roots, list) else []
+        known["exclude"] = _clean_paths(known["exclude"], f"{label}.exclude", warnings, inside)
+    try:
+        item = BackupSet.model_validate(known)
+    except ValidationError as err:
+        warnings.append(f"{label}: {_describe(err)}; dropped")
+        return None
+    return item
+
+
 def _load_sets(raw: object, warnings: list[str]) -> list[BackupSet]:
     if not isinstance(raw, list):
-        warnings.append("backup.sets: invalid value, using the default")
-        return _default_sets()
+        warnings.append("backup.sets: invalid value, not a list of tables")
+        warnings.append(_FALLBACK_WARNING)
+        return _fallback_sets()
     sets: list[BackupSet] = []
     seen: set[str] = set()
     for i, entry in enumerate(raw):
@@ -320,16 +418,8 @@ def _load_sets(raw: object, warnings: list[str]) -> list[BackupSet]:
             continue
         shown = entry.get("name")
         label = f'backup.sets[{i}] ("{shown if isinstance(shown, str) else "?"}")'
-        known: dict[str, Any] = {}
-        for key, value in entry.items():
-            if key in BackupSet.model_fields:
-                known[key] = value
-            else:
-                warnings.append(f"{label}.{key}: unknown setting, ignored")
-        try:
-            item = BackupSet.model_validate(known)
-        except ValidationError as err:
-            warnings.append(f"{label}: {_describe(err)}; dropped")
+        item = _build_set(entry, label, f"{label}.paths", warnings)
+        if item is None:
             continue
         if item.name in seen:
             warnings.append(f"{label}: duplicate name, dropped")
@@ -339,8 +429,8 @@ def _load_sets(raw: object, warnings: list[str]) -> list[BackupSet]:
             warnings.append(f"{label}.{_FAST_NOTE}")
         sets.append(item)
     if not sets:
-        warnings.append("no valid backup sets; using the default sets")
-        return _default_sets()
+        warnings.append(_FALLBACK_WARNING)
+        return _fallback_sets()
     return sets
 
 
@@ -351,11 +441,9 @@ def _load_backup(table: dict[str, Any], warnings: list[str]) -> BackupConfig:
         if "roots" in table:
             warnings.append("backup.roots is ignored because backup.sets is present")
     elif "roots" in table:
-        try:
-            custom = BackupSet.model_validate(
-                {"name": "Custom", "paths": table["roots"], "enabled": True, "deletable": False}
-            )
-        except ValidationError:
+        legacy = {"name": "Custom", "paths": table["roots"], "enabled": True, "deletable": False}
+        custom = _build_set(legacy, "backup.roots", "backup.roots", warnings)
+        if custom is None:
             warnings.append("backup.roots: invalid value, ignored")
         else:
             kept["sets"] = [custom]
