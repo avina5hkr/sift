@@ -42,6 +42,10 @@ _HOST = "127.0.0.1"
 _START_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 10.0
 _log = logging.getLogger("sift.app")
+FAKE_NEEDS_HOME_MESSAGE = (
+    "Fake-phone mode needs a separate data folder. "
+    "Set SIFT_HOME to a test folder (make dev does this)."
+)
 
 
 def bind_socket(port: int = 0) -> socket.socket:
@@ -241,6 +245,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    mode = tracker_mode(fake_phone=args.fake_phone, no_window=args.no_window, env=os.environ)
+    if mode == "fake" and not os.environ.get("SIFT_HOME"):
+        # The fake phone would be stored as "the first phone ever seen" in the real database,
+        # and the owner's real phone would then show as a different phone for good.
+        print(FAKE_NEEDS_HOME_MESSAGE)
+        return 2
+
     paths = AppPaths.default()
     paths.ensure()
     lock = SingleInstanceLock(paths.lock)
@@ -297,7 +308,6 @@ def main(argv: list[str] | None = None) -> int:
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
         handle = start_server(ctx, sock)
-        mode = tracker_mode(fake_phone=args.fake_phone, no_window=args.no_window, env=os.environ)
         tracker = build_tracker(mode, ctx, os.environ)
         if tracker is not None:
             ctx.tracker = tracker

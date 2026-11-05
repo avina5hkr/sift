@@ -75,7 +75,12 @@ def list_devices(ctx: Ctx) -> list[StoredDevice]:
         rows = conn.execute(
             "SELECT uuid, serial, model, android_version, last_seen_at FROM device ORDER BY id"
         ).fetchall()
-    return [StoredDevice(**dict(zip(StoredDevice.model_fields, row, strict=True))) for row in rows]
+    return [
+        StoredDevice(
+            uuid=row[0], serial=row[1], model=row[2], android_version=row[3], last_seen_at=row[4]
+        )
+        for row in rows
+    ]
 
 
 @router.post("/devices/retry", status_code=204)

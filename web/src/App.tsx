@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 import { Navigate, Route, Routes, useNavigate } from 'react-router'
 import { ConfigWarnings } from './components/ConfigWarnings'
 import { DeviceBanner } from './components/DeviceBanner'
@@ -25,7 +26,18 @@ export default function App() {
     mutationFn: () => apiFetch<void>('/api/devices/retry', { method: 'POST' }),
     onSettled: () => qc.invalidateQueries({ queryKey: ['status'] }),
   })
-  const onRetry = () => retry.mutate()
+  const deviceState = status.data?.device?.state
+  const resetRetry = retry.reset
+  // A failure message belongs to the situation it was shown in; drop it when the phone changes.
+  useEffect(() => resetRetry(), [deviceState, resetRetry])
+  const onRetry = () => {
+    if (!retry.isPending) retry.mutate()
+  }
+  const retryError = retry.error
+    ? retry.error instanceof ApiError
+      ? retry.error.message
+      : 'Sift could not retry just now. Try again in a moment.'
+    : null
 
   const errorMessage = status.error
     ? status.error instanceof ApiError
@@ -35,8 +47,8 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col">
-      <StatusBar status={status.data} onOpenSettings={() => navigate('/settings')} onRetry={onRetry} />
-      <DeviceBanner device={status.data?.device} onRetry={onRetry} />
+      <StatusBar status={status.data} onOpenSettings={() => navigate('/settings')} onRetry={onRetry} retrying={retry.isPending} />
+      <DeviceBanner device={status.data?.device} onRetry={onRetry} retrying={retry.isPending} error={retryError} />
       <ConfigWarnings warnings={status.data?.app.config_warnings} />
       {errorMessage && (
         <div

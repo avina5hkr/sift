@@ -118,8 +118,7 @@ def test_locate_reports_missing_in_plain_words(paths):
     loc = manager(paths).locate()
     assert (loc.status, loc.path, loc.version) == (AdbStatus.missing, None, None)
     assert loc.message == (
-        "adb was not found. Sift can download Google's platform-tools for you, "
-        "or you can set phone.adb_path in config.toml."
+        "adb was not found. Install Android platform-tools, or set phone.adb_path in config.toml."
     )
 
 

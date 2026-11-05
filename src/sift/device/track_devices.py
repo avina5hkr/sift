@@ -6,7 +6,7 @@ of `serial<TAB>state<LF>` lines. An empty message means no devices.
 
 This speaks the protocol directly instead of using adbutils, so no connection failure can ever
 lead to an adb program being started, and `close()` (from any thread) ends a blocked reader at
-once: it shuts the socket down, which wakes the `recv`.
+once: it shuts the socket down, which wakes the `recv` (the reader then closes the descriptor).
 """
 
 import contextlib
@@ -64,6 +64,7 @@ class TrackDevices:
     ) -> None:
         self._lock = threading.Lock()
         self._closed = False
+        self._reading = False  # a reader is inside `__iter__`: it closes the socket, not close()
         self._idle_s = idle_s
         try:
             self._sock = socket.create_connection((host, port), timeout=timeout_s)
@@ -95,6 +96,10 @@ class TrackDevices:
         return data
 
     def __iter__(self) -> Iterator[Snapshot | None]:
+        with self._lock:
+            if self._closed:
+                return
+            self._reading = True
         buf = bytearray()
         try:
             while True:
@@ -121,6 +126,8 @@ class TrackDevices:
                     raise DeviceDisconnected("The adb server closed the device list.")
                 buf += chunk
         finally:
+            with self._lock:
+                self._reading = False
             self.close()
 
     @staticmethod
@@ -141,12 +148,17 @@ class TrackDevices:
     def close(self) -> None:
         """End the stream; a reader blocked in another thread returns promptly. Idempotent."""
         with self._lock:
-            if self._closed:
-                return
+            first = not self._closed
             self._closed = True
-        with contextlib.suppress(OSError):
-            self._sock.shutdown(socket.SHUT_RDWR)
-        self._sock.close()
+            reading = self._reading
+        if first:
+            with contextlib.suppress(OSError):
+                self._sock.shutdown(socket.SHUT_RDWR)
+        if not reading:
+            # While a reader is inside `__iter__` the socket stays open until it leaves: closing
+            # the descriptor under a reader that is about to wait on it can lose the wake-up
+            # (the wait then lasts until the idle timeout). Shutdown alone wakes it reliably.
+            self._sock.close()
 
     def __enter__(self) -> TrackDevices:
         return self

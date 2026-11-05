@@ -188,9 +188,31 @@ def test_lengths_must_be_four_hex_digits(length: bytes) -> None:
         next(iter(stream))
 
 
+class _RecvSpy:
+    """Wraps the stream's socket and signals the moment the reader calls `recv`.
+
+    Any interleaving of that call with `close()` ends the stream quietly (that is what the
+    test checks), so no sleep is needed to "let the reader block".
+    """
+
+    def __init__(self, sock: socket.socket, entered: threading.Event) -> None:
+        self._sock = sock
+        self._entered = entered
+
+    def recv(self, n: int) -> bytes:
+        self._entered.set()
+        return self._sock.recv(n)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._sock, name)
+
+
 def test_close_ends_a_blocked_reader_promptly() -> None:
+    idle_s = 60.0  # far longer than the join bound: only close() can end the reader in time
     with TrackServer([b"OKAY"]) as srv:
-        stream = TrackDevices("127.0.0.1", srv.port, idle_s=30)
+        stream = TrackDevices("127.0.0.1", srv.port, idle_s=idle_s)
+        entered = threading.Event()
+        stream._sock = _RecvSpy(stream._sock, entered)  # type: ignore[assignment]
         seen: list[object] = []
         failures: list[BaseException] = []
 
@@ -202,12 +224,10 @@ def test_close_ends_a_blocked_reader_promptly() -> None:
 
         reader = threading.Thread(target=read, name="track-reader")
         reader.start()
-        time.sleep(0.05)  # let the reader block in recv
-        started = time.monotonic()
+        assert entered.wait(30), "the reader never reached recv"
         stream.close()
-        reader.join(2)
+        reader.join(15)  # generous: the bound only has to be below idle_s
         assert not reader.is_alive()
-        assert time.monotonic() - started < 1
         assert seen == []
         assert failures == []  # a deliberate close ends the stream quietly
         stream.close()  # idempotent

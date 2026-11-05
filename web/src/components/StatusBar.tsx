@@ -9,6 +9,8 @@ type Props = {
   onOpenSettings?: () => void
   /** Look for the phone again (POST /api/devices/retry); shown next to a phone held by another tool. */
   onRetry?: () => void
+  /** A Retry request is in flight: the button is disabled. */
+  retrying?: boolean
 }
 
 const USB2_TIP = 'Use a USB 3 cable in a direct port for faster backups.'
@@ -55,7 +57,7 @@ function macFolderLabel(folder: StatusResponse['mac_folder']): string {
   return folder.free_bytes == null ? name : `${name} · ${formatBytes(folder.free_bytes)} free`
 }
 
-export function StatusBar({ status, onOpenSettings, onRetry }: Props) {
+export function StatusBar({ status, onOpenSettings, onRetry, retrying = false }: Props) {
   const connected = useEventStore((s) => s.connected)
   const folder = status?.mac_folder
   const phone = phoneChip(status?.device)
@@ -83,8 +85,9 @@ export function StatusBar({ status, onOpenSettings, onRetry }: Props) {
         <button
           type="button"
           onClick={onRetry}
+          disabled={retrying}
           aria-label="Retry connecting to the phone"
-          className="rounded-full border border-neutral-300 px-3 py-1 text-sm hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+          className="rounded-full border border-neutral-300 px-3 py-1 text-sm hover:bg-neutral-100 disabled:opacity-60 dark:border-neutral-700 dark:hover:bg-neutral-800"
         >
           Retry
         </button>

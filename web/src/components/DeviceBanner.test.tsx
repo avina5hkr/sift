@@ -49,3 +49,14 @@ test.each(['no_device', 'unauthorized', 'wrong_device'] as const)('%s has no act
   render(<DeviceBanner device={device(state)} onRetry={vi.fn()} />)
   expect(screen.queryByRole('button')).not.toBeInTheDocument()
 })
+
+test('Retry is disabled while a request is pending', () => {
+  render(<DeviceBanner device={device('held_by_other')} onRetry={vi.fn()} retrying />)
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled()
+})
+
+test('shows a plain-words reason when Retry failed', () => {
+  render(<DeviceBanner device={device('offline')} onRetry={vi.fn()} error="Sift is not looking for a phone right now." />)
+  expect(screen.getByRole('alert')).toHaveTextContent('Sift is not looking for a phone right now.')
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled()
+})

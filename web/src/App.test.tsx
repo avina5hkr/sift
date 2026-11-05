@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -117,4 +117,76 @@ test('a connected phone shows its chip and no device banner', async () => {
   renderApp('/backup')
   expect(await screen.findByText('TestPhone · USB · 87% · 12.0 GB free')).toBeInTheDocument()
   expect(screen.queryByTestId('device-banner')).toBeNull()
+})
+
+const HELD = {
+  ...STATUS,
+  device: {
+    state: 'held_by_other',
+    message: 'Another tool may be using the phone. Close it, then press Retry.',
+    serial: null,
+    model: null,
+    android_version: null,
+    battery_pct: null,
+    free_bytes: null,
+    total_bytes: null,
+    link_mbps: null,
+    usb2_hint: false,
+    device_uuid: null,
+  },
+}
+
+test('Retry is disabled while its request is pending, then works again', async () => {
+  let finish: (r: Response) => void = () => undefined
+  const pending = new Promise<Response>((resolve) => (finish = resolve))
+  const fetchMock = vi.fn((url: string) =>
+    url === '/api/devices/retry' ? pending : Promise.resolve(new Response(JSON.stringify(HELD), { status: 200 })),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  renderApp('/backup')
+  const banner = await screen.findByTestId('device-banner')
+  const button = within(banner).getByRole('button', { name: 'Retry' })
+  await userEvent.click(button)
+  expect(button).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Retry connecting to the phone' })).toBeDisabled()
+  await userEvent.click(button) // a second click while pending sends nothing
+  expect(fetchMock.mock.calls.filter(([url]) => url === '/api/devices/retry')).toHaveLength(1)
+  finish(new Response(null, { status: 204 }))
+  await waitFor(() => expect(button).toBeEnabled())
+})
+
+test('a failed Retry shows the plain server message in the banner', async () => {
+  const body = { code: 'no_tracker', message: 'Sift is not looking for a phone right now.', detail: null }
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) =>
+      Promise.resolve(
+        url === '/api/devices/retry'
+          ? new Response(JSON.stringify(body), { status: 409 })
+          : new Response(JSON.stringify(HELD), { status: 200 }),
+      ),
+    ),
+  )
+  renderApp('/backup')
+  const banner = await screen.findByTestId('device-banner')
+  await userEvent.click(within(banner).getByRole('button', { name: 'Retry' }))
+  expect(await within(banner).findByRole('alert')).toHaveTextContent('Sift is not looking for a phone right now.')
+  expect(within(banner).getByRole('button', { name: 'Retry' })).toBeEnabled()
+})
+
+test('a Retry that cannot reach the engine shows a plain message, not an error dump', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) =>
+      url === '/api/devices/retry'
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : Promise.resolve(new Response(JSON.stringify(HELD), { status: 200 })),
+    ),
+  )
+  renderApp('/backup')
+  const banner = await screen.findByTestId('device-banner')
+  await userEvent.click(within(banner).getByRole('button', { name: 'Retry' }))
+  const alert = await within(banner).findByRole('alert')
+  expect(alert).toHaveTextContent('Sift could not reach its engine. Try again in a moment.')
+  expect(alert).not.toHaveTextContent('Failed to fetch')
 })

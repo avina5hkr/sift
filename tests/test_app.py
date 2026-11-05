@@ -386,3 +386,39 @@ def test_headless_fake_phone_with_a_long_delay_appears_on_retry(paths: AppPaths)
         while (_device(base, token) or {}).get("state") != "connected_usb":
             assert time.monotonic() < deadline
             time.sleep(0.1)
+
+
+# -- fake mode needs its own data folder (R28) ---------------------------------------------------
+
+_NEEDS_HOME = (
+    "Fake-phone mode needs a separate data folder. "
+    "Set SIFT_HOME to a test folder (make dev does this).\n"
+)
+
+
+@pytest.mark.parametrize("home", [None, ""])
+@pytest.mark.parametrize(
+    ("argv", "env"),
+    [(["--no-window", "--fake-phone"], {}), (["--no-window"], {"SIFT_TRACKER": "fake"})],
+)
+def test_fake_phone_without_sift_home_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    home: str | None,
+    argv: list[str],
+    env: dict[str, str],
+) -> None:
+    fake_user = tmp_path / "user"
+    fake_user.mkdir()
+    monkeypatch.setenv("HOME", str(fake_user))  # the "real" ~/Library is a tmp folder
+    if home is None:
+        monkeypatch.delenv("SIFT_HOME")
+    else:
+        monkeypatch.setenv("SIFT_HOME", home)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert AppPaths.default().support == fake_user / "Library" / "Application Support" / "Sift"
+    assert main(argv) == 2
+    assert capsys.readouterr().out == _NEEDS_HOME
+    assert list(fake_user.iterdir()) == []  # no folder, lock or database was created

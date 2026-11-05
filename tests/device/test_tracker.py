@@ -285,7 +285,9 @@ def test_a_ready_phone_wins_over_one_waiting_for_allow(ctx: AppContext) -> None:
 
 def test_no_adb_uses_the_managers_message_and_retries(ctx: AppContext) -> None:
     r = rig(ctx)
-    message = "adb was not found. Sift can download Google's platform-tools for you."
+    message = (
+        "adb was not found. Install Android platform-tools, or set phone.adb_path in config.toml."
+    )
     seen: list[DeviceStatus] = []
     r.run(AdbError(message), AdbError(message), [lambda: seen.append(r.tracker.status())])
     assert seen[0].state is S.no_adb

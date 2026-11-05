@@ -48,8 +48,7 @@ _MAX_MEMBERS = 2000
 _download_lock = threading.Lock()
 
 MISSING_MESSAGE = (
-    "adb was not found. Sift can download Google's platform-tools for you, "
-    "or you can set phone.adb_path in config.toml."
+    "adb was not found. Install Android platform-tools, or set phone.adb_path in config.toml."
 )
 
 Opener = Callable[[str], IO[bytes]]

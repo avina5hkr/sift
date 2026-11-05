@@ -111,3 +111,8 @@ test('the SSD chip stays "SSD not connected"', () => {
   render(<StatusBar status={device('connected_usb', connected)} />)
   expect(screen.getByText('SSD not connected')).toBeInTheDocument()
 })
+
+test('the chip Retry is disabled while a request is pending', () => {
+  render(<StatusBar status={device('held_by_other')} onRetry={vi.fn()} retrying />)
+  expect(screen.getByRole('button', { name: 'Retry connecting to the phone' })).toBeDisabled()
+})
