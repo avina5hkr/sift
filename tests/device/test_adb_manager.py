@@ -1,4 +1,5 @@
 import contextlib
+import functools
 import http.client
 import io
 import os
@@ -6,6 +7,7 @@ import socket
 import stat
 import subprocess
 import threading
+import time
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +22,7 @@ from sift.device.adb_manager import (
     AdbError,
     AdbLocation,
     AdbManager,
+    AdbPortBusy,
     AdbServerError,
     AdbStatus,
     ConsentRequired,
@@ -464,11 +467,18 @@ def test_never_calls_kill_server(paths):
 
 
 class OneShotServer:
-    """Accepts one connection on 127.0.0.1:<free port>, reads the request, sends `reply`."""
+    """Accepts one connection on 127.0.0.1:<free port>, reads the request, sends `reply`.
 
-    def __init__(self, reply: bytes) -> None:
+    With `hold`, the connection then stays open (silent) until the server is closed; with
+    `trickle_s`, the reply goes out one byte at a time with that pause between bytes.
+    """
+
+    def __init__(self, reply: bytes, *, hold: bool = False, trickle_s: float = 0.0) -> None:
         self.reply = reply
+        self.hold = hold
+        self.trickle_s = trickle_s
         self.request = b""
+        self._done = threading.Event()
         self._srv = socket.socket()
         self._srv.bind(("127.0.0.1", 0))
         self._srv.listen(1)
@@ -485,8 +495,15 @@ class OneShotServer:
             conn.settimeout(5)
             try:
                 self.request = conn.recv(64)
-                if self.reply:
+                if self.trickle_s:
+                    for i in range(len(self.reply)):
+                        if self._done.wait(self.trickle_s):
+                            return
+                        conn.sendall(self.reply[i : i + 1])
+                elif self.reply:
                     conn.sendall(self.reply)
+                if self.hold:
+                    self._done.wait(10)
             except OSError:
                 pass
 
@@ -495,9 +512,13 @@ class OneShotServer:
         return self
 
     def __exit__(self, *exc: object) -> None:
+        self._done.set()
         self._srv.close()
         self._thread.join(10)
         assert not self._thread.is_alive()
+
+
+FAST_PROBE = functools.partial(adb_server_version, deadline_s=0.3)
 
 
 def test_probe_reads_the_server_version():
@@ -518,9 +539,28 @@ def test_probe_reads_the_server_version():
         b"",  # closes without a word
     ],
 )
-def test_probe_returns_none_for_bad_replies(reply):
-    with OneShotServer(reply) as srv:
-        assert adb_server_version("127.0.0.1", srv.port) is None
+def test_probe_reports_a_busy_port_for_bad_replies(reply):
+    with OneShotServer(reply) as srv, pytest.raises(AdbPortBusy):
+        FAST_PROBE("127.0.0.1", srv.port)
+
+
+def test_probe_reports_a_busy_port_when_the_listener_stays_silent():
+    with OneShotServer(b"", hold=True) as srv, pytest.raises(AdbPortBusy):
+        FAST_PROBE("127.0.0.1", srv.port)
+
+
+def test_probe_stops_a_trickling_server_at_its_overall_deadline():
+    started = time.monotonic()
+    # Every byte arrives well within any per-read timeout, but the whole reply takes 2.4 s.
+    with OneShotServer(b"OKAY00040029", hold=True, trickle_s=0.2) as srv:
+        with pytest.raises(AdbPortBusy):
+            adb_server_version("127.0.0.1", srv.port, deadline_s=0.5)
+        elapsed = time.monotonic() - started
+    assert elapsed < 1.5
+
+
+def test_probe_has_an_overall_deadline_of_about_three_seconds():
+    assert adb_server_version.__kwdefaults__["deadline_s"] == 3.0
 
 
 def test_probe_returns_none_when_nothing_listens():
@@ -529,6 +569,40 @@ def test_probe_returns_none_when_nothing_listens():
     port = s.getsockname()[1]
     s.close()
     assert adb_server_version("127.0.0.1", port) is None
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        pytest.param({"reply": b"", "hold": True}, id="silent"),
+        pytest.param({"reply": b"HTTP/1.1 400 Bad Request\r\n\r\n"}, id="garbled"),
+    ],
+)
+def test_ensure_server_never_runs_adb_when_the_port_is_busy(paths, server):
+    make_exe(paths.platform_tools / "adb")
+    runner = FakeRunner()
+    with OneShotServer(**server) as srv:
+        mgr = manager(paths, runner, FAST_PROBE, adb_server_port=srv.port)
+        with pytest.raises(AdbServerError) as info:
+            mgr.ensure_server()
+    assert info.value.message == (
+        "Another program is using adb's port and is not answering. Close it or press Retry."
+    )
+    assert runner.calls == []
+
+
+def test_ensure_server_starts_adb_once_when_nothing_listens(paths):
+    adb = make_exe(paths.platform_tools / "adb")
+    runner = FakeRunner()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    with pytest.raises(AdbServerError):  # the fake runner starts nothing, so nothing answers
+        manager(paths, runner, FAST_PROBE, adb_server_port=port).ensure_server()
+    assert [c for c in runner.calls if "start-server" in c[0]] == [
+        ([str(adb), "-P", str(port), "start-server"], 10)
+    ]
 
 
 def test_default_manager_probe_is_the_raw_socket_one(paths):

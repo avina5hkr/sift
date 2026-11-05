@@ -3,8 +3,9 @@
 How it runs. One daemon thread ("sift-device-tracker") runs `run()`:
 
 1. Open the device list with `events()`. In production that is `AdbManager.ensure_server()` (the
-   only way the tracker ever runs an adb program, and only when no server answers) followed by a
-   raw-socket `host:track-devices` stream (`TrackDevices`). An `AdbError` here is `no_adb`.
+   only way the tracker ever runs an adb program, and only when nothing listens on adb's port)
+   followed by a raw-socket `host:track-devices` stream (`TrackDevices`). An `AdbError` here is
+   `no_adb`.
 2. Read the stream. Each snapshot (`serial -> adb state`) and each idle tick (`None`, about once
    a second while nothing changes) re-evaluates the state with the injected clock. Emulators
    (`emulator-N`) are left out entirely.
@@ -567,8 +568,8 @@ def adb_tracker(
 ) -> DeviceTracker:
     """The production tracker: the shared adb server's device list and `AdbTransport`.
 
-    `ensure_server()` attaches to a server that answers (no adb program is run) or starts one;
-    it is called each time the device list is (re)opened.
+    `ensure_server()` attaches to a server that answers (no adb program is run), or starts one
+    when nothing listens on the port; it is called each time the device list is (re)opened.
     """
     install_no_spawn_guard()
     adb = manager if manager is not None else AdbManager(ctx.paths, ctx.config.phone)

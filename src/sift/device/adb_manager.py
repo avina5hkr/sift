@@ -2,7 +2,7 @@
 
 On macOS only one process can hold a phone's USB interface, so Sift never starts a second
 server and never restarts or kills one that is already running on the shared port: it attaches
-to whatever answers there and only starts a server when nothing does.
+to whatever answers there and only starts a server when nothing listens on the port at all.
 """
 
 import contextlib
@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import zipfile
 import zlib
 from collections.abc import Callable
@@ -38,7 +39,7 @@ ADB_SERVER_HOST = "127.0.0.1"
 _VERSION_TIMEOUT = 10
 _START_SERVER_TIMEOUT = 10
 _DOWNLOAD_TIMEOUT = 60
-_PROBE_TIMEOUT = 2.0
+_PROBE_DEADLINE_S = 3.0  # the whole probe, connect to last byte
 _CHUNK = 1024 * 1024
 _MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 _MAX_UNPACKED_BYTES = 500 * 1024 * 1024
@@ -49,6 +50,9 @@ _download_lock = threading.Lock()
 
 MISSING_MESSAGE = (
     "adb was not found. Install Android platform-tools, or set phone.adb_path in config.toml."
+)
+PORT_BUSY_MESSAGE = (
+    "Another program is using adb's port and is not answering. Close it or press Retry."
 )
 
 Opener = Callable[[str], IO[bytes]]
@@ -88,29 +92,60 @@ class AdbServerError(AdbError):
     """No adb server answers on the shared port and one could not be started."""
 
 
-def adb_server_version(host: str, port: int) -> str | None:
-    """The adb server's protocol version (decimal text) if one answers on host:port, else None.
+class AdbPortBusy(Exception):
+    """Something listens on adb's port but does not answer like an adb server."""
+
+
+def adb_server_version(
+    host: str, port: int, *, deadline_s: float = _PROBE_DEADLINE_S
+) -> str | None:
+    """The adb server's protocol version (decimal text) if one answers on host:port.
+
+    Three outcomes:
+    - the version, when an adb server answers;
+    - None, only when the connection is refused: nothing listens, so starting a server is safe;
+    - `AdbPortBusy` when something accepts the connection but does not answer like adb within
+      `deadline_s` (one deadline for the whole exchange, not per read): it stays silent,
+      trickles, sends something else, or hangs up mid-reply. Starting a server then could
+      disturb another program's server, so callers must not run any adb program.
 
     Speaks the adb host protocol directly over a socket and never starts anything: adbutils
     would run an adb command line program when the connection fails.
     """
+    deadline = time.monotonic() + deadline_s
     try:
-        with socket.create_connection((host, port), timeout=_PROBE_TIMEOUT) as s:
-            s.settimeout(_PROBE_TIMEOUT)
-            s.sendall(b"000chost:version")
-            if _recv_exact(s, 4) != b"OKAY":
-                return None
-            size = int(_recv_exact(s, 4), 16)
-            if not 0 < size <= 16:
-                return None
-            return str(int(_recv_exact(s, size), 16))
-    except OSError, ValueError:
+        s = socket.create_connection((host, port), timeout=deadline_s)
+    except ConnectionRefusedError:
         return None
+    except OSError as e:
+        raise AdbPortBusy(f"connecting to {host}:{port} failed: {e!r}") from e
+    with s:
+        try:
+            _left(s, deadline)
+            s.sendall(b"000chost:version")
+            status = _recv_exact(s, 4, deadline)
+            if status != b"OKAY":
+                raise AdbPortBusy(f"answered {status!r} instead of OKAY")
+            size = int(_recv_exact(s, 4, deadline), 16)
+            if not 0 < size <= 16:
+                raise AdbPortBusy(f"announced a {size}-byte version")
+            return str(int(_recv_exact(s, size, deadline), 16))
+        except (OSError, ValueError) as e:
+            raise AdbPortBusy(f"did not answer like adb: {e!r}") from e
 
 
-def _recv_exact(s: socket.socket, n: int) -> bytes:
+def _left(s: socket.socket, deadline: float) -> None:
+    """Let the next socket call wait only for what is left of the probe's deadline."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("the adb server did not answer in time")
+    s.settimeout(left)
+
+
+def _recv_exact(s: socket.socket, n: int, deadline: float) -> bytes:
     data = b""
     while len(data) < n:
+        _left(s, deadline)
         chunk = s.recv(n - len(data))
         if not chunk:
             raise OSError("adb server closed the connection")
@@ -140,6 +175,8 @@ class AdbManager:
         runner: Runner = subprocess_runner,
         server_probe: Callable[[str, int], str | None] = adb_server_version,
     ) -> None:
+        """`server_probe` behaves like `adb_server_version`: a version, None when nothing
+        listens, or `AdbPortBusy` when something listens but does not answer like adb."""
         install_no_spawn_guard()
         self._paths = paths
         self._config = config
@@ -203,10 +240,13 @@ class AdbManager:
         """Return the adb server port, attaching to a running server or starting one.
 
         If a server answers, no adb command is run at all, so a server Sift did not start is
-        never disturbed. `kill-server` is never run.
+        never disturbed. A server is started only when nothing listens on the port (the
+        connection is refused); if something listens but does not answer like adb, no adb
+        program is run and `AdbServerError` (`PORT_BUSY_MESSAGE`) is raised. `kill-server` is
+        never run.
         """
         port = self._config.adb_server_port
-        if self._probe(ADB_SERVER_HOST, port) is not None:
+        if self._server_answers(port):
             return port
         loc = self.locate()
         if loc.status is not AdbStatus.ready or loc.path is None:
@@ -215,13 +255,21 @@ class AdbManager:
             self._runner([str(loc.path), "-P", str(port), "start-server"], _START_SERVER_TIMEOUT)
         except (OSError, subprocess.TimeoutExpired) as e:
             logger.warning("adb start-server failed: %s", e)
-        if self._probe(ADB_SERVER_HOST, port) is None:
+        if not self._server_answers(port):
             raise AdbServerError(
                 f"Sift could not start the adb server on port {port}. Another program may be "
                 "using that port. Close it and try again, or change phone.adb_server_port "
                 "in config.toml."
             )
         return port
+
+    def _server_answers(self, port: int) -> bool:
+        """True if an adb server answers, False if nothing listens; else `AdbServerError`."""
+        try:
+            return self._probe(ADB_SERVER_HOST, port) is not None
+        except AdbPortBusy as e:
+            logger.warning("Something on adb's port %s does not answer like adb: %s", port, e)
+            raise AdbServerError(PORT_BUSY_MESSAGE) from e
 
     # --- download -------------------------------------------------------------------------
 
