@@ -1,9 +1,10 @@
 import sqlite3
 import threading
+import time
 
 import pytest
 
-from sift.core.db import Database, DatabaseCorruptError
+from sift.core.db import Database, DatabaseBusyError, DatabaseCorruptError
 
 
 def test_pragmas(db):
@@ -64,3 +65,38 @@ def test_close_closes_other_threads_read_connections(db):
     db.close()
     with pytest.raises(sqlite3.ProgrammingError):
         seen[0].execute("SELECT 1")
+
+
+def _hold_write_lock(db):
+    holder = sqlite3.connect(db.path, isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    return holder
+
+
+def test_tx_retries_until_the_lock_is_released(db):
+    holder = _hold_write_lock(db)
+    timer = threading.Timer(0.2, holder.rollback)
+    timer.start()
+    try:
+        with db.tx() as c:
+            c.execute("INSERT INTO setting VALUES ('a', '1')")
+    finally:
+        timer.join()
+        holder.close()
+    with db.read() as c:
+        assert c.execute("SELECT count(*) FROM setting").fetchone()[0] == 1
+
+
+def test_tx_gives_up_with_a_plain_error_and_frees_the_lock(db):
+    holder = _hold_write_lock(db)
+    try:
+        start = time.monotonic()
+        with pytest.raises(DatabaseBusyError, match="database is busy") as info, db.tx():
+            pass
+        assert time.monotonic() - start < 3
+        assert isinstance(info.value.__cause__, sqlite3.OperationalError)
+        holder.rollback()
+        with db.tx() as c:  # the process-wide lock was released
+            c.execute("INSERT INTO setting VALUES ('a', '1')")
+    finally:
+        holder.close()

@@ -22,6 +22,10 @@ class DatabaseTooNewError(Exception):
     """The database was written by a newer version of Sift."""
 
 
+class DatabaseBusyError(Exception):
+    """Another connection held the write lock for longer than the retries allow."""
+
+
 class MigrationError(Exception):
     """A schema migration failed and was rolled back."""
 
@@ -64,6 +68,8 @@ class Database:
             if conn is not None:
                 conn.close()
             raise
+        # From here on SQLite must not wait on its own: tx() runs the bounded retry schedule.
+        conn.execute("PRAGMA busy_timeout = 0")
         self._writer = conn
 
     def _connect(self) -> sqlite3.Connection:
@@ -101,16 +107,18 @@ class Database:
     def tx(self) -> Iterator[sqlite3.Connection]:
         """A write transaction: BEGIN IMMEDIATE, commit on success, roll back on any error."""
         with self.write_connection() as conn:
-            for delay in _LOCK_RETRY_DELAYS:
+            for delay in (*_LOCK_RETRY_DELAYS, None):
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     break
                 except sqlite3.OperationalError as e:
                     if "database is locked" not in str(e):
                         raise
+                    if delay is None:
+                        raise DatabaseBusyError(
+                            "The Sift database is busy. Another program may be using it; try again."
+                        ) from e
                     time.sleep(delay)
-            else:
-                conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
                 conn.execute("COMMIT")
