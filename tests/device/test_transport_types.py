@@ -1,4 +1,5 @@
 import dataclasses
+import os
 
 import pytest
 
@@ -9,6 +10,7 @@ from sift.device.transport import (
     LinkHealth,
     RemoteEntry,
     RemoteError,
+    Transport,
     TransportError,
 )
 
@@ -72,3 +74,28 @@ def test_remote_error_keeps_message() -> None:
     assert "No such file or directory" in str(err)
     with pytest.raises(TransportError, match="No such file"):
         raise err
+
+
+def test_remote_error_path_defaults_to_none_and_can_be_set() -> None:
+    assert RemoteError("boom").path is None
+    err = RemoteError("cannot list /sdcard/Android/data", path="/sdcard/Android/data")
+    assert err.path == "/sdcard/Android/data"
+    assert "cannot list" in str(err)
+    assert RemoteError("boom", None).path is None
+
+
+def test_non_utf8_path_is_hashable_and_round_trips_with_surrogateescape() -> None:
+    path = "/sdcard/caf\udce9.jpg"
+    entry = RemoteEntry(path=path, size=1, mtime=0, is_dir=False, is_symlink=False)
+    assert hash(entry) == hash(RemoteEntry(path, 1, 0, False, False))
+    raw = entry.path.encode("utf-8", "surrogateescape")
+    assert raw == b"/sdcard/caf\xe9.jpg"
+    assert raw.decode("utf-8", "surrogateescape") == path
+    assert os.fsencode(path) == raw
+
+
+def test_transport_protocol_is_runtime_checkable() -> None:
+    class NotATransport:
+        pass
+
+    assert not isinstance(NotATransport(), Transport)
