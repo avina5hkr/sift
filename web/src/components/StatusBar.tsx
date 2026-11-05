@@ -46,7 +46,7 @@ function phoneChip(device: DeviceStatus | null | undefined): PhoneChipView {
     case 'wrong_device':
       return view('A different phone is connected', 'warn')
     case 'no_adb':
-      return view('adb not installed', 'warn')
+      return view(device.reason === 'adb_unavailable' ? 'adb not available' : 'adb not installed', 'warn')
     default:
       return view('No phone', 'neutral')
   }

@@ -6,7 +6,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from sift.core.migrations import schema_version
-from sift.device.tracker import ConnectionState
+from sift.device.tracker import ConnectionState, NoAdbReason
 from sift.server.deps import Ctx
 
 router = APIRouter()
@@ -38,6 +38,7 @@ class DeviceStatusModel(BaseModel):
     link_mbps: int | None = None
     usb2_hint: bool = False
     device_uuid: str | None = None
+    reason: NoAdbReason | None = None
 
 
 class StatusResponse(BaseModel):

@@ -191,14 +191,8 @@ class AdbManager:
         if configured:
             path = Path(configured).expanduser()
             if not _is_executable(path):
-                return AdbLocation(
-                    path,
-                    None,
-                    AdbStatus.broken,
-                    f"phone.adb_path in config.toml points to {path}, which is not a runnable "
-                    "adb. Fix the path, or clear it to use the platform-tools Sift manages.",
-                )
-            return self._verify(path)
+                return _broken(path, configured=True)
+            return self._verify(path, configured=True)
         managed = self._paths.platform_tools / "adb"
         if not _is_executable(managed):
             self._restore_previous_install()
@@ -222,16 +216,16 @@ class AdbManager:
         except OSError as e:
             logger.warning("Could not restore the previous platform-tools: %s", e)
 
-    def _verify(self, adb: Path) -> AdbLocation:
+    def _verify(self, adb: Path, *, configured: bool = False) -> AdbLocation:
         try:
             done = self._runner([str(adb), "version"], _VERSION_TIMEOUT)
         except (OSError, subprocess.TimeoutExpired) as e:
             logger.warning("adb version failed for %s: %s", adb, e)
-            return _broken(adb)
+            return _broken(adb, configured=configured)
         version = _parse_version(done.stdout) if done.returncode == 0 else None
         if version is None:
             logger.warning("adb version gave no version for %s (exit %s)", adb, done.returncode)
-            return _broken(adb)
+            return _broken(adb, configured=configured)
         return AdbLocation(adb, version, AdbStatus.ready, f"adb {version} is ready.")
 
     # --- shared server --------------------------------------------------------------------
@@ -370,13 +364,15 @@ def _is_executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
-def _broken(adb: Path) -> AdbLocation:
+def _broken(adb: Path, *, configured: bool) -> AdbLocation:
+    """A broken adb; the path is shown only when it is the one set in config.toml."""
+    which = f"adb at {adb}" if configured else "Sift's copy of adb"
     return AdbLocation(
         adb,
         None,
         AdbStatus.broken,
-        f"adb at {adb} did not run. Sift can download a fresh copy of Google's platform-tools, "
-        "or you can point phone.adb_path in config.toml at a working adb.",
+        f"{which} does not work. Install Android platform-tools, or set phone.adb_path in "
+        "config.toml.",
     )
 
 

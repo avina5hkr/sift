@@ -17,6 +17,7 @@ function device(state: ConnectionState): DeviceStatus {
     link_mbps: null,
     usb2_hint: false,
     device_uuid: null,
+    reason: null,
   }
 }
 

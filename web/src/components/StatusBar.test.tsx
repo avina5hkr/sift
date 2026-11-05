@@ -27,6 +27,7 @@ function device(state: ConnectionState, extra: Partial<DeviceStatus> = {}): Stat
       link_mbps: null,
       usb2_hint: false,
       device_uuid: null,
+      reason: null,
       ...extra,
     },
   }
@@ -97,6 +98,14 @@ test.each([
   render(<StatusBar status={device(state)} />)
   expect(screen.getByText(text)).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+})
+
+test.each([
+  ['adb_missing', 'adb not installed'],
+  ['adb_unavailable', 'adb not available'],
+] as const)('no_adb because of %s shows "%s"', (reason, text) => {
+  render(<StatusBar status={device('no_adb', { reason })} />)
+  expect(screen.getByText(text)).toBeInTheDocument()
 })
 
 test('a phone held by another tool has a Retry button', async () => {

@@ -5,7 +5,9 @@ How it runs. One daemon thread ("sift-device-tracker") runs `run()`:
 1. Open the device list with `events()`. In production that is `AdbManager.ensure_server()` (the
    only way the tracker ever runs an adb program, and only when nothing listens on adb's port)
    followed by a raw-socket `host:track-devices` stream (`TrackDevices`). An `AdbError` here is
-   `no_adb`.
+   `no_adb` with the manager's message: `reason` "adb_missing" when adb is missing or broken,
+   "adb_unavailable" for an `AdbServerError` (the server could not be started, or something
+   else on its port does not answer).
 2. Read the stream. Each snapshot (`serial -> adb state`) and each idle tick (`None`, about once
    a second while nothing changes) re-evaluates the state with the injected clock. Emulators
    (`emulator-N`) are left out entirely.
@@ -45,10 +47,10 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from sift.core.context import AppContext
-from sift.device.adb_manager import ADB_SERVER_HOST, AdbError, AdbManager
+from sift.device.adb_manager import ADB_SERVER_HOST, AdbError, AdbManager, AdbServerError
 from sift.device.adb_transport import AdbTransport, is_wifi_serial
 from sift.device.adbutils_guard import install_no_spawn_guard
 from sift.device.track_devices import DeviceEventSource, Snapshot, TrackDevices
@@ -113,6 +115,10 @@ class ConnectionState(StrEnum):
     connected_wifi = "connected_wifi"
 
 
+# Why the state is `no_adb`: adb is missing or broken, or its server is unavailable.
+NoAdbReason = Literal["adb_missing", "adb_unavailable"]
+
+
 @dataclass(frozen=True)
 class DeviceStatus:
     state: ConnectionState
@@ -126,6 +132,7 @@ class DeviceStatus:
     link_mbps: int | None = None
     usb2_hint: bool = False
     device_uuid: str | None = None  # the stored phone's `device.uuid` when connected
+    reason: NoAdbReason | None = None  # set only for `no_adb`
 
     def as_event(self) -> dict[str, Any]:
         """A fresh dict for the `device` event, with the state as its plain string."""
@@ -264,7 +271,10 @@ class DeviceTracker:
             source = self._events()
         except AdbError as e:
             self._forget_phone()
-            self._set(DeviceStatus(ConnectionState.no_adb, e.message))
+            reason: NoAdbReason = (
+                "adb_unavailable" if isinstance(e, AdbServerError) else "adb_missing"
+            )
+            self._set(DeviceStatus(ConnectionState.no_adb, e.message, reason=reason))
             return
         except (TransportError, OSError) as e:
             logger.info("Could not open adb's device list: %s", e)

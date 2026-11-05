@@ -139,11 +139,40 @@ def test_locate_configured_path_not_executable_is_broken(paths, tmp_path):
     assert loc.status == AdbStatus.broken and "phone.adb_path" in loc.message
 
 
+BROKEN_TAIL = (
+    " does not work. Install Android platform-tools, or set phone.adb_path in config.toml."
+)
+
+
 def test_locate_broken_when_adb_version_fails(paths):
     make_exe(paths.platform_tools / "adb")
     loc = manager(paths, FakeRunner(version_rc=1)).locate()
     assert loc.status == AdbStatus.broken and loc.version is None
-    assert "did not run" in loc.message
+    assert loc.message == "Sift's copy of adb" + BROKEN_TAIL
+
+
+def test_a_broken_configured_adb_is_named_by_its_path(paths, tmp_path):
+    mine = make_exe(tmp_path / "mine" / "adb")
+    loc = manager(paths, FakeRunner(version_rc=1), adb_path=str(mine)).locate()
+    assert loc.status == AdbStatus.broken
+    assert loc.message == f"adb at {mine}" + BROKEN_TAIL
+    missing = tmp_path / "nope"
+    assert (
+        manager(paths, adb_path=str(missing)).locate().message == f"adb at {missing}" + BROKEN_TAIL
+    )
+
+
+def test_adb_messages_never_offer_a_download(paths, tmp_path):
+    make_exe(tmp_path / "mine" / "adb")
+    locations = [
+        manager(paths).locate(),  # missing
+        manager(paths, adb_path=str(tmp_path / "nope")).locate(),
+        manager(paths, FakeRunner(version_rc=1), adb_path=str(tmp_path / "mine" / "adb")).locate(),
+    ]
+    make_exe(paths.platform_tools / "adb")
+    locations.append(manager(paths, FakeRunner(version_rc=1)).locate())
+    assert [loc.status for loc in locations] == [AdbStatus.missing] + [AdbStatus.broken] * 3
+    assert not any("download" in loc.message.lower() for loc in locations)
 
 
 def test_locate_broken_when_adb_cannot_start(paths):

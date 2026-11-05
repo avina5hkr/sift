@@ -93,6 +93,7 @@ test('a phone held by another tool shows the banner, and Retry posts to the retr
       link_mbps: null,
       usb2_hint: false,
       device_uuid: null,
+      reason: null,
     },
   }
   const fetchMock = vi.fn((url: string, _init?: RequestInit) =>
@@ -112,7 +113,7 @@ test('a phone held by another tool shows the banner, and Retry posts to the retr
 })
 
 test('a connected phone shows its chip and no device banner', async () => {
-  const connected = { ...STATUS, device: { state: 'connected_usb', message: 'Connected over USB.', serial: 'S', model: 'TestPhone', android_version: '14', battery_pct: 87, free_bytes: 12_000_000_000, total_bytes: 128_000_000_000, link_mbps: 5000, usb2_hint: false, device_uuid: 'u' } }
+  const connected = { ...STATUS, device: { state: 'connected_usb', message: 'Connected over USB.', serial: 'S', model: 'TestPhone', android_version: '14', battery_pct: 87, free_bytes: 12_000_000_000, total_bytes: 128_000_000_000, link_mbps: 5000, usb2_hint: false, device_uuid: 'u', reason: null } }
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(connected), { status: 200 })))
   renderApp('/backup')
   expect(await screen.findByText('TestPhone · USB · 87% · 12.0 GB free')).toBeInTheDocument()
@@ -133,6 +134,7 @@ const HELD = {
     link_mbps: null,
     usb2_hint: false,
     device_uuid: null,
+    reason: null,
   },
 }
 

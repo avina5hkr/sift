@@ -57,6 +57,7 @@ def test_status_shows_the_fake_phone_once_announced(fake_ctx: AppContext) -> Non
         "link_mbps",
         "usb2_hint",
         "device_uuid",
+        "reason",
     }
 
 
@@ -70,6 +71,19 @@ def test_status_device_before_the_phone_is_announced(ctx: AppContext) -> None:
     assert device["state"] == "no_device"
     assert device["message"] == "No phone found."
     assert device["model"] is None
+    assert device["reason"] is None
+
+
+def test_status_device_passes_the_no_adb_reason_through(ctx: AppContext) -> None:
+    class Unavailable:
+        def status(self) -> DeviceStatus:
+            return DeviceStatus(
+                ConnectionState.no_adb, "adb is not answering.", reason="adb_unavailable"
+            )
+
+    ctx.tracker = Unavailable()  # type: ignore[assignment]
+    device = client_for(ctx).get("/api/status", headers=H).json()["device"]
+    assert (device["state"], device["reason"]) == ("no_adb", "adb_unavailable")
 
 
 def test_the_fake_source_is_empty_then_announces_the_phone() -> None:

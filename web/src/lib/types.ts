@@ -21,6 +21,7 @@ export type DeviceStatus = {
   link_mbps: number | null
   usb2_hint: boolean
   device_uuid: string | null
+  reason: 'adb_missing' | 'adb_unavailable' | null // why the state is no_adb
 }
 
 // Mirrors GET /api/status (src/sift/server/routes/status.py).

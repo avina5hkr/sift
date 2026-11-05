@@ -19,7 +19,7 @@ import pytest
 from sift.core.config import PhoneConfig
 from sift.core.context import AppContext
 from sift.core.events import EventBus
-from sift.device.adb_manager import AdbError, AdbManager
+from sift.device.adb_manager import PORT_BUSY_MESSAGE, AdbError, AdbManager, AdbServerError
 from sift.device.fake_phone import FakePhone
 from sift.device.fake_transport import FakeTransport, ManualClock
 from sift.device.track_devices import Snapshot
@@ -292,8 +292,28 @@ def test_no_adb_uses_the_managers_message_and_retries(ctx: AppContext) -> None:
     r.run(AdbError(message), AdbError(message), [lambda: seen.append(r.tracker.status())])
     assert seen[0].state is S.no_adb
     assert seen[0].message == message
+    assert seen[0].reason == "adb_missing"
     assert r.bus.states()[0] == "no_adb"
+    assert r.bus.published[0][1]["reason"] == "adb_missing"
     assert len(r.events.opened_at) >= 3
+
+
+def test_an_adb_server_problem_is_no_adb_for_a_different_reason(ctx: AppContext) -> None:
+    r = rig(ctx)
+    error = AdbServerError(PORT_BUSY_MESSAGE)
+    seen: list[DeviceStatus] = []
+    r.run(error, error, [lambda: seen.append(r.tracker.status())])
+    assert seen[0].state is S.no_adb
+    assert seen[0].message == PORT_BUSY_MESSAGE
+    assert seen[0].reason == "adb_unavailable"
+    assert r.bus.published[0][1]["reason"] == "adb_unavailable"
+    assert len(r.events.opened_at) >= 3  # the backoff retries
+
+
+def test_other_states_have_no_reason(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.run([{USB: "device"}, STOP])
+    assert r.tracker.status().reason is None
 
 
 # -- identity ----------------------------------------------------------------------------------
@@ -600,6 +620,7 @@ def test_publishes_device_event_on_change_only(ctx: AppContext) -> None:
         "link_mbps",
         "usb2_hint",
         "device_uuid",
+        "reason",
     }
     assert payloads[0] is not payloads[2]
     payloads[2]["state"] = "tampered"
