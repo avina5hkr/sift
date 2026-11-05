@@ -151,6 +151,7 @@ def test_limits_defaults() -> None:
     assert (limits.stat_s, limits.list_s, limits.read_stall_s, limits.delete_s) == (10, 60, 30, 15)
     assert (limits.sha_batch_files, limits.sha_batch_bytes) == (40, 8 * 10**9)
     assert (limits.sha_min_s, limits.sha_assumed_bps, limits.max_connections) == (120, 10**8, 6)
+    assert limits.max_request_bytes == 0xFFFF  # an adb host request's length is 4 hex digits
 
 
 def test_constructing_contacts_nothing() -> None:
@@ -695,6 +696,30 @@ def test_a_batch_too_long_for_one_command_is_split(
     commands = [r for r in server.requests if r.startswith(b"exec:")]
     assert len(commands) > 1
     assert all(len(c) <= 0xFFFF for c in commands)
+
+
+def test_the_request_size_limit_comes_from_limits(server: FakeAdbServer, phone: Phone) -> None:
+    limits = Limits(stat_s=2, list_s=2, max_request_bytes=200)
+    transport = AdbTransport(server.serial, server.port, limits=limits, host="127.0.0.1")
+    paths = [f"/sdcard/{i}.jpg" for i in range(6)]
+    for p in paths:
+        phone.add_file(p.encode(), b"q")
+    result = transport.sha256(paths)
+    assert set(result.values()) == {hashlib.sha256(b"q").hexdigest()}
+    commands = [r for r in server.requests if r.startswith(b"exec:")]
+    assert len(commands) > 1
+    assert all(len(c) <= 200 for c in commands)
+
+
+def test_a_request_over_the_limit_is_refused_before_it_is_sent(
+    server: FakeAdbServer, phone: Phone
+) -> None:
+    limits = Limits(stat_s=2, list_s=2, max_request_bytes=40)
+    transport = AdbTransport(server.serial, server.port, limits=limits, host="127.0.0.1")
+    phone.add_file(b"/sdcard/a-rather-long-name.jpg", b"q")
+    with pytest.raises(RemoteError, match="too long"):
+        transport.sha256(["/sdcard/a-rather-long-name.jpg"])
+    assert not any(r.startswith(b"exec:") for r in server.requests)
 
 
 # -- info and link health -----------------------------------------------------------------------

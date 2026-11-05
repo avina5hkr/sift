@@ -88,7 +88,6 @@ _ENOENT = 2
 _ENOTDIR = 20
 _ERRNO_TEXT = {2: "no such file or folder", 13: "permission denied", 20: "not a folder"}
 _MAX_PATH_BYTES = 1024  # adb's limit for a sync path
-_MAX_REQUEST_BYTES = 0xFFFF  # an adb host request's length is 4 hex digits
 _MAX_SYNC_PAYLOAD = 64 * 1024  # adbd's SYNC_DATA_MAX; also the cap for a FAIL message
 _U32 = struct.Struct("<I")
 _RAW_CHUNK = 1 << 16
@@ -112,6 +111,7 @@ class Limits:
     sha_min_s: float = 120
     sha_assumed_bps: int = 100 * 10**6
     max_connections: int = 6
+    max_request_bytes: int = 0xFFFF  # an adb host request's length is 4 hex digits
 
 
 DEFAULT_LIMITS = Limits()
@@ -433,9 +433,14 @@ def _file_changed(path: str) -> FileChanged:
     return FileChanged(f"{path} changed while it was being read.", path)
 
 
-def _host_request(sock: socket.socket, payload: bytes, *, fail: type[TransportError]) -> None:
-    """Send one adb host request and require OKAY; FAIL raises `fail` with adb's message."""
-    if len(payload) > _MAX_REQUEST_BYTES:
+def _host_request(
+    sock: socket.socket, payload: bytes, *, fail: type[TransportError], max_bytes: int
+) -> None:
+    """Send one adb host request and require OKAY; FAIL raises `fail` with adb's message.
+
+    A payload over `max_bytes` raises `RemoteError` before anything is sent.
+    """
+    if len(payload) > max_bytes:
         raise RemoteError("That command is too long to send to the phone.")
     _send_all(sock, b"%04x" % len(payload) + payload)
     status = _recv_exact(sock, 4)
@@ -554,8 +559,9 @@ class AdbTransport:
         try:
             sock = conn.conn
             transport = b"host:transport:" + self.serial.encode()
-            _host_request(sock, transport, fail=DeviceDisconnected)
-            _host_request(sock, service, fail=RemoteError)
+            max_bytes = self.limits.max_request_bytes
+            _host_request(sock, transport, fail=DeviceDisconnected, max_bytes=max_bytes)
+            _host_request(sock, service, fail=RemoteError, max_bytes=max_bytes)
         except BaseException:
             conn.close()
             raise
@@ -810,16 +816,13 @@ class AdbTransport:
                 result.update(zip(part, hashes, strict=True))
         return result
 
-    @staticmethod
-    def _fit_one_request(batch: list[str]) -> list[list[str]]:
+    def _fit_one_request(self, batch: list[str]) -> list[list[str]]:
         """Split `batch` until each part's script fits in one adb request."""
         command = b"exec:" + encode_command(build_sha256_script(batch))
-        if len(command) <= _MAX_REQUEST_BYTES or len(batch) == 1:
+        if len(command) <= self.limits.max_request_bytes or len(batch) == 1:
             return [batch]
         half = len(batch) // 2
-        return AdbTransport._fit_one_request(batch[:half]) + AdbTransport._fit_one_request(
-            batch[half:]
-        )
+        return self._fit_one_request(batch[:half]) + self._fit_one_request(batch[half:])
 
     def link_health(self) -> LinkHealth:
         """USB or Wi-Fi (from the serial's form) and the round trip of a no-op command.
