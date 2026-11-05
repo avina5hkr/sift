@@ -27,9 +27,16 @@ class FakeStat:
     size: int = 0
     mtime: int = 0
     error: int = 0
+    # Fill dev, ino and nlink too (a real daemon zeroes everything but `error` on failure).
+    bare: bool = False
+
+    @classmethod
+    def missing(cls, error: int = 2) -> FakeStat:
+        return cls(mode=0, size=0, mtime=0, error=error, bare=True)
 
     def pack(self) -> bytes:
-        return _STAT.pack(self.error, 1, 2, self.mode, 1, 0, 0, self.size, 0, self.mtime, 0)
+        dev, ino, nlink = (0, 0, 0) if self.bare else (1, 2, 1)
+        return _STAT.pack(self.error, dev, ino, self.mode, nlink, 0, 0, self.size, 0, self.mtime, 0)
 
 
 @dataclass
@@ -42,7 +49,13 @@ class FakeAdbServer:
     truncate_reply_after: int | None = None
     # Accept sync requests but never answer them (until the server shuts down).
     stall: bool = False
-    # Every sync command id received, in order (b"STA2", b"LIS2", ...).
+    # What follows DONE in a LIS2 reply: a zeroed entry by default, or stale/odd fields.
+    done_trailer: FakeStat | None = None
+    # Answer every sync request with FAIL + this message (and drop the connection, like adbd).
+    fail_message: bytes | None = None
+    # Send this instead of the 4 hex digits of length in the features reply.
+    features_length_override: bytes | None = None
+    # Every sync command id received, in order (b"LST2", b"LIS2", ...).
     commands: list[bytes] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -133,7 +146,8 @@ class FakeAdbServer:
             request = self._read_host_request(conn)
             if request == f"host-serial:{self.serial}:features":
                 body = ",".join(self.features).encode()
-                conn.sendall(b"OKAY" + b"%04x" % len(body) + body)
+                length = self.features_length_override or b"%04x" % len(body)
+                conn.sendall(b"OKAY" + length + body)
                 return
             if request.startswith("host:transport:"):
                 if request == f"host:transport:{self.serial}":
@@ -165,12 +179,17 @@ class FakeAdbServer:
             ident, path_len = _REQUEST.unpack(self._recv(conn, _REQUEST.size))
             path = self._recv(conn, path_len)
             self.commands.append(ident)
+            if self.fail_message is not None:
+                body = self.fail_message
+                self._send_reply(conn, b"FAIL" + struct.pack("<I", len(body)) + body)
+                return
             if self.stall:
                 self._stop.wait()
                 return
-            if ident == b"STA2":
-                found = self.stats.get(path, FakeStat(mode=0, error=2))
-                reply = b"STA2" + found.pack()
+            if ident in (b"LST2", b"STA2"):
+                # The daemon echoes the request id. (STA2 would follow symlinks; not modelled.)
+                found = self.stats.get(path, FakeStat.missing())
+                reply = ident + found.pack()
             elif ident == b"LIS2":
                 reply = self._list_reply(path)
             else:
@@ -186,5 +205,6 @@ class FakeAdbServer:
         out = b""
         for name, stat in self.dirs.get(path, []):
             out += b"DNT2" + stat.pack() + _NAMELEN.pack(len(name)) + name
-        # DONE is followed by a zeroed entry (stat struct and namelen) of the same size.
-        return out + b"DONE" + bytes(_STAT.size + _NAMELEN.size)
+        # DONE is followed by an entry-sized trailer (stat struct and namelen), zeroed by default.
+        trailer = self.done_trailer.pack() if self.done_trailer else bytes(_STAT.size)
+        return out + b"DONE" + trailer + bytes(_NAMELEN.size)

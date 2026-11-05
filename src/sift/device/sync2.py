@@ -1,4 +1,4 @@
-"""Client for adb's sync protocol v2 (`STA2` / `LIS2`).
+"""Client for adb's sync protocol v2 (`LST2` / `LIS2`).
 
 Why this exists: adbutils only speaks sync v1 (`STAT`/`LIST`), which packs size and mtime as
 32-bit integers. Real phones have files over 4 GiB and timestamps outside the 32-bit range. The
@@ -8,12 +8,15 @@ them back untouched: mtime is an `int` of seconds and is never turned into a dat
 Wire format (AOSP `file_sync_protocol.h`, all little-endian):
 
     request   : 4-byte id, u32 path length, path bytes
-    STA2 reply: b"STA2" + stat
+    LST2 reply: b"LST2" + stat (the daemon echoes the request id)
     LIS2 reply: zero or more (b"DNT2" + stat + u32 namelen + name), then b"DONE" followed by a
                 zeroed entry (stat + namelen) that must be consumed
     stat      : u32 error, u64 dev, u64 ino, u32 mode, u32 nlink, u32 uid, u32 gid,
                 u64 size, i64 atime, i64 mtime, i64 ctime
-    failure   : b"FAIL" + u32 length + message
+    failure   : b"FAIL" + u32 length + message; the daemon then drops the connection
+
+`LST2` is the lstat variant (a symlink is reported as itself). `STA2` follows symlinks, so it is
+never sent. Both are gated by the `stat_v2` feature.
 
 `error` is the phone's errno for that path (0 = ok). Names stay `bytes` here; decoding with
 `surrogateescape` happens at the `AdbTransport` boundary.
@@ -37,11 +40,19 @@ _STAT = struct.Struct("<IQQIIIIQqqq")  # the one definition of the v2 stat layou
 _U32 = struct.Struct("<I")
 _REQUEST = struct.Struct("<4sI")
 _REQUIRED_FEATURES = frozenset({"stat_v2", "ls_v2"})
+_MAX_PATH_BYTES = 1024  # adb's SYNC_DATA_MAX / path limit
+_HEX = frozenset(b"0123456789abcdefABCDEF")
 _TOO_OLD = "This phone's adb is too old for Sift (needs Android 11 or later)."
 
 
 @dataclass(frozen=True)
 class SyncStat:
+    """What the phone reported for one path.
+
+    When `error != 0`, mode, size and mtime are meaningless. `error` is the Linux errno value as
+    sent on the wire (ENOENT is 2 even though the Mac's own errno numbering may differ).
+    """
+
     mode: int
     size: int  # 64-bit
     mtime: int  # Unix seconds, signed 64-bit, exactly as the phone reported it
@@ -102,7 +113,10 @@ def _host_request(sock: socket.socket, payload: str) -> None:
 
 
 def _read_host_string(sock: socket.socket) -> str:
-    length = int(_recv_exact(sock, 4), 16)
+    raw = _recv_exact(sock, 4)
+    if not all(c in _HEX for c in raw):
+        raise TransportError(f"Malformed length from the adb server: {raw!r}")
+    length = int(raw, 16)
     return _recv_exact(sock, length).decode("utf-8", "replace")
 
 
@@ -147,54 +161,75 @@ class Sync2:
         if sock is not None:
             sock.close()
 
-    def _begin(self, ident: bytes, path: bytes) -> socket.socket:
+    def _check(self, path: bytes) -> socket.socket:
+        """Validate the request before anything is sent; failures here leave the stream intact."""
         if self._sock is None:
             raise DeviceDisconnected("The sync connection is closed.")
         if self._listing:
             raise RuntimeError("Finish iterating list() before sending another request.")
-        _send_all(self._sock, _REQUEST.pack(ident, len(path)) + path)
+        if len(path) > _MAX_PATH_BYTES or b"\0" in path:
+            raise RemoteError(
+                "That path is too long or contains a NUL byte.",
+                path.decode("utf-8", "surrogateescape"),
+            )
         return self._sock
 
     def _fail(self, sock: socket.socket, path: bytes) -> RemoteError:
-        (length,) = _U32.unpack(_recv_exact(sock, _U32.size))
-        message = _recv_exact(sock, length).decode("utf-8", "replace")
+        """Read a sync `FAIL` message. The daemon drops the connection after it, so we do too."""
+        try:
+            (length,) = _U32.unpack(_recv_exact(sock, _U32.size))
+            message = _recv_exact(sock, length).decode("utf-8", "replace")
+        finally:
+            self.close()
         return RemoteError(message, path.decode("utf-8", "surrogateescape"))
 
     def stat(self, path: bytes) -> SyncStat:
-        """`STA2` (lstat semantics: a symlink is reported as itself)."""
-        sock = self._begin(b"STA2", path)
-        ident = _recv_exact(sock, 4)
-        if ident == b"FAIL":
-            raise self._fail(sock, path)
-        if ident != b"STA2":
-            raise TransportError(f"Unexpected sync reply: {ident!r}")
-        return _parse_stat(_recv_exact(sock, _STAT.size))
+        """`LST2` (lstat semantics: a symlink is reported as itself; `STA2` is never used).
+
+        Any failure mid-request closes the connection: a late reply must never be read as the
+        answer to the next path. Later calls then raise `DeviceDisconnected`.
+        """
+        sock = self._check(path)
+        try:
+            _send_all(sock, _REQUEST.pack(b"LST2", len(path)) + path)
+            ident = _recv_exact(sock, 4)
+            if ident == b"FAIL":
+                raise self._fail(sock, path)
+            if ident != b"LST2":
+                raise TransportError(f"Unexpected sync reply: {ident!r}")
+            return _parse_stat(_recv_exact(sock, _STAT.size))
+        except BaseException:
+            self.close()
+            raise
 
     def list(self, path: bytes) -> Iterator[tuple[bytes, SyncStat]]:
         """`LIS2`: the entries of a directory, without "." and "..".
 
+        LIS2 cannot tell a missing or unreadable folder from an empty one (the daemon just ends
+        the listing), so callers must `stat()` the folder first. An entry the phone could not
+        stat carries its errno in its own `SyncStat.error`; the listing carries on.
+
         A listing must be read to the end. Abandoning one early leaves the rest of the reply on
         the wire, so the connection is closed and later calls raise `DeviceDisconnected`.
         """
-        sock = self._begin(b"LIS2", path)
+        sock = self._check(path)
+        return self._list_entries(sock, path)
+
+    def _list_entries(self, sock: socket.socket, path: bytes) -> Iterator[tuple[bytes, SyncStat]]:
         self._listing = True
         finished = False
         try:
+            _send_all(sock, _REQUEST.pack(b"LIS2", len(path)) + path)
             while True:
                 ident = _recv_exact(sock, 4)
                 if ident == b"DONE":
-                    # DONE is followed by a zeroed entry; it carries an errno only on failure.
-                    raw = _recv_exact(sock, _STAT.size + _U32.size)
-                    error = _parse_stat(raw[: _STAT.size]).error
+                    # The zeroed-entry trailer (stat + namelen) is consumed and ignored: it may
+                    # hold stale fields, and AOSP never reports an error through it.
+                    _recv_exact(sock, _STAT.size + _U32.size)
                     finished = True
-                    if error:
-                        raise RemoteError(
-                            f"The phone could not list this folder (errno {error}).",
-                            path.decode("utf-8", "surrogateescape"),
-                        )
                     return
                 if ident == b"FAIL":
-                    finished = True
+                    finished = True  # _fail closes the connection itself
                     raise self._fail(sock, path)
                 if ident != b"DNT2":
                     raise TransportError(f"Unexpected sync reply: {ident!r}")

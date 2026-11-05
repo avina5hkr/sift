@@ -6,7 +6,7 @@ from collections.abc import Iterator
 import pytest
 
 from sift.device.sync2 import Sync2, SyncStat, device_features
-from sift.device.transport import DeviceDisconnected, DeviceTimeout, RemoteError
+from sift.device.transport import DeviceDisconnected, DeviceTimeout, RemoteError, TransportError
 from tests.device.fake_adb_server import S_IFDIR, S_IFREG, FakeAdbServer, FakeStat
 
 TIMEOUT_S = 2.0
@@ -85,6 +85,32 @@ def test_empty_directory_lists_nothing(server: FakeAdbServer) -> None:
         assert list(sync.list(b"/sdcard/empty")) == []
 
 
+def test_stat_missing_reply_is_zeroed_apart_from_error(server: FakeAdbServer) -> None:
+    with connect(server) as sync:
+        assert sync.stat(b"/nope") == SyncStat(mode=0, size=0, mtime=0, error=2)
+
+
+def test_done_trailer_with_error_and_stale_fields_is_ignored(server: FakeAdbServer) -> None:
+    server.dirs[b"/d"] = [(b"a", FakeStat(size=5)), (b"b", FakeStat(size=6))]
+    server.done_trailer = FakeStat(mode=S_IFREG | 0o600, size=99, mtime=123, error=13)
+    with connect(server) as sync:
+        assert [(n, s.size) for n, s in sync.list(b"/d")] == [(b"a", 5), (b"b", 6)]
+        assert sync.stat(b"/d").error == 2  # the stream is still in step afterwards
+
+
+def test_entry_error_is_surfaced_on_that_entry_only(server: FakeAdbServer) -> None:
+    server.dirs[b"/d"] = [
+        (b"ok", FakeStat(size=5, mtime=9)),
+        (b"bad", FakeStat.missing(error=13)),  # EACCES
+        (b"ok2", FakeStat(size=6)),
+    ]
+    with connect(server) as sync:
+        listed = dict(sync.list(b"/d"))
+    assert listed[b"bad"].error == 13
+    assert listed[b"ok"].error == 0
+    assert listed[b"ok2"] == SyncStat(mode=S_IFREG | 0o644, size=6, mtime=0, error=0)
+
+
 def test_connection_is_reusable_for_several_requests(server: FakeAdbServer) -> None:
     server.stats[b"/a"] = FakeStat(size=1)
     server.dirs[b"/d"] = [(b"x", FakeStat(size=2))]
@@ -137,9 +163,19 @@ def test_v1_truncation_is_not_used(server: FakeAdbServer) -> None:
     with connect(server) as sync:
         sync.stat(b"/f")
         list(sync.list(b"/d"))
-    assert server.commands == [b"STA2", b"LIS2"]
+    assert server.commands == [b"LST2", b"LIS2"]
     assert b"LIST" not in server.commands
     assert b"STAT" not in server.commands
+
+
+def test_stat_never_sends_sta2(server: FakeAdbServer) -> None:
+    # STA2 follows symlinks; stat() must use LST2 so a link is reported as itself.
+    server.stats[b"/link"] = FakeStat(size=7)
+    with connect(server) as sync:
+        sync.stat(b"/link")
+        sync.stat(b"/missing")
+    assert server.commands == [b"LST2", b"LST2"]
+    assert b"STA2" not in server.commands
 
 
 def test_unknown_serial_raises_disconnected(server: FakeAdbServer) -> None:
@@ -165,3 +201,65 @@ def test_abandoned_listing_closes_the_connection(server: FakeAdbServer) -> None:
         sync.stat(b"/d")
     sync.close()
     sync.close()  # idempotent
+
+
+def test_stat_timeout_closes_the_connection(server: FakeAdbServer) -> None:
+    server.stall = True
+    with connect(server, timeout_s=0.2) as sync:
+        with pytest.raises(DeviceTimeout):
+            sync.stat(b"/first")
+        # A late reply to /first must never be read as the answer for /second.
+        with pytest.raises(DeviceDisconnected, match="closed"):
+            sync.stat(b"/second")
+        with pytest.raises(DeviceDisconnected, match="closed"):
+            list(sync.list(b"/d"))
+
+
+def test_stat_protocol_error_closes_the_connection(server: FakeAdbServer) -> None:
+    server.stats[b"/f"] = FakeStat(size=1)
+    server.truncate_reply_after = 30
+    with connect(server) as sync:
+        with pytest.raises(DeviceDisconnected):
+            sync.stat(b"/f")
+        with pytest.raises(DeviceDisconnected, match="closed"):
+            sync.stat(b"/f")
+
+
+@pytest.mark.parametrize("call", ["stat", "list"])
+def test_sync_fail_raises_remote_error_and_closes(server: FakeAdbServer, call: str) -> None:
+    server.fail_message = b"remote said no"
+    with connect(server) as sync:
+        with pytest.raises(RemoteError, match="remote said no") as info:
+            if call == "stat":
+                sync.stat(b"/f")
+            else:
+                list(sync.list(b"/f"))
+        assert info.value.path == "/f"
+        with pytest.raises(DeviceDisconnected, match="closed"):
+            sync.stat(b"/f")
+
+
+@pytest.mark.parametrize("bad", [b"/" + b"a" * 1024, b"/sdcard/a\0b"])
+def test_bad_paths_are_rejected_before_sending(server: FakeAdbServer, bad: bytes) -> None:
+    with connect(server) as sync:
+        with pytest.raises(RemoteError) as info:
+            sync.stat(bad)
+        assert info.value.path is not None
+        with pytest.raises(RemoteError):
+            sync.list(bad)  # rejected eagerly, before iteration
+        assert server.commands == []
+        assert sync.stat(b"/ok").error == 2  # the connection is still usable
+
+
+def test_path_of_exactly_1024_bytes_is_accepted(server: FakeAdbServer) -> None:
+    path = b"/" + b"a" * 1023
+    with connect(server) as sync:
+        assert sync.stat(path).error == 2
+    assert server.commands == [b"LST2"]
+
+
+def test_malformed_host_length_raises_transport_error(server: FakeAdbServer) -> None:
+    server.features_length_override = b"zz!!"
+    with pytest.raises(TransportError) as info:
+        device_features("127.0.0.1", server.port, server.serial, timeout_s=TIMEOUT_S)
+    assert not isinstance(info.value, DeviceDisconnected | DeviceTimeout | RemoteError)
