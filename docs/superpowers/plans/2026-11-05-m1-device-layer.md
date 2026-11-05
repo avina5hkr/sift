@@ -173,13 +173,13 @@ class SyncStat: mode: int; size: int; mtime: int; error: int        # error = er
 
 class Sync2:
     def __init__(self, host: str, port: int, serial: str, *, timeout_s: float) -> None: ...  # host:transport:<serial> then "sync:"
-    def stat(self, path: bytes) -> SyncStat: ...                               # STA2 (lstat semantics)
+    def stat(self, path: bytes) -> SyncStat: ...                               # LST2 (lstat: symlinks not followed; STA2 would follow them)
     def list(self, path: bytes) -> Iterator[tuple[bytes, SyncStat]]: ...       # LIS2 → DNT2 entries, excludes "." and ".."
     def close(self) -> None: ...
 def device_features(host: str, port: int, serial: str) -> set[str]: ...       # host-serial:<serial>:features
 ```
 Decisions:
-- Wire format per AOSP `file_sync_protocol.h`: `STA2`/`LIS2` requests; replies `STA2`/`DNT2` with `{id, error, dev, ino, mode, nlink, uid, gid, size(u64), atime(i64), mtime(i64), ctime(i64)}` little-endian, plus `namelen` and the name for `DNT2`; `DONE` ends a list.
+- Wire format per AOSP `file_sync_protocol.h`: `LST2`/`LIS2` requests; replies `LST2`/`DNT2` with `{id, error, dev, ino, mode, nlink, uid, gid, size(u64), atime(i64), mtime(i64), ctime(i64)}` little-endian, plus `namelen` and the name for `DNT2`; `DONE` (a full dent_v2-sized message whose fields are ignored) ends a list. LIS2 cannot tell a missing or unreadable folder from an empty one, so callers stat the folder first.
 - Every read loops until the exact byte count arrives (`_recv_exact`). A short read raises `DeviceDisconnected`.
 - Names are bytes end to end, decoded only at the `AdbTransport` boundary with `surrogateescape`.
 - If `ls_v2`/`stat_v2` are missing from the features, raise `RemoteError("This phone's adb is too old for Sift (needs Android 11 or later).")`.
