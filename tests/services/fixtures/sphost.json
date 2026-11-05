@@ -1,0 +1,68 @@
+{
+  "SPUSBHostDataType" : [
+    {
+      "_items" : [
+        {
+          "_name" : "Test Android Phone A",
+          "USBDeviceKeyLinkSpeed" : "480 Mb/s",
+          "USBDeviceKeyProductID" : "0x0001",
+          "USBDeviceKeySerialNumber" : "TESTSERIAL01",
+          "USBDeviceKeyVendorID" : "0x1111",
+          "USBDeviceKeyVendorName" : "Test Vendor A",
+          "USBKeyHardwareType" : "Removable",
+          "USBKeyLocationID" : "0x0a100000"
+        }
+      ],
+      "_name" : "USB 3.1 Bus",
+      "Driver" : "TestXHCI",
+      "USBKeyHardwareType" : "Built-in",
+      "USBKeyLocationID" : "0x0a000000"
+    },
+    {
+      "_items" : [
+        {
+          "_items" : [
+            {
+              "_name" : "Test Android Phone B",
+              "USBDeviceKeyLinkSpeed" : "5 Gb/s",
+              "USBDeviceKeyProductID" : "0x0002",
+              "USBDeviceKeySerialNumber" : "TESTSERIAL02",
+              "USBDeviceKeyVendorID" : "0x2222",
+              "USBDeviceKeyVendorName" : "Test Vendor B",
+              "USBKeyHardwareType" : "Removable",
+              "USBKeyLocationID" : "0x0b210000"
+            }
+          ],
+          "_name" : "Test Hub",
+          "USBDeviceKeyLinkSpeed" : "10 Gb/s",
+          "USBDeviceKeyProductID" : "0x0003",
+          "USBDeviceKeyVendorID" : "0x3333",
+          "USBDeviceKeyVendorName" : "Test Vendor C",
+          "USBKeyHardwareType" : "Removable",
+          "USBKeyLocationID" : "0x0b200000"
+        },
+        {
+          "_name" : "Test External Drive",
+          "USBDeviceKeyLinkSpeed" : "5 Gb/s",
+          "USBDeviceKeyPowerAllocation" : "4.48 W (896 mA)",
+          "USBDeviceKeyProductID" : "0x0004",
+          "USBDeviceKeySerialNumber" : "TESTDRIVE01",
+          "USBDeviceKeyVendorID" : "0x4444",
+          "USBDeviceKeyVendorName" : "Test Vendor D",
+          "USBKeyHardwareType" : "Removable",
+          "USBKeyLocationID" : "0x0b300000"
+        }
+      ],
+      "_name" : "USB 3.1 Bus",
+      "Driver" : "TestXHCI",
+      "USBKeyHardwareType" : "Built-in",
+      "USBKeyLocationID" : "0x0b000000"
+    },
+    {
+      "_name" : "USB 3.1 Bus",
+      "Driver" : "TestXHCI",
+      "USBKeyHardwareType" : "Built-in",
+      "USBKeyLocationID" : "0x0c000000"
+    }
+  ]
+}

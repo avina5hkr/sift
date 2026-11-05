@@ -1,0 +1,20 @@
++-o Android Debug@0  <class IOUSBHostInterface, id 0x1000aa007, registered, matched, active, busy 0, retain 5>
+  | {
+  |   "bInterfaceProtocol" = 1
+  |   "bInterfaceClass" = 255
+  |   "bInterfaceSubClass" = 66
+  |   "bInterfaceNumber" = 0
+  |   "USB Vendor Name" = "Test Vendor B"
+  |   "USB Serial Number" = "TESTSERIAL02"
+  | }
+  |
++-o MTP@1  <class IOUSBHostInterface, id 0x1000aa008, registered, matched, active, busy 0, retain 5>
+  | {
+  |   "bInterfaceProtocol" = 0
+  |   "bInterfaceClass" = 6
+  |   "bInterfaceSubClass" = 1
+  |   "bInterfaceNumber" = 1
+  |   "USB Vendor Name" = "Test Vendor B"
+  |   "USB Serial Number" = "TESTSERIAL02"
+  | }
+  |

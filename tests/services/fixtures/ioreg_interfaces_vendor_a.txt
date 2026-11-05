@@ -1,0 +1,31 @@
++-o MTP@0  <class IOUSBHostInterface, id 0x1000aa004, registered, matched, active, busy 0, retain 5>
+  {
+    "USBSpeed" = 3
+    "bInterfaceProtocol" = 1
+    "USB Product Name" = "Test Android Phone"
+    "bInterfaceClass" = 6
+    "bInterfaceSubClass" = 1
+    "kUSBString" = "MTP"
+    "bInterfaceNumber" = 0
+    "USB Vendor Name" = "Test Vendor A"
+    "USB Serial Number" = "TESTSERIAL01"
+  }
+
++-o ADB Interface@1  <class IOUSBHostInterface, id 0x1000aa005, registered, matched, active, busy 0, retain 5>
+  | {
+  |   "USBSpeed" = 3
+  |   "bInterfaceProtocol" = 1
+  |   "USB Product Name" = "Test Android Phone"
+  |   "bInterfaceClass" = 255
+  |   "bInterfaceSubClass" = 66
+  |   "kUSBString" = "ADB Interface"
+  |   "bInterfaceNumber" = 1
+  |   "USB Vendor Name" = "Test Vendor A"
+  |   "USB Serial Number" = "TESTSERIAL01"
+  | }
+  |
+  +-o adb  <class AppleUSBHostInterfaceUserClient, id 0x1000aa006, !registered, !matched, active, busy 0, retain 5>
+    {
+      "bInterfaceClass" = 0
+    }
+

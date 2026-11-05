@@ -1,0 +1,45 @@
++-o Root  <class IORegistryEntry, id 0x1000aa009, retain 37>
+  +-o TestXHCI@0a000000  <class TestXHCI, id 0x1000aa00a, registered, matched, active, busy 0, retain 65>
+  | +-o Test Android Phone A@0a100000  <class IOUSBHostDevice, id 0x1000aa00b, registered, matched, active, busy 0, retain 30>
+  | | {
+  | |   "idProduct" = 1
+  | |   "USB Product Name" = "Test Android Phone A"
+  | |   "Device Speed" = 2
+  | |   "idVendor" = 4369
+  | |   "USB Vendor Name" = "Test Vendor A"
+  | |   "USB Serial Number" = "TESTSERIAL01"
+  | |   "locationID" = 168820736
+  | | }
+  | |
+  +-o TestXHCI@0b000000  <class TestXHCI, id 0x1000aa00c, registered, matched, active, busy 0, retain 65>
+  | +-o Test Hub@0b200000  <class IOUSBHostDevice, id 0x1000aa00d, registered, matched, active, busy 0, retain 30>
+  | | | {
+  | | |   "idProduct" = 3
+  | | |   "USB Product Name" = "Test Hub"
+  | | |   "Device Speed" = 4
+  | | |   "idVendor" = 13107
+  | | |   "locationID" = 186646528
+  | | | }
+  | | |
+  | | +-o Test Android Phone B@0b210000  <class IOUSBHostDevice, id 0x1000aa00e, registered, matched, active, busy 0, retain 30>
+  | | | {
+  | | |   "idProduct" = 2
+  | | |   "USB Product Name" = "Test Android Phone B"
+  | | |   "Device Speed" = 3
+  | | |   "idVendor" = 8738
+  | | |   "USB Vendor Name" = "Test Vendor B"
+  | | |   "USB Serial Number" = "TESTSERIAL02"
+  | | |   "locationID" = 186712064
+  | | | }
+  | | |
+  | +-o Test External Drive@0b300000  <class IOUSBHostDevice, id 0x1000aa00f, registered, matched, active, busy 0, retain 30>
+  | | {
+  | |   "idProduct" = 4
+  | |   "USB Product Name" = "Test External Drive"
+  | |   "Device Speed" = 3
+  | |   "idVendor" = 17476
+  | |   "USB Vendor Name" = "Test Vendor D"
+  | |   "USB Serial Number" = "TESTDRIVE01"
+  | |   "locationID" = 187695104
+  | | }
+  | |

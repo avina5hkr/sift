@@ -51,7 +51,7 @@ check_untyped_defs = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["sift.core.*", "sift.backup.*", "sift.cleanup.*", "sift.device.*"]
+module = ["sift.core.*", "sift.backup.*", "sift.cleanup.*", "sift.device.*", "sift.services.*"]
 strict = true
 
 [[tool.mypy.overrides]]

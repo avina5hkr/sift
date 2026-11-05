@@ -1,0 +1,25 @@
++-o IOUSBHostInterface@0  <class IOUSBHostInterface, id 0x1000aa001, registered, matched, active, busy 0, retain 5>
+  | {
+  |   "bInterfaceProtocol" = 80
+  |   "bInterfaceClass" = 8
+  |   "bInterfaceSubClass" = 6
+  |   "bInterfaceNumber" = 0
+  |   "USB Vendor Name" = "Test Vendor D"
+  |   "USB Serial Number" = "TESTDRIVE01"
+  | }
+  |
+  +-o IOUSBMassStorageInterfaceNub  <class IOUSBMassStorageInterfaceNub, id 0x1000aa002, registered, matched, active, busy 0, retain 5>
+    {
+      "bInterfaceClass" = 255
+      "bInterfaceSubClass" = 66
+      "bInterfaceProtocol" = 1
+    }
+
++-o Vendor Specific@1  <class IOUSBHostInterface, id 0x1000aa003, registered, matched, active, busy 0, retain 5>
+  {
+    "bInterfaceProtocol" = 255
+    "bInterfaceClass" = 255
+    "bInterfaceSubClass" = 66
+    "USB Serial Number" = "TESTDRIVE01"
+  }
+
