@@ -578,12 +578,9 @@ def test_set_needs_paths_or_shallow_paths(tmp_path: Path) -> None:
     )
     cfg, w = load_config(f)
     assert [s.name for s in cfg.backup.sets] == ["Flat", "Flat2"]
-    assert any(
-        x.startswith('backup.sets[0] ("Empty"):')
-        and "needs at least one entry in paths or shallow_paths" in x
-        and x.endswith("dropped")
-        for x in w
-    )
+    assert (
+        'backup.sets[0] ("Empty"): needs at least one entry in paths or shallow_paths; dropped'
+    ) in w
     assert FALLBACK_WARNING not in w
 
     # every shallow entry invalid and no paths: the set is dropped, then the fallback applies
@@ -633,3 +630,37 @@ def test_fallback_has_nine_sets_none_deletable(tmp_path: Path) -> None:
     assert len(cfg.backup.sets) == 9
     assert all(not s.deletable for s in cfg.backup.sets)
     assert FALLBACK_WARNING in w
+
+
+def test_bare_storage_root_in_paths_is_dropped(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(f, 'paths = ["/storage/emulated/0", "/sdcard/Music"]\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].paths == ["/sdcard/Music"]
+    assert (
+        'backup.sets[0] ("Camera").paths: "/storage/emulated/0" is not allowed '
+        "(no folder after /sdcard/); dropped"
+    ) in w
+
+
+def test_set_warnings_are_plain_words(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[[backup.sets]]\nname = "NoPaths"\npaths = []\nenabled = true\ndeletable = true\n'
+        '[[backup.sets]]\nname = " "\npaths = ["/sdcard/A"]\nenabled = true\ndeletable = true\n'
+        '[[backup.sets]]\nname = 3\npaths = "x"\nenabled = "yes"\ndeletable = 1\n'
+        '[[backup.sets]]\nname = "L"\npaths = ["/sdcard/A"]\nshallow_paths = "x"\n'
+        'exclude = 5\nenabled = true\ndeletable = true\nadopt_mode = "zzz"\n'
+        '[[backup.sets]]\nname = "E"\npaths = [3]\nshallow_paths = [4]\nenabled = true\n'
+        "deletable = true\n"
+        '[[backup.sets]]\nname = "Nodel"\npaths = ["/sdcard/A"]\nenabled = true\n'
+    )
+    _, w = load_config(f)
+    assert len(w) >= 5
+    for x in w:
+        assert "Value error" not in x
+        assert "Input should be" not in x
+    assert any(x.endswith("name: name must not be blank; dropped") for x in w)
+    assert any("paths: must be a list" in x for x in w)
+    assert any("name: must be text" in x for x in w)
+    assert any("deletable: is required" in x for x in w)

@@ -362,9 +362,28 @@ class Config(_Section):
 _FAST_NOTE = "adopt_mode fast is not built yet; hash is used"
 
 
+_PLAIN_TYPES = {
+    "string_type": "must be text",
+    "list_type": "must be a list",
+    "bool_type": "must be true or false",
+    "missing": "is required",
+}
+
+
+def _plain(e: Any) -> str:
+    """One pydantic error as plain words: no "Value error, " or "Input should be ..." wording."""
+    kind: str = e["type"]
+    msg: str = e["msg"]
+    if kind in _PLAIN_TYPES:
+        return _PLAIN_TYPES[kind]
+    if kind == "value_error":
+        return msg.removeprefix("Value error, ")
+    return "must be " + msg.removeprefix("Input should be ") if kind == "literal_error" else msg
+
+
 def _describe(err: ValidationError) -> str:
     return "; ".join(
-        f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" if e["loc"] else e["msg"]
+        f"{'.'.join(str(p) for p in e['loc'])}: {_plain(e)}" if e["loc"] else _plain(e)
         for e in err.errors()
     )
 
