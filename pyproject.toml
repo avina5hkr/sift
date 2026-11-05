@@ -50,7 +50,7 @@ check_untyped_defs = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["sift.core.*", "sift.backup.*", "sift.cleanup.*"]
+module = ["sift.core.*", "sift.backup.*", "sift.cleanup.*", "sift.device.*"]
 strict = true
 
 [tool.pytest.ini_options]
