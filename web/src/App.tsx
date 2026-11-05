@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Navigate, Route, Routes, useNavigate } from 'react-router'
+import { ConfigWarnings } from './components/ConfigWarnings'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
 import { ApiError, apiFetch } from './lib/api'
@@ -27,6 +28,7 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col">
       <StatusBar status={status.data} onOpenSettings={() => navigate('/settings')} />
+      <ConfigWarnings warnings={status.data?.app.config_warnings} />
       {errorMessage && (
         <div
           role="alert"
