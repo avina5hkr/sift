@@ -1,9 +1,11 @@
 import contextlib
+import http.client
 import io
 import os
 import socket
 import stat
 import subprocess
+import threading
 import zipfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,7 +23,7 @@ from sift.device.adb_manager import (
     AdbServerError,
     AdbStatus,
     ConsentRequired,
-    adbutils_server_version,
+    adb_server_version,
 )
 from sift.server.routes.devices import get_adb_manager
 from tests.helpers import H, client_for, make_ctx
@@ -258,6 +260,141 @@ def test_download_that_fails_verification_keeps_the_old_install(paths):
     assert [p.name for p in paths.support.iterdir() if p.name.startswith(".")] == []
 
 
+# --- download hardening -------------------------------------------------------------------------
+
+
+def test_download_stream_cap(paths, monkeypatch):
+    monkeypatch.setattr("sift.device.adb_manager._MAX_DOWNLOAD_BYTES", 100)
+    with pytest.raises(AdbDownloadError, match="larger than expected"):
+        manager(paths).download(consent=True, opener=Opener(GOOD_ZIP + b"x" * 1000))
+    assert not (paths.platform_tools / "adb").exists()
+
+
+def test_download_unpacked_size_cap(paths, monkeypatch):
+    monkeypatch.setattr("sift.device.adb_manager._MAX_UNPACKED_BYTES", 5)
+    data = build_zip({"platform-tools/adb": b"0123456789"})
+    with pytest.raises(AdbDownloadError, match="larger than expected"):
+        manager(paths).download(consent=True, opener=Opener(data))
+
+
+def test_download_member_count_cap(paths, monkeypatch):
+    monkeypatch.setattr("sift.device.adb_manager._MAX_MEMBERS", 3)
+    data = build_zip(
+        {"platform-tools/adb": b"a", **{f"platform-tools/f{i}": b"x" for i in range(5)}}
+    )
+    with pytest.raises(AdbDownloadError, match="larger than expected"):
+        manager(paths).download(consent=True, opener=Opener(data))
+
+
+def _corrupt(data: bytes, compression: int) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression) as zf:
+        zf.writestr("platform-tools/adb", b"A" * 5000 if compression else b"abcdefgh")
+    raw = bytearray(buf.getvalue())
+    start = 30 + len("platform-tools/adb")
+    raw[start : start + 8] = b"\xff" * 8
+    return bytes(raw)
+
+
+@pytest.mark.parametrize("compression", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+def test_download_corrupt_member_is_a_plain_error(paths, compression):
+    make_exe(paths.platform_tools / "adb")
+    with pytest.raises(AdbDownloadError, match="could not be downloaded or installed"):
+        manager(paths).download(consent=True, opener=Opener(_corrupt(b"", compression)))
+    assert [p.name for p in paths.support.iterdir() if p.name.startswith(".")] == []
+
+
+class TruncatedStream(io.BytesIO):
+    def read(self, size: int = -1) -> bytes:
+        data = super().read(size)
+        if not data:
+            raise http.client.IncompleteRead(b"", 100)
+        return data
+
+
+def test_download_truncated_stream_is_a_plain_error(paths):
+    with pytest.raises(AdbDownloadError, match="did not finish"):
+        manager(paths).download(consent=True, opener=lambda url: TruncatedStream(GOOD_ZIP[:50]))
+
+
+def test_download_masks_member_permissions(paths):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in ("platform-tools/adb", "platform-tools/loose"):
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (stat.S_IFREG | 0o4777) << 16  # setuid + world-writable
+            zf.writestr(info, b"x")
+    manager(paths).download(consent=True, opener=Opener(buf.getvalue()))
+    for name in ("adb", "loose"):
+        assert stat.S_IMODE((paths.platform_tools / name).stat().st_mode) & ~0o755 == 0
+
+
+def test_download_sweeps_stale_leftovers(paths):
+    (paths.support / ".platform-tools-abc.zip").write_bytes(b"x")
+    (paths.support / ".platform-tools-abc.new").mkdir()
+    (paths.support / ".platform-tools-abc.new" / "f").write_text("x")
+    make_exe(paths.platform_tools / "adb")
+    make_exe(paths.support / ".platform-tools.old" / "adb")
+    manager(paths).download(consent=True, opener=Opener(GOOD_ZIP))
+    assert [p.name for p in paths.support.iterdir() if p.name.startswith(".platform")] == []
+
+
+def test_download_cleans_up_when_mkdtemp_fails(paths, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("sift.device.adb_manager.tempfile.mkdtemp", boom)
+    with pytest.raises(AdbDownloadError):
+        manager(paths).download(consent=True, opener=Opener(GOOD_ZIP))
+    assert [p.name for p in paths.support.iterdir() if p.name.startswith(".")] == []
+
+
+def test_concurrent_downloads_run_one_at_a_time(paths):
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def opener(url: str) -> io.BytesIO:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        threading.Event().wait(0.1)
+        with guard:
+            active -= 1
+        return io.BytesIO(GOOD_ZIP)
+
+    threads = [
+        threading.Thread(target=lambda: manager(paths).download(consent=True, opener=opener))
+        for _ in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert peak == 1 and (paths.platform_tools / "adb").exists()
+
+
+def test_locate_restores_the_previous_install_after_an_interrupted_swap(paths):
+    paths.platform_tools.rmdir()  # an install died between "set old aside" and "move new in"
+    make_exe(paths.support / ".platform-tools.old" / "adb")
+    loc = manager(paths).locate()
+    assert loc.status == AdbStatus.ready and loc.path == paths.platform_tools / "adb"
+    assert not (paths.support / ".platform-tools.old").exists()
+
+
+def test_locate_restores_into_an_empty_platform_tools_folder(paths):
+    make_exe(paths.support / ".platform-tools.old" / "adb")  # paths.ensure() left it empty
+    assert manager(paths).locate().status == AdbStatus.ready
+
+
+def test_locate_does_not_restore_a_broken_old_copy(paths):
+    make_exe(paths.support / ".platform-tools.old" / "adb")
+    loc = manager(paths, FakeRunner(version_rc=1)).locate()
+    assert loc.status == AdbStatus.missing
+    assert (paths.support / ".platform-tools.old" / "adb").exists()
+
+
 # --- ensure_server --------------------------------------------------------------------------
 
 
@@ -324,12 +461,81 @@ def test_never_calls_kill_server(paths):
     assert all("kill-server" not in arg for call, _ in runner.calls for arg in call)
 
 
-def test_default_probe_returns_none_when_nothing_listens():
+# --- default probe (raw socket) ---------------------------------------------------------------
+
+
+class OneShotServer:
+    """Accepts one connection on 127.0.0.1:<free port>, reads the request, sends `reply`."""
+
+    def __init__(self, reply: bytes) -> None:
+        self.reply = reply
+        self.request = b""
+        self._srv = socket.socket()
+        self._srv.bind(("127.0.0.1", 0))
+        self._srv.listen(1)
+        self._srv.settimeout(5)
+        self.port: int = self._srv.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve)
+
+    def _serve(self) -> None:
+        try:
+            conn, _ = self._srv.accept()
+        except OSError:
+            return
+        with conn:
+            conn.settimeout(5)
+            try:
+                self.request = conn.recv(64)
+                if self.reply:
+                    conn.sendall(self.reply)
+            except OSError:
+                pass
+
+    def __enter__(self) -> OneShotServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._srv.close()
+        self._thread.join(10)
+        assert not self._thread.is_alive()
+
+
+def test_probe_reads_the_server_version():
+    with OneShotServer(b"OKAY00040029") as srv:
+        assert adb_server_version("127.0.0.1", srv.port) == "41"
+    assert srv.request == b"000chost:version"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"garbage that is not adb",
+        b"FAIL0004nope",
+        b"OKAY0004zzzz",
+        b"OKAYxxxx0029",
+        b"OKAY00",  # closes mid-reply
+        b"OKAY00040",  # closes mid-version
+        b"",  # closes without a word
+    ],
+)
+def test_probe_returns_none_for_bad_replies(reply):
+    with OneShotServer(reply) as srv:
+        assert adb_server_version("127.0.0.1", srv.port) is None
+
+
+def test_probe_returns_none_when_nothing_listens():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
-    assert adbutils_server_version("127.0.0.1", port) is None
+    assert adb_server_version("127.0.0.1", port) is None
+
+
+def test_default_manager_probe_is_the_raw_socket_one(paths):
+    from sift.device import adb_manager
+
+    assert AdbManager.__init__.__kwdefaults__["server_probe"] is adb_manager.adb_server_version
 
 
 # --- API ------------------------------------------------------------------------------------

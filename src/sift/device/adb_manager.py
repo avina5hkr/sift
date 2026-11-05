@@ -6,6 +6,7 @@ to whatever answers there and only starts a server when nothing does.
 """
 
 import contextlib
+import http.client
 import logging
 import os
 import re
@@ -14,7 +15,9 @@ import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import zipfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -22,11 +25,10 @@ from pathlib import Path, PurePosixPath
 from typing import IO
 from urllib.request import urlopen
 
-import adbutils
-
 from sift.core.config import PhoneConfig
 from sift.core.paths import AppPaths
 from sift.core.proc import Runner, subprocess_runner
+from sift.device.adbutils_guard import install_no_spawn_guard
 
 logger = logging.getLogger("sift.device")
 
@@ -38,6 +40,12 @@ _START_SERVER_TIMEOUT = 10
 _DOWNLOAD_TIMEOUT = 60
 _PROBE_TIMEOUT = 2.0
 _CHUNK = 1024 * 1024
+_MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
+_MAX_UNPACKED_BYTES = 500 * 1024 * 1024
+_MAX_MEMBERS = 2000
+
+# One download at a time, however many requests arrive.
+_download_lock = threading.Lock()
 
 MISSING_MESSAGE = (
     "adb was not found. Sift can download Google's platform-tools for you, "
@@ -81,19 +89,34 @@ class AdbServerError(AdbError):
     """No adb server answers on the shared port and one could not be started."""
 
 
-def adbutils_server_version(host: str, port: int) -> str | None:
-    """The adb server's protocol version if one answers on host:port, else None."""
-    # adbutils leaves its socket open when the connection is refused, so first check that
-    # something listens at all (and close that probe socket ourselves).
+def adb_server_version(host: str, port: int) -> str | None:
+    """The adb server's protocol version (decimal text) if one answers on host:port, else None.
+
+    Speaks the adb host protocol directly over a socket and never starts anything: adbutils
+    would run an adb command line program when the connection fails.
+    """
     try:
-        socket.create_connection((host, port), timeout=_PROBE_TIMEOUT).close()
-    except OSError:
+        with socket.create_connection((host, port), timeout=_PROBE_TIMEOUT) as s:
+            s.settimeout(_PROBE_TIMEOUT)
+            s.sendall(b"000chost:version")
+            if _recv_exact(s, 4) != b"OKAY":
+                return None
+            size = int(_recv_exact(s, 4), 16)
+            if not 0 < size <= 16:
+                return None
+            return str(int(_recv_exact(s, size), 16))
+    except OSError, ValueError:
         return None
-    try:
-        version = adbutils.AdbClient(host=host, port=port, socket_timeout=_PROBE_TIMEOUT)
-        return str(version.server_version())
-    except adbutils.AdbError, OSError, ValueError:
-        return None
+
+
+def _recv_exact(s: socket.socket, n: int) -> bytes:
+    data = b""
+    while len(data) < n:
+        chunk = s.recv(n - len(data))
+        if not chunk:
+            raise OSError("adb server closed the connection")
+        data += chunk
+    return data
 
 
 def _default_opener(url: str) -> IO[bytes]:
@@ -116,8 +139,9 @@ class AdbManager:
         config: PhoneConfig,
         *,
         runner: Runner = subprocess_runner,
-        server_probe: Callable[[str, int], str | None] = adbutils_server_version,
+        server_probe: Callable[[str, int], str | None] = adb_server_version,
     ) -> None:
+        install_no_spawn_guard()
         self._paths = paths
         self._config = config
         self._runner = runner
@@ -141,8 +165,26 @@ class AdbManager:
             return self._verify(path)
         managed = self._paths.platform_tools / "adb"
         if not _is_executable(managed):
+            self._restore_previous_install()
+        if not _is_executable(managed):
             return AdbLocation(None, None, AdbStatus.missing, MISSING_MESSAGE)
         return self._verify(managed)
+
+    def _restore_previous_install(self) -> None:
+        """Put back the copy set aside by an install that was interrupted half way."""
+        dest = self._paths.platform_tools
+        old = _old_dir(dest)
+        if not _is_executable(old / "adb") or self._verify(old / "adb").status is not (
+            AdbStatus.ready
+        ):
+            return
+        try:
+            if dest.exists():
+                dest.rmdir()  # only an empty folder; never remove someone's files
+            old.rename(dest)
+            logger.warning("Restored the previous platform-tools after an interrupted install")
+        except OSError as e:
+            logger.warning("Could not restore the previous platform-tools: %s", e)
 
     def _verify(self, adb: Path) -> AdbLocation:
         try:
@@ -188,23 +230,45 @@ class AdbManager:
         """Download Google's platform-tools into `<support>/platform-tools`.
 
         Raises `ConsentRequired` before any network access unless `consent` is True. The zip is
-        checked member by member (no path may leave the target, no links) and adb must run
-        before the new copy replaces an existing one.
+        checked member by member (no path may leave the target, no links, size caps) and adb
+        must run before the new copy replaces an existing one. Downloads run one at a time.
         """
         if not consent:
             raise ConsentRequired(
                 "Sift downloads Google's platform-tools only with your permission. "
                 "Approve the download to continue."
             )
+        with _download_lock:
+            try:
+                return self._download(opener)
+            except (
+                zipfile.BadZipFile,
+                zlib.error,
+                NotImplementedError,
+                RuntimeError,
+                OSError,
+                http.client.IncompleteRead,
+            ) as e:
+                logger.warning("platform-tools install failed: %r", e)
+                raise AdbDownloadError(
+                    "The platform-tools package could not be downloaded or installed. "
+                    "Check your internet connection and free disk space, then try again."
+                ) from e
+
+    def _download(self, opener: Opener) -> AdbLocation:
         support = self._paths.support
         support.mkdir(parents=True, exist_ok=True)
-        archive = Path(tempfile.mkstemp(prefix=".platform-tools-", suffix=".zip", dir=support)[1])
-        staging = Path(tempfile.mkdtemp(prefix=".platform-tools-", suffix=".new", dir=support))
+        _sweep_leftovers(support, self._paths.platform_tools)
+        archive: Path | None = None
+        staging: Path | None = None
         try:
+            fd, name = tempfile.mkstemp(prefix=".platform-tools-", suffix=".zip", dir=support)
+            os.close(fd)
+            archive = Path(name)
+            staging = Path(tempfile.mkdtemp(prefix=".platform-tools-", suffix=".new", dir=support))
             self._fetch(opener, archive)
             _unpack(archive, staging)
-            adb = staging / "platform-tools" / "adb"
-            loc = self._verify(adb)
+            loc = self._verify(staging / "platform-tools" / "adb")
             if loc.status is not AdbStatus.ready:
                 raise AdbDownloadError(
                     "Google's platform-tools downloaded, but adb did not run, so it was not "
@@ -212,21 +276,47 @@ class AdbManager:
                 )
             _replace_dir(staging / "platform-tools", self._paths.platform_tools)
         finally:
-            archive.unlink(missing_ok=True)
-            shutil.rmtree(staging, ignore_errors=True)
+            if archive is not None:
+                archive.unlink(missing_ok=True)
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
         final = self._paths.platform_tools / "adb"
         return AdbLocation(final, loc.version, AdbStatus.ready, loc.message)
 
     def _fetch(self, opener: Opener, dest: Path) -> None:
         try:
             with opener(PLATFORM_TOOLS_URL) as src, dest.open("wb") as out:
-                shutil.copyfileobj(src, out, _CHUNK)
-        except OSError as e:  # URLError and timeouts are OSErrors too
-            logger.warning("platform-tools download failed: %s", e)
+                total = 0
+                while chunk := src.read(_CHUNK):
+                    total += len(chunk)
+                    if total > _MAX_DOWNLOAD_BYTES:
+                        raise AdbDownloadError(
+                            "The platform-tools download is much larger than expected, so "
+                            "Sift stopped it. Nothing was installed."
+                        )
+                    out.write(chunk)
+        except (OSError, http.client.IncompleteRead) as e:  # URLError and timeouts are OSErrors
+            logger.warning("platform-tools download failed: %r", e)
             raise AdbDownloadError(
                 "The platform-tools download did not finish. Check your internet connection "
                 "and try again."
             ) from e
+
+
+def _old_dir(dest: Path) -> Path:
+    return dest.with_name(f".{dest.name}.old")
+
+
+def _sweep_leftovers(support: Path, dest: Path) -> None:
+    """Remove temp files and folders an earlier, interrupted install left behind."""
+    for p in support.glob(".platform-tools-*"):
+        if p.suffix in (".zip", ".new"):
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+    if dest.exists():  # otherwise the old copy may be the only working one
+        shutil.rmtree(_old_dir(dest), ignore_errors=True)
 
 
 def _is_executable(path: Path) -> bool:
@@ -250,6 +340,13 @@ def _bad_zip(why: str) -> AdbDownloadError:
     )
 
 
+def _too_big(why: str) -> AdbDownloadError:
+    logger.warning("platform-tools zip rejected: %s", why)
+    return AdbDownloadError(
+        "The platform-tools package is much larger than expected, so nothing was installed."
+    )
+
+
 def _unpack(archive: Path, staging: Path) -> None:
     """Extract only `platform-tools/...` members into `staging`, refusing anything unsafe."""
     try:
@@ -258,8 +355,13 @@ def _unpack(archive: Path, staging: Path) -> None:
         raise _bad_zip("not a zip file") from e
     with zf:
         root = staging.resolve()
+        members = zf.infolist()
+        if len(members) > _MAX_MEMBERS:
+            raise _too_big(f"{len(members)} members")
+        if sum(i.file_size for i in members) > _MAX_UNPACKED_BYTES:
+            raise _too_big("unpacked size too large")
         wanted: list[tuple[zipfile.ZipInfo, Path]] = []
-        for info in zf.infolist():
+        for info in members:
             name = info.filename
             pure = PurePosixPath(name)
             # Every member is checked, wanted or not: one bad name means a bad archive.
@@ -284,13 +386,13 @@ def _unpack(archive: Path, staging: Path) -> None:
             with zf.open(info) as src, target.open("wb") as out:
                 shutil.copyfileobj(src, out, _CHUNK)
             perms = (info.external_attr >> 16) & 0o777
-            target.chmod((perms or 0o644) | 0o600)
+            target.chmod(((perms or 0o644) & 0o755) | 0o600)
         (root / "platform-tools" / "adb").chmod(0o755)
 
 
 def _replace_dir(new: Path, dest: Path) -> None:
     """Swap `dest` for `new` so a reader sees the old folder or the new one, never half of it."""
-    old = dest.with_name(f".{dest.name}.old")
+    old = _old_dir(dest)
     shutil.rmtree(old, ignore_errors=True)
     had_old = dest.exists()
     if had_old:
