@@ -14,6 +14,7 @@ from typing import BinaryIO, cast
 
 from sift.device.fake_phone import FakePhone
 from sift.device.transport import (
+    NO_IDENTITY_MESSAGE,
     DeviceDisconnected,
     DeviceInfo,
     DeviceTimeout,
@@ -200,8 +201,11 @@ class FakeTransport:
         self._shell("info")
         phone = self.phone
         free = None if phone.total_bytes is None else max(phone.total_bytes - phone.used_bytes(), 0)
+        identity = self.faults.identity or phone.serial or phone.android_id
+        if not identity:
+            raise RemoteError(NO_IDENTITY_MESSAGE)
         return DeviceInfo(
-            serial=self.faults.identity or phone.serial,
+            serial=identity,
             model=phone.model,
             android_version=phone.android_version,
             battery_pct=phone.battery_pct,

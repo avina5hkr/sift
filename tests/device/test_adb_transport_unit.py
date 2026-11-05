@@ -648,6 +648,43 @@ def test_info_tolerates_unreadable_extras(transport: AdbTransport, server: FakeA
     assert info.screen_sizes == ()
 
 
+def _without_serialno(phone: Phone, android_id: bytes) -> list[bytes]:
+    seen: list[bytes] = []
+
+    def run(command: bytes) -> Iterable[bytes]:
+        seen.append(command)
+        if command == b"getprop ro.serialno":
+            return [b"\n"]
+        if command == b"settings get secure android_id":
+            return [android_id]
+        return phone.run(command)
+
+    phone.server.exec_handler = run
+    return seen
+
+
+def test_info_identity_falls_back_to_android_id(transport: AdbTransport, phone: Phone) -> None:
+    seen = _without_serialno(phone, b"0000fake000000aa\n")
+    assert transport.info().serial == "0000fake000000aa"
+    assert b"settings get secure android_id" in seen
+
+
+def test_info_reads_android_id_only_when_serialno_is_empty(
+    transport: AdbTransport, server: FakeAdbServer
+) -> None:
+    transport.info()
+    assert b"exec:settings get secure android_id" not in server.requests
+
+
+@pytest.mark.parametrize("android_id", [b"\n", b"null\n"])
+def test_info_without_serial_or_android_id_raises(
+    transport: AdbTransport, phone: Phone, android_id: bytes
+) -> None:
+    _without_serialno(phone, android_id)
+    with pytest.raises(RemoteError, match="serial number"):
+        transport.info()
+
+
 def test_info_without_a_model_raises(transport: AdbTransport, server: FakeAdbServer) -> None:
     server.exec_handler = lambda command: [b""]
     with pytest.raises(RemoteError):

@@ -15,9 +15,16 @@ class RemoteEntry:
     is_symlink: bool
 
 
+# What `info()` raises (as RemoteError) when the phone has neither identity.
+NO_IDENTITY_MESSAGE = (
+    "The phone did not report a serial number or an Android ID, so Sift cannot tell which "
+    "phone it is."
+)
+
+
 @dataclass(frozen=True)
 class DeviceInfo:
-    serial: str
+    serial: str  # the phone's identity: ro.serialno, else android_id (never empty)
     model: str
     android_version: str
     battery_pct: int | None
@@ -65,7 +72,13 @@ class Transport(Protocol):
     Timestamps are plain Unix seconds (ints, possibly 0, negative or beyond 2**31).
     """
 
-    def info(self) -> DeviceInfo: ...
+    def info(self) -> DeviceInfo:
+        """Model, Android version, storage, battery and the phone's identity.
+
+        `serial` is `ro.serialno`, or `android_id` when the phone reports no serial number.
+        Raises `RemoteError` (with `NO_IDENTITY_MESSAGE`) when it reports neither.
+        """
+        ...
 
     def walk(self, root: str) -> Iterator[RemoteEntry]:
         """Depth-first listing of everything under `root`.

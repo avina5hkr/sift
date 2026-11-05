@@ -172,6 +172,17 @@ def test_identity_override_changes_info_serial() -> None:
     assert plain.info().serial == phone2.serial
 
 
+def test_info_identity_falls_back_to_android_id() -> None:
+    phone = FakePhone(serial="", android_id="0000fake000000aa")
+    assert FakeTransport(phone).info().serial == "0000fake000000aa"
+
+
+def test_info_without_serial_or_android_id_raises() -> None:
+    phone = FakePhone(serial="", android_id="")
+    with pytest.raises(RemoteError, match="serial number"):
+        FakeTransport(phone).info()
+
+
 def test_journal_marks_reads_as_not_mutating_and_delete_push_as_mutating(tmp_path: Path) -> None:
     transport, _, _ = make()
     transport.info()

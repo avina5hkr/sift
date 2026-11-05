@@ -12,7 +12,8 @@ How each call reaches the phone:
 - `sha256` stats the paths, then hashes on the phone with one `sha256sum` line per file, in
   batches (see `shell.build_sha256_script` for why no name ever appears in the output).
 - `info` and `link_health` run read-only commands (`getprop`, `df`, `wm size`,
-  `dumpsys battery`, `true`).
+  `dumpsys battery`, `true`, and `settings get secure android_id` when the phone reports no
+  `ro.serialno`). `DeviceInfo.serial` is the phone's identity: `ro.serialno`, else `android_id`.
 
 Connections to the adb server come from adbutils' `AdbClient.make_connection` (after
 `install_no_spawn_guard()`, so adbutils can never start an adb program); the service requests on
@@ -67,6 +68,7 @@ from sift.device.sync2 import (
     device_features,
 )
 from sift.device.transport import (
+    NO_IDENTITY_MESSAGE,
     DeviceDisconnected,
     DeviceInfo,
     DeviceTimeout,
@@ -575,7 +577,14 @@ class AdbTransport:
         release = text("getprop ro.build.version.release").strip()
         if not model or not release:
             raise RemoteError("The phone did not report its model and Android version.")
-        serial = text("getprop ro.serialno").strip() or self.serial
+        serial = text("getprop ro.serialno").strip()
+        if not serial:
+            # `settings get` is a read; it prints "null" when the value is not set.
+            serial = text("settings get secure android_id").strip()
+            if serial == "null":
+                serial = ""
+        if not serial:
+            raise RemoteError(NO_IDENTITY_MESSAGE)
         storage = parse_df(text("df /sdcard"))
         free, total = storage if storage is not None else (None, None)
         return DeviceInfo(
