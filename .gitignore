@@ -15,3 +15,6 @@ web/.e2e-home/
 .superpowers/
 .DS_Store
 *.swp
+
+# private notes and unredacted copies (never committed)
+local/
