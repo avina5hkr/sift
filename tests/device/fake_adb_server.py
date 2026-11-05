@@ -66,6 +66,8 @@ class FakeAdbServer:
     recv_stall_after: int | None = None
     # RECV: leave out this many bytes at the end of the file, then send DONE as if complete.
     recv_short_by: int = 0
+    # RECV: after this many bytes of file data, drop the connection (no DONE).
+    recv_cut_after: int | None = None
     # `exec:<command>`: the command bytes in, stdout chunks out. None refuses exec.
     exec_handler: Callable[[bytes], Iterable[bytes]] | None = None
 
@@ -239,11 +241,15 @@ class FakeAdbServer:
         data = data[: len(data) - self.recv_short_by]
         if self.recv_stall_after is not None:
             data = data[: self.recv_stall_after]
+        if self.recv_cut_after is not None:
+            data = data[: self.recv_cut_after]
         for start in range(0, len(data), 65536):
             chunk = data[start : start + 65536]
             conn.sendall(b"DATA" + struct.pack("<I", len(chunk)) + chunk)
         if self.recv_stall_after is not None:
             self._stop.wait()
+            return False
+        if self.recv_cut_after is not None:
             return False
         conn.sendall(b"DONE" + struct.pack("<I", 0))
         return True

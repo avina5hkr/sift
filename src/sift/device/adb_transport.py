@@ -7,8 +7,10 @@ How each call reaches the phone:
   handed to every `Sync2`, so a sync connection costs one socket, not two.
 - `open_read(path, 0)` streams the file with sync `RECV`; `open_read(path, n > 0)` runs
   `exec:tail -c +{n+1}` (1-based) and streams its stdout. Both go through
-  `StallGuardedStream`, which turns "no bytes for `read_stall_s`" into `DeviceTimeout` and a
-  stream that ends short of the size seen by `stat` into `DeviceDisconnected`.
+  `StallGuardedStream`, which turns "no bytes for `read_stall_s`" into `DeviceTimeout`. A
+  stream that ends short of the size seen by `stat` raises `FileChanged` when the phone is
+  still there (RECV: a clean `DONE`; tail: the path is stat'ed once more and the phone answers)
+  and `DeviceDisconnected` when it is not.
 - `sha256` stats the paths, then hashes on the phone with one `sha256sum` line per file, in
   batches (see `shell.build_sha256_script` for why no name ever appears in the output).
 - `info` and `link_health` run read-only commands (`getprop`, `df`, `wm size`,
@@ -72,6 +74,7 @@ from sift.device.transport import (
     DeviceDisconnected,
     DeviceInfo,
     DeviceTimeout,
+    FileChanged,
     LinkHealth,
     RemoteEntry,
     RemoteError,
@@ -279,9 +282,9 @@ class StallGuardedStream(io.RawIOBase):
       on the watchdog thread and must not free anything the reader may still touch). The read
       then raises `DeviceTimeout`, and so does every later read. Time the caller spends
       between reads never counts as a stall.
-    - Early end: if the chunks end before `expected_size` bytes, the read raises
-      `DeviceDisconnected` (again on every later read). More bytes than expected is fine (the
-      file grew).
+    - Early end: if the chunks end before `expected_size` bytes, the read raises what
+      `short_end(received, expected)` returns, `DeviceDisconnected` by default (again on every
+      later read; `short_end` is asked once). More bytes than expected is fine (the file grew).
     - `close()` first calls `abort` (so a read blocked on another thread wakes up), then stops
       the watchdog, closes the chunk iterator and calls `release` exactly once. A stream that
       is dropped without `close()` is closed when it is collected.
@@ -296,6 +299,7 @@ class StallGuardedStream(io.RawIOBase):
         stall_s: float,
         abort: Callable[[], None],
         first_chunk_stall_s: float | None = None,
+        short_end: Callable[[int, int], TransportError] | None = None,
         release: Callable[[], None] = _noop,
         clock: Callable[[], float] = time.monotonic,
         poll_s: float | None = None,
@@ -307,6 +311,7 @@ class StallGuardedStream(io.RawIOBase):
         self._stall_s = stall_s
         self._first_stall_s = stall_s if first_chunk_stall_s is None else first_chunk_stall_s
         self._abort = abort
+        self._short_end = short_end
         self._release: Callable[[], None] | None = release
         self._pending = memoryview(b"")
         self._received = 0
@@ -412,13 +417,20 @@ class StallGuardedStream(io.RawIOBase):
                 return chunk
         self._ended = True
         if self._expected is not None and self._received < self._expected:
-            self._fail(
-                DeviceDisconnected(
-                    f"The phone sent {self._received} of {self._expected} bytes of {self._path} "
-                    "before the stream ended."
-                )
-            )
+            if self._short_end is not None:
+                self._fail(self._short_end(self._received, self._expected))
+            self._fail(_ended_short(self._path, self._received, self._expected))
         return None
+
+
+def _ended_short(path: str, received: int, expected: int) -> DeviceDisconnected:
+    return DeviceDisconnected(
+        f"The phone sent {received} of {expected} bytes of {path} before the stream ended."
+    )
+
+
+def _file_changed(path: str) -> FileChanged:
+    return FileChanged(f"{path} changed while it was being read.", path)
 
 
 def _host_request(sock: socket.socket, payload: bytes, *, fail: type[TransportError]) -> None:
@@ -694,6 +706,7 @@ class AdbTransport:
             self._slots.release()
             raise
         sock: socket.socket = conn.conn
+        short_end: Callable[[int, int], TransportError]
         try:
             if offset == 0:
                 _send_all(sock, b"RECV" + _U32.pack(len(raw)) + raw)
@@ -702,11 +715,22 @@ class AdbTransport:
                 if first == b"FAIL":
                     next(chunks)  # raises RemoteError naming the path, now rather than later
                 expected = entry.size
+
+                # The chunks end only at a clean DONE (a lost connection raises
+                # DeviceDisconnected), so ending short means the file shrank.
+                def short_end(received: int, wanted: int) -> TransportError:
+                    return _file_changed(path)
             else:
-                # tail cannot report errors here (stderr is discarded): an unreadable file
-                # shows up as a short stream, which raises DeviceDisconnected.
+                # tail's stream ends the same way whether the file shrank or the phone went
+                # away (and stderr is discarded), so the phone is asked once more.
                 chunks = _raw_chunks(sock)
                 expected = max(entry.size - offset, 0)
+
+                def short_end(received: int, wanted: int) -> TransportError:
+                    if self._phone_answers_stat(path):
+                        return _file_changed(path)
+                    return _ended_short(path, received, wanted)
+
             # tail is silent while it skips `offset` bytes, so the first chunk gets longer.
             first_chunk_s = resume_allowance_s(offset, self.limits)
             # The watchdog is the stall detector; the socket timeout is only a backstop.
@@ -734,10 +758,33 @@ class AdbTransport:
             expected_size=expected,
             stall_s=self.limits.read_stall_s,
             first_chunk_stall_s=first_chunk_s,
+            short_end=short_end,
             abort=abort,
             release=release,
         )
         return cast(BinaryIO, stream)
+
+    def _phone_answers_stat(self, path: str) -> bool:
+        """True if the phone answers a stat of `path` at all (found, missing or refused).
+
+        Called by a stream whose own connection has ended; it reuses that stream's connection
+        slot (still held until the stream is closed) instead of waiting for another one.
+        """
+        try:
+            with Sync2(
+                self._host,
+                self._port,
+                self.serial,
+                timeout_s=self.limits.stat_s,
+                features=self._phone_features(),
+            ) as sync:
+                sync.stat(_encode_path(path))
+        except RemoteError:
+            return True  # the phone answered, with an error
+        except (TransportError, OSError) as e:
+            log.info("The phone did not answer a stat of %s: %s", path, e)
+            return False
+        return True
 
     def sha256(self, paths: list[str]) -> dict[str, str | None]:
         """Hashes computed on the phone; None for missing, unreadable, folders and symlinks."""

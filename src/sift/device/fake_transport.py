@@ -18,6 +18,7 @@ from sift.device.transport import (
     DeviceDisconnected,
     DeviceInfo,
     DeviceTimeout,
+    FileChanged,
     LinkHealth,
     RemoteEntry,
     RemoteError,
@@ -33,7 +34,7 @@ class FaultPlan:
     disconnect_after_bytes: int | None = None  # one-shot: after N bytes served, reads fail once
     hang_on: set[str] = field(default_factory=set)  # reads (and hashing) never yield
     slow_read_bps: int | None = None
-    size_change_mid_read: set[str] = field(default_factory=set)  # stream is 1 byte longer
+    size_change_mid_read: set[str] = field(default_factory=set)  # FileChanged at the old end
     wrong_sha256: set[str] = field(default_factory=set)
     refuse_delete: set[str] = field(default_factory=set)
     offline_for_s: float | None = None  # every call raises DeviceDisconnected for this long
@@ -66,17 +67,23 @@ class ManualClock:
 
 
 class _FakeStream(io.RawIOBase):
-    """A non-seekable byte stream over a phone file, subject to the fault plan."""
+    """A non-seekable byte stream over a phone file, subject to the fault plan.
+
+    Like the real transport, a file that ends short of the size it had at open (or is removed)
+    while the phone is there raises `FileChanged`, after whatever bytes were still there, and
+    again on every later read. A path in `size_change_mid_read` raises it when the read reaches
+    the size seen at open (the file grew meanwhile).
+    """
 
     def __init__(self, transport: FakeTransport, path: str, size: int, offset: int) -> None:
         super().__init__()
         self._t = transport
         self._path = path
         self._pos = offset
-        grows = path in transport.faults.size_change_mid_read
-        self._end = size + 1 if grows else size
-        self._grows = grows
+        self._end = size
+        self._grows = path in transport.faults.size_change_mid_read
         self._broken = False
+        self._changed = False
 
     def readable(self) -> bool:
         return True
@@ -99,12 +106,22 @@ class _FakeStream(io.RawIOBase):
     def readall(self) -> bytes:
         return self.read(-1)
 
+    def _file_changed(self) -> FileChanged:
+        self._changed = True
+        return FileChanged(f"{self._path} changed while it was being read.", self._path)
+
     def _read_chunk(self, wanted: int) -> bytes:
         t = self._t
         if self._broken:
             raise DeviceDisconnected("device disconnected during read")
+        if self._changed:
+            raise self._file_changed()
         t.check_online()
-        if wanted == 0 or self._pos >= self._end:
+        if wanted == 0:
+            return b""
+        if self._pos >= self._end:
+            if self._grows:
+                raise self._file_changed()
             return b""
         if self._path in t.faults.hang_on:
             t.wait_for_stall()
@@ -119,12 +136,14 @@ class _FakeStream(io.RawIOBase):
                 self._broken = True
                 raise DeviceDisconnected(f"device disconnected after {limit} bytes")
             count = min(count, remaining)
-        data = t.phone.read_range(self._path, self._pos, count)
+        try:
+            data = t.phone.read_range(self._path, self._pos, count)
+        except KeyError:  # removed (or replaced by a folder) mid-read
+            raise self._file_changed() from None
+        if not data:
+            raise self._file_changed()
         if len(data) < count:
-            if self._grows:
-                data += b"\0" * (count - len(data))
-            else:
-                self._end = self._pos + len(data)
+            self._changed = True  # the file shrank: what is left now, FileChanged next
         if t.faults.slow_read_bps:
             t.sleep(len(data) / t.faults.slow_read_bps)
         self._pos += len(data)

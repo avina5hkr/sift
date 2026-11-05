@@ -9,7 +9,7 @@ import pytest
 
 from sift.device.fake_phone import FakePhone
 from sift.device.fake_transport import FakeTransport, FaultPlan, JournalEntry, ManualClock
-from sift.device.transport import DeviceDisconnected, DeviceTimeout, RemoteError
+from sift.device.transport import DeviceDisconnected, DeviceTimeout, FileChanged, RemoteError
 
 PATH = "/sdcard/DCIM/clip.bin"
 OTHER = "/sdcard/DCIM/other.bin"
@@ -81,16 +81,39 @@ def test_slow_reads_take_clock_time() -> None:
     assert clock() - started == pytest.approx(2.0)
 
 
-def test_size_change_mid_read_is_detectable() -> None:
+def test_size_change_mid_read_raises_file_changed() -> None:
     transport, _, _ = make(FaultPlan(size_change_mid_read={PATH}))
-    stat = transport.stat(PATH)
-    assert stat is not None
     with transport.open_read(PATH) as stream:
-        data = stream.read()
-    assert len(data) != stat.size
-    # Untouched files still match their size.
+        assert stream.read(100) == DATA[:100]
+        for _ in range(2):  # and on every later read
+            with pytest.raises(FileChanged) as info:
+                stream.read()
+            assert info.value.path == PATH
+            assert str(info.value) == f"{PATH} changed while it was being read."
+    # Untouched files still read in full.
     with transport.open_read(OTHER) as stream:
-        assert len(stream.read()) == 5
+        assert stream.read() == b"other"
+
+
+def test_a_file_that_shrinks_mid_read_raises_file_changed_after_what_is_left() -> None:
+    transport, phone, _ = make()
+    with transport.open_read(PATH) as stream:
+        assert stream.read(100) == DATA[:100]
+        phone.add_file(PATH, DATA[:500], mtime=1_700_000_002)
+        assert stream.read(1000) == DATA[100:500]
+        with pytest.raises(FileChanged) as info:
+            stream.read(1000)
+    assert info.value.path == PATH
+
+
+def test_a_file_removed_mid_read_raises_file_changed() -> None:
+    transport, phone, _ = make()
+    with transport.open_read(PATH) as stream:
+        assert stream.read(100) == DATA[:100]
+        phone.remove(PATH)
+        with pytest.raises(FileChanged) as info:
+            stream.read(100)
+    assert info.value.path == PATH
 
 
 def test_wrong_sha256_is_returned_as_configured() -> None:

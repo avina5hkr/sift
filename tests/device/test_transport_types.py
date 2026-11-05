@@ -7,6 +7,7 @@ from sift.device.transport import (
     DeviceDisconnected,
     DeviceInfo,
     DeviceTimeout,
+    FileChanged,
     LinkHealth,
     RemoteEntry,
     RemoteError,
@@ -67,6 +68,14 @@ def test_error_hierarchy() -> None:
     assert issubclass(TransportError, Exception)
     for sub in (DeviceDisconnected, DeviceTimeout, RemoteError):
         assert issubclass(sub, TransportError)
+
+
+def test_file_changed_is_a_remote_error_naming_the_path_not_a_disconnect() -> None:
+    err = FileChanged("/sdcard/a.jpg changed while it was being read.", "/sdcard/a.jpg")
+    assert isinstance(err, RemoteError)
+    assert not isinstance(err, DeviceDisconnected)
+    assert err.path == "/sdcard/a.jpg"
+    assert str(err) == "/sdcard/a.jpg changed while it was being read."
 
 
 def test_remote_error_keeps_message() -> None:

@@ -63,6 +63,14 @@ class RemoteError(TransportError):
         self.path = path
 
 
+class FileChanged(RemoteError):
+    """The file changed (shrank, grew or went away) while it was being read.
+
+    Not a disconnect: the phone is still there and the file can be read again from the start.
+    The message is "<path> changed while it was being read." and `path` names the file.
+    """
+
+
 @runtime_checkable
 class Transport(Protocol):
     """How Sift talks to one phone.
@@ -106,6 +114,11 @@ class Transport(Protocol):
 
         Like any raw stream, `read(n)` may return fewer than `n` bytes before the end: loop
         until it returns b"". `read()` with no size returns everything that is left.
+
+        A read raises `FileChanged` (naming the path) when the file ends short of the size it
+        had when it was opened, or goes away, while the phone is still answering: another app
+        changed it, so read it again from the start. Losing the phone mid-read raises
+        `DeviceDisconnected` instead.
         """
         ...
 

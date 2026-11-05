@@ -27,6 +27,7 @@ from sift.device.adb_transport import (
 from sift.device.transport import (
     DeviceDisconnected,
     DeviceTimeout,
+    FileChanged,
     LinkHealth,
     RemoteEntry,
     RemoteError,
@@ -369,13 +370,63 @@ def test_open_read_rejects_negative_offsets(transport: AdbTransport) -> None:
         transport.open_read("/sdcard/a.jpg", -1)
 
 
-def test_early_end_of_stream_raises_disconnected(
+def test_recv_done_before_the_size_raises_file_changed(
     transport: AdbTransport, phone: Phone, server: FakeAdbServer
 ) -> None:
     phone.add_file(b"/sdcard/a.bin", b"x" * 1000)
-    server.recv_short_by = 10
+    server.recv_short_by = 10  # a clean DONE after 990 bytes: the file shrank
+    with transport.open_read("/sdcard/a.bin") as stream:
+        for _ in range(2):  # and on every later read
+            with pytest.raises(FileChanged) as info:
+                stream.read()
+            assert info.value.path == "/sdcard/a.bin"
+            assert str(info.value) == "/sdcard/a.bin changed while it was being read."
+
+
+def test_recv_cut_off_mid_file_is_a_disconnect(
+    transport: AdbTransport, phone: Phone, server: FakeAdbServer
+) -> None:
+    phone.add_file(b"/sdcard/a.bin", b"x" * 1000)
+    server.recv_cut_after = 100  # the connection drops without DONE
     with transport.open_read("/sdcard/a.bin") as stream, pytest.raises(DeviceDisconnected):
         stream.read()
+
+
+ONE_SLOT = Limits(stat_s=0.5, list_s=0.5, read_stall_s=2, max_connections=1)
+
+
+def test_tail_that_ends_short_while_the_phone_answers_raises_file_changed(
+    server: FakeAdbServer, phone: Phone
+) -> None:
+    # One connection slot: the re-stat must not wait for a second one.
+    transport = AdbTransport(server.serial, server.port, limits=ONE_SLOT, host="127.0.0.1")
+    data = bytes(range(100))
+    phone.add_file(b"/sdcard/a.bin", data)
+    server.exec_handler = lambda command: [data[10:50]]  # tail stopped early: the file shrank
+    with transport.open_read("/sdcard/a.bin", 10) as stream:
+        for _ in range(2):
+            with pytest.raises(FileChanged) as info:
+                stream.read()
+            assert info.value.path == "/sdcard/a.bin"
+    assert server.commands.count(b"LST2") == 2  # at open, and once more at the short end
+
+
+def test_tail_that_ends_short_when_the_phone_is_gone_raises_disconnected(
+    server: FakeAdbServer, phone: Phone
+) -> None:
+    transport = AdbTransport(server.serial, server.port, limits=ONE_SLOT, host="127.0.0.1")
+    data = bytes(range(100))
+    phone.add_file(b"/sdcard/a.bin", data)
+
+    def unplugged(command: bytes) -> list[bytes]:
+        server.serial = "GONE"  # from now on adb answers "device not found"
+        return [data[10:50]]
+
+    server.exec_handler = unplugged
+    with transport.open_read("/sdcard/a.bin", 10) as stream:
+        for _ in range(2):
+            with pytest.raises(DeviceDisconnected, match="40 of 90 bytes"):
+                stream.read()
 
 
 def test_stalled_phone_raises_timeout_over_a_real_socket(
@@ -486,6 +537,29 @@ def test_short_stream_raises_disconnected_every_time() -> None:
     for _ in range(2):
         with pytest.raises(DeviceDisconnected, match="2 of 4 bytes"):
             stream.read(2)
+    stream.close()
+
+
+def test_short_stream_asks_the_short_end_hook_once() -> None:
+    asked: list[tuple[int, int]] = []
+
+    def short_end(received: int, expected: int) -> TransportError:
+        asked.append((received, expected))
+        return FileChanged("/p changed while it was being read.", "/p")
+
+    stream = StallGuardedStream(
+        iter([b"ab"]),
+        path="/p",
+        expected_size=4,
+        stall_s=5,
+        abort=lambda: None,
+        short_end=short_end,
+    )
+    assert stream.read(2) == b"ab"
+    for _ in range(2):
+        with pytest.raises(FileChanged):
+            stream.read(2)
+    assert asked == [(2, 4)]
     stream.close()
 
 

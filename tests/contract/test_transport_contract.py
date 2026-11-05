@@ -10,7 +10,8 @@ from sift.device.fake_phone import (
     SYMLINK,
     ZERO_BYTE_FILE,
 )
-from sift.device.transport import RemoteEntry, RemoteError, Transport
+from sift.device.fake_transport import FakeTransport
+from sift.device.transport import FileChanged, RemoteEntry, RemoteError, Transport
 from tests.contract.helpers import realphone_sample_dir
 
 CANDIDATE_ROOTS = [
@@ -177,6 +178,20 @@ def test_open_read_supports_chunked_reads(transport: Transport) -> None:
             assert len(chunk) <= 7
             chunks.append(chunk)
     assert b"".join(chunks) == whole
+
+
+def test_a_file_that_shrinks_mid_read_raises_file_changed(transport: Transport) -> None:
+    if not isinstance(transport, FakeTransport):
+        pytest.skip("needs a file that shrinks mid-read; Sift never writes to a real phone in M1")
+    path = "/sdcard/Download/shrinking.bin"
+    transport.phone.add_file(path, bytes(range(256)) * 64)
+    with transport.open_read(path) as stream:
+        assert stream.read(1000)
+        transport.phone.add_file(path, b"short")  # another app rewrote it
+        with pytest.raises(FileChanged) as info:
+            while stream.read(4096):
+                pass
+    assert info.value.path == path
 
 
 def test_open_read_of_missing_path_raises_remote_error_naming_it(transport: Transport) -> None:
