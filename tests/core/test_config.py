@@ -154,15 +154,53 @@ def test_default_sets() -> None:
         "WhatsApp Business",
         "Documents",
         "Downloads",
+        "Recordings",
+        "Loose files",
     ]
     by = {s.name: s for s in sets}
     assert by["Camera"].paths == ["/sdcard/DCIM"]
     assert by["Camera"].exclude == ["/sdcard/DCIM/Screenshots"]
     assert by["Documents"].enabled
     assert not by["Documents"].deletable
-    assert not by["WhatsApp Business"].enabled
     assert not by["Downloads"].enabled
+    assert by["WhatsApp media"].paths == [
+        "/sdcard/Android/media/com.whatsapp/WhatsApp/Media",
+        "/sdcard/WhatsApp/Media",
+    ]
+    assert by["WhatsApp Business"].enabled
+    assert by["WhatsApp Business"].deletable
+    assert by["WhatsApp Business"].paths == [
+        "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Media"
+    ]
+    rec = by["Recordings"]
+    assert (rec.paths, rec.shallow_paths, rec.enabled, rec.deletable) == (
+        ["/sdcard/Recordings"],
+        [],
+        True,
+        True,
+    )
+    loose = by["Loose files"]
+    assert (loose.paths, loose.shallow_paths, loose.exclude) == ([], ["/sdcard"], [])
+    assert loose.enabled
+    assert not loose.deletable
     assert all(s.adopt_mode == "hash" for s in sets)
+
+
+def test_never_delete_includes_old_whatsapp_folders() -> None:
+    nd = Config().cleanup.never_delete
+    assert "/sdcard/WhatsApp/Databases" in nd
+    assert "/sdcard/WhatsApp/Backups" in nd
+    for p in [
+        "/sdcard/Android/data",
+        "/sdcard/Android/obb",
+        "/sdcard/Documents",
+        "/sdcard/Download",
+        "/sdcard/Android/media/com.whatsapp/WhatsApp/Databases",
+        "/sdcard/Android/media/com.whatsapp/WhatsApp/Backups",
+        "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases",
+        "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
+    ]:
+        assert p in nd
 
 
 def test_legacy_roots_become_one_custom_set(tmp_path: Path) -> None:
@@ -315,7 +353,8 @@ def test_sets_roundtrip_as_array_of_tables(tmp_path: Path) -> None:
     f = tmp_path / "config.toml"
     save_config(Config(), f)
     text = f.read_text()
-    assert text.count("[[backup.sets]]") == 7
+    assert text.count("[[backup.sets]]") == 9
+    assert text.count("shallow_paths") == 9
     # `delete_roots` is a real key; only the legacy `backup.roots` must be gone.
     assert not any(line.startswith("roots") for line in text.splitlines())
     assert load_config(f) == (Config(), [])
@@ -475,3 +514,122 @@ def test_model_rejects_bad_paths_directly() -> None:
             enabled=True,
             deletable=True,
         )
+
+
+def test_shallow_root_allowed_only_in_shallow_paths(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(
+        f,
+        'paths = ["/sdcard/DCIM", "/sdcard"]\nexclude = ["/sdcard"]\nshallow_paths = ["/sdcard"]\n',
+    )
+    cfg, w = load_config(f)
+    s = cfg.backup.sets[0]
+    assert (s.paths, s.exclude, s.shallow_paths) == (["/sdcard/DCIM"], [], ["/sdcard"])
+    assert (
+        'backup.sets[0] ("Camera").paths: "/sdcard" is not allowed (no folder after /sdcard/); '
+        "dropped"
+    ) in w
+    assert 'backup.sets[0] ("Camera").exclude: "/sdcard" is not allowed' in " ".join(w)
+    assert len(w) == 2
+
+    _write_set(f, 'paths = []\nshallow_paths = ["/storage/emulated/0"]\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].shallow_paths == ["/sdcard"]
+    assert w == []
+
+    with pytest.raises(ValidationError):
+        BackupSet(name="A", paths=["/sdcard"], enabled=True, deletable=True)
+    ok = BackupSet(name="A", shallow_paths=["/storage/emulated/0"], enabled=True, deletable=True)
+    assert ok.shallow_paths == ["/sdcard"]
+
+
+@pytest.mark.parametrize(
+    ("bad", "reason"),
+    [
+        ("/data/local", "outside /sdcard"),
+        ("/sdcard/DCIM/../Documents", '".." segment'),
+        ("/sdcard/./DCIM", '"." segment'),
+        ("/sdcard/DCIM//Camera", "empty segment"),
+        ("/sdcard/DCIM/", "trailing slash"),
+        ("/sdcard/", "trailing slash"),
+    ],
+)
+def test_shallow_paths_follow_path_rules(tmp_path: Path, bad: str, reason: str) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(f, f'paths = ["/sdcard/Music"]\nshallow_paths = ["{bad}", "/sdcard/Notes"]\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].paths == ["/sdcard/Music"]
+    assert cfg.backup.sets[0].shallow_paths == ["/sdcard/Notes"]
+    where = 'backup.sets[0] ("Camera").shallow_paths'
+    expected = f'{where}: "{bad}" is not allowed ({reason}); dropped'
+    assert expected in w
+    assert len(w) == 1
+
+
+def test_set_needs_paths_or_shallow_paths(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[[backup.sets]]\nname = "Empty"\npaths = []\nshallow_paths = []\n'
+        "enabled = true\ndeletable = true\n"
+        '[[backup.sets]]\nname = "Flat"\npaths = []\nshallow_paths = ["/sdcard"]\n'
+        "enabled = true\ndeletable = false\n"
+        '[[backup.sets]]\nname = "Flat2"\nshallow_paths = ["/sdcard/Notes"]\n'
+        "enabled = true\ndeletable = false\n"
+    )
+    cfg, w = load_config(f)
+    assert [s.name for s in cfg.backup.sets] == ["Flat", "Flat2"]
+    assert any(
+        x.startswith('backup.sets[0] ("Empty"):')
+        and "needs at least one entry in paths or shallow_paths" in x
+        and x.endswith("dropped")
+        for x in w
+    )
+    assert FALLBACK_WARNING not in w
+
+    # every shallow entry invalid and no paths: the set is dropped, then the fallback applies
+    f.write_text(
+        '[[backup.sets]]\nname = "Bad"\npaths = []\nshallow_paths = ["/etc"]\n'
+        "enabled = true\ndeletable = true\n"
+    )
+    cfg, w = load_config(f)
+    assert [s.name for s in cfg.backup.sets] == DEFAULT_NAMES
+    assert len(cfg.backup.sets) == 9
+    assert FALLBACK_WARNING in w
+    assert any('("Bad").shallow_paths: "/etc"' in x for x in w)
+
+    with pytest.raises(ValidationError):
+        BackupSet(name="A", paths=[], shallow_paths=[], enabled=True, deletable=True)
+
+
+def test_exclude_cannot_target_shallow_paths(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    _write_set(
+        f,
+        'paths = ["/sdcard/DCIM"]\nshallow_paths = ["/sdcard/Notes"]\n'
+        'exclude = ["/sdcard/Notes/old", "/sdcard/DCIM/Screenshots"]\n',
+    )
+    cfg, w = load_config(f)
+    assert cfg.backup.sets[0].exclude == ["/sdcard/DCIM/Screenshots"]
+    assert (
+        'backup.sets[0] ("Camera").exclude: "/sdcard/Notes/old" is not inside any of the '
+        "set's paths; dropped"
+    ) in w
+
+    with pytest.raises(ValidationError):
+        BackupSet(
+            name="A",
+            paths=["/sdcard/DCIM"],
+            shallow_paths=["/sdcard/Notes"],
+            exclude=["/sdcard/Notes/old"],
+            enabled=True,
+            deletable=True,
+        )
+
+
+def test_fallback_has_nine_sets_none_deletable(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text("[backup]\nsets = []\n")
+    cfg, w = load_config(f)
+    assert len(cfg.backup.sets) == 9
+    assert all(not s.deletable for s in cfg.backup.sets)
+    assert FALLBACK_WARNING in w

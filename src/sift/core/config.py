@@ -37,19 +37,25 @@ class _Section(BaseModel):
     model_config = ConfigDict(strict=True, validate_assignment=True)
 
 
-STORAGE_PREFIX = "/storage/emulated/0/"
+STORAGE_ROOT = "/storage/emulated/0"
+STORAGE_PREFIX = STORAGE_ROOT + "/"
 
 
-def normalize_set_path(value: str) -> str:
+def normalize_set_path(value: str, *, allow_root: bool = False) -> str:
     """Return the stored form of a set path, or raise ValueError saying why it is not allowed.
 
-    Rules: under /sdcard/ (a /storage/emulated/0/ prefix is rewritten to /sdcard/), at least one
-    segment after it, no trailing slash, and no empty, "." or ".." segment.
+    Rules: under /sdcard/ (a /storage/emulated/0 prefix is rewritten to /sdcard), at least one
+    segment after it, no trailing slash, and no empty, "." or ".." segment. `allow_root` (only
+    for shallow paths) also accepts the bare root `/sdcard` itself.
     """
-    if value.startswith(STORAGE_PREFIX):
+    if value == STORAGE_ROOT:
+        value = "/sdcard"
+    elif value.startswith(STORAGE_PREFIX):
         value = SDCARD_PREFIX + value[len(STORAGE_PREFIX) :]
     if value.rstrip("/") == "/sdcard":
-        raise ValueError("no folder after /sdcard/")
+        if allow_root and value == "/sdcard":
+            return value
+        raise ValueError("trailing slash" if allow_root else "no folder after /sdcard/")
     if not value.startswith(SDCARD_PREFIX):
         raise ValueError("outside /sdcard")
     if value.endswith("/"):
@@ -69,7 +75,8 @@ def _is_inside(path: str, root: str) -> bool:
 
 class BackupSet(_Section):
     name: Annotated[str, Field(min_length=1)]
-    paths: Annotated[list[str], Field(min_length=1)]
+    paths: list[str] = Field(default_factory=list)  # whole folders, subfolders included
+    shallow_paths: list[str] = Field(default_factory=list)  # direct child files only
     exclude: list[str] = Field(default_factory=list)
     enabled: bool
     deletable: bool
@@ -92,6 +99,23 @@ class BackupSet(_Section):
             except ValueError as err:
                 raise ValueError(f"{item!r} is not allowed ({err})") from err
         return out
+
+    @field_validator("shallow_paths")
+    @classmethod
+    def _normalized_shallow(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for item in v:
+            try:
+                out.append(normalize_set_path(item, allow_root=True))
+            except ValueError as err:
+                raise ValueError(f"{item!r} is not allowed ({err})") from err
+        return out
+
+    @model_validator(mode="after")
+    def _has_something_to_back_up(self) -> BackupSet:
+        if not self.paths and not self.shallow_paths:
+            raise ValueError("needs at least one entry in paths or shallow_paths")
+        return self
 
     @model_validator(mode="after")
     def _exclude_inside_paths(self) -> BackupSet:
@@ -125,14 +149,17 @@ DEFAULT_SETS: list[BackupSet] = [
     ),
     BackupSet(
         name="WhatsApp media",
-        paths=["/sdcard/Android/media/com.whatsapp/WhatsApp/Media"],
+        paths=[
+            "/sdcard/Android/media/com.whatsapp/WhatsApp/Media",
+            "/sdcard/WhatsApp/Media",  # the pre-scoped-storage location
+        ],
         enabled=True,
         deletable=True,
     ),
     BackupSet(
         name="WhatsApp Business",
         paths=["/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Media"],
-        enabled=False,
+        enabled=True,
         deletable=True,
     ),
     BackupSet(
@@ -146,6 +173,19 @@ DEFAULT_SETS: list[BackupSet] = [
         paths=["/sdcard/Download"],
         enabled=False,
         deletable=True,
+    ),
+    BackupSet(
+        name="Recordings",
+        paths=["/sdcard/Recordings"],
+        enabled=True,
+        deletable=True,
+    ),
+    BackupSet(
+        name="Loose files",
+        paths=[],
+        shallow_paths=["/sdcard"],  # the root's own files only, no subfolders
+        enabled=True,
+        deletable=False,
     ),
 ]
 
@@ -261,6 +301,8 @@ class CleanupConfig(_Section):
             "/sdcard/Android/media/com.whatsapp/WhatsApp/Backups",
             "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases",
             "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
+            "/sdcard/WhatsApp/Databases",
+            "/sdcard/WhatsApp/Backups",
         ]
     )
     delete_reminder_days: Days = 0  # 0 = no reminder
@@ -358,11 +400,16 @@ _FALLBACK_WARNING = (
 
 
 def _clean_paths(
-    raw: object, where: str, warnings: list[str], inside: list[str] | None = None
+    raw: object,
+    where: str,
+    warnings: list[str],
+    inside: list[str] | None = None,
+    allow_root: bool = False,
 ) -> object:
-    """Drop each invalid entry of a paths/exclude list with its own warning.
+    """Drop each invalid entry of a paths/exclude/shallow_paths list with its own warning.
 
     `inside` (for exclude) is the set's cleaned paths; an entry outside all of them is dropped.
+    `allow_root` (for shallow_paths) lets the bare `/sdcard` through.
     Anything that is not a list of strings is returned untouched for the model to reject.
     """
     if not isinstance(raw, list):
@@ -373,7 +420,7 @@ def _clean_paths(
             kept.append(item)
             continue
         try:
-            norm = normalize_set_path(item)
+            norm = normalize_set_path(item, allow_root=allow_root)
         except ValueError as err:
             warnings.append(f'{where}: "{item}" is not allowed ({err}); dropped')
             continue
@@ -395,6 +442,10 @@ def _build_set(
             warnings.append(f"{label}.{key}: unknown setting, ignored")
     if "paths" in known:
         known["paths"] = _clean_paths(known["paths"], paths_where, warnings)
+    if "shallow_paths" in known:
+        known["shallow_paths"] = _clean_paths(
+            known["shallow_paths"], f"{label}.shallow_paths", warnings, allow_root=True
+        )
     if "exclude" in known:
         roots = known.get("paths")
         inside = [p for p in roots if isinstance(p, str)] if isinstance(roots, list) else []
