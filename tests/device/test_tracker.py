@@ -275,6 +275,8 @@ def test_mdns_serial_is_wifi(ctx: AppContext, serial: str) -> None:
 
 
 def test_a_ready_phone_wins_over_one_waiting_for_allow(ctx: AppContext) -> None:
+    # The phone is stored first: before that, two phones in any state store nothing (R25).
+    rig(ctx).run([{USB: "device"}, STOP])
     r = rig(ctx)
     r.run([{"OTHER-0002": "unauthorized", USB: "device"}, STOP])
     assert r.tracker.status().state is S.connected_usb
@@ -378,6 +380,7 @@ def test_transport_error_is_offline_then_retried(ctx: AppContext) -> None:
 
 
 def test_transport_error_is_retried_on_the_next_event(ctx: AppContext) -> None:
+    rig(ctx).run([{USB: "device"}, STOP])  # the phone is stored; a second phone is then harmless
     r = rig(ctx)
     good = r.phones[USB]
     r.phones[USB] = DeviceTimeout("The adb server did not answer in time.")
@@ -636,6 +639,36 @@ def test_two_ready_phones_on_first_run_store_nothing(ctx: AppContext) -> None:
     r.run([{"AAA-0003": "device", USB: "device"}, lambda: seen.append(r.tracker.status()), STOP])
     assert seen[0].state is S.no_device
     assert seen[0].message == MULTIPLE_MESSAGE
+    assert device_rows(ctx) == []
+
+
+def test_an_unauthorized_phone_next_to_a_ready_one_stores_nothing(ctx: AppContext) -> None:
+    """R25: the owner's phone may be waiting for Allow while a stranger's phone is ready."""
+    r = rig(ctx)
+    r.phones["AAA-0003"] = FakeTransport(FakePhone(serial="AAA-0003"))
+    seen: list[DeviceStatus] = []
+    note = lambda: seen.append(r.tracker.status())  # noqa: E731
+    r.run(
+        [
+            {USB: "unauthorized", "AAA-0003": "device"},
+            note,
+            {USB: "offline", "AAA-0003": "offline"},
+            note,
+            {USB: "device"},  # the other phone was unplugged and the owner's phone is ready
+            note,
+            STOP,
+        ]
+    )
+    assert [s.state for s in seen] == [S.no_device, S.no_device, S.connected_usb]
+    assert seen[0].message == MULTIPLE_MESSAGE
+    assert seen[1].message == MULTIPLE_MESSAGE
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]
+
+
+def test_a_lone_unauthorized_phone_still_shows_its_own_state(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.run([{USB: "unauthorized"}, STOP])
+    assert r.tracker.status().state is S.unauthorized
     assert device_rows(ctx) == []
 
 

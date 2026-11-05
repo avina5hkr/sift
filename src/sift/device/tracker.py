@@ -10,8 +10,8 @@ How it runs. One daemon thread ("sift-device-tracker") runs `run()`:
    (`emulator-N`) are left out entirely.
    - no device line: `no_device`, or `held_by_other` once `usb_present()` has stayed true for
      3 s (another adb server holds the phone's USB interface);
-   - no phone stored yet and more than one ready phone: `no_device` asking for just one phone
-     (nothing is stored, so the wrong phone can never be locked in);
+   - no phone stored yet and more than one phone in any adb state: `no_device` asking for just
+     one phone (nothing is stored, so the wrong phone can never be locked in);
    - otherwise one phone is picked: a ready one first (the stored phone before any other),
      then one waiting for Allow, then any;
    - `unauthorized`/`authorizing`: `unauthorized`; any other non-ready state: `offline`;
@@ -339,9 +339,9 @@ class DeviceTracker:
         self._usb_since = self._usb_polled_at = None
         stored = self._stored_phone()
         identity = stored[1] if stored is not None else None
-        ready = [serial for serial, state in devices.items() if state == "device"]
-        if stored is None and len(ready) > 1:
-            # Nothing stored yet: never guess which of several phones is the one to keep.
+        if stored is None and len(devices) > 1:
+            # Nothing stored yet: never guess which of several phones is the one to keep. A phone
+            # waiting for Allow counts too, or a stranger's ready phone would be stored first.
             self._forget_phone()
             self._set(DeviceStatus(ConnectionState.no_device, MULTIPLE_MESSAGE))
             return
