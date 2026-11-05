@@ -387,10 +387,27 @@ def test_legacy_roots_follow_the_path_rules(tmp_path: Path) -> None:
     assert any("trailing slash" in x for x in w)
     assert any("backup.roots is replaced by backup.sets" in x for x in w)
 
-    f.write_text('[backup]\nroots = ["/etc"]\n')
+
+@pytest.mark.parametrize("roots", ['["/etc"]', "[]", '"/sdcard/DCIM"', '["/sdcard/", "/x"]'])
+def test_invalid_legacy_roots_use_the_safe_fallback(tmp_path: Path, roots: str) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(f"[backup]\nroots = {roots}\n")
     cfg, w = load_config(f)
-    assert cfg.backup.sets == Config().backup.sets  # spec defaults, not the fallback
-    assert any("backup.roots" in x and "ignored" in x for x in w)
+    assert [s.name for s in cfg.backup.sets] == DEFAULT_NAMES
+    assert all(not s.deletable for s in cfg.backup.sets)
+    assert FALLBACK_WARNING in w
+    assert any(x.startswith("backup.roots") for x in w)
+
+
+def test_legacy_roots_with_one_bad_entry_keep_the_good_one(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text('[backup]\nroots = ["/sdcard/Music", "/etc"]\n')
+    cfg, w = load_config(f)
+    assert [(s.name, s.paths, s.deletable) for s in cfg.backup.sets] == [
+        ("Custom", ["/sdcard/Music"], False)
+    ]
+    assert 'backup.roots: "/etc" is not allowed (outside /sdcard); dropped' in w
+    assert FALLBACK_WARNING not in w
 
 
 def test_model_rejects_bad_paths_directly() -> None:

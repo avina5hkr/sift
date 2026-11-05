@@ -444,7 +444,9 @@ def _load_backup(table: dict[str, Any], warnings: list[str]) -> BackupConfig:
         legacy = {"name": "Custom", "paths": table["roots"], "enabled": True, "deletable": False}
         custom = _build_set(legacy, "backup.roots", "backup.roots", warnings)
         if custom is None:
-            warnings.append("backup.roots: invalid value, ignored")
+            warnings.append("backup.roots: no valid paths")
+            warnings.append(_FALLBACK_WARNING)
+            kept["sets"] = _fallback_sets()
         else:
             kept["sets"] = [custom]
             warnings.append("backup.roots is replaced by backup.sets; loaded as one Custom set")
