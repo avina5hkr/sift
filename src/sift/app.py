@@ -22,7 +22,13 @@ import uvicorn
 from sift import __version__
 from sift.core.config import load_config
 from sift.core.context import AppContext
-from sift.core.db import Database, DatabaseBusyError, DatabaseCorruptError, DatabaseTooNewError
+from sift.core.db import (
+    Database,
+    DatabaseBusyError,
+    DatabaseCorruptError,
+    DatabaseTooNewError,
+    MigrationError,
+)
 from sift.core.events import EventBus
 from sift.core.instance import AlreadyRunningError, SingleInstanceLock
 from sift.core.logging import install_crash_handler, setup_logging, teardown_logging
@@ -173,9 +179,15 @@ def _close_windows_on_signal(get_windows: Callable[[], Iterable[Any]]) -> Iterat
             signal.signal(s, handler)
 
 
+def _quiet_pywebview_logger() -> None:
+    """pywebview logs the page URL, with its token, at DEBUG when PYWEBVIEW_LOG=debug."""
+    logging.getLogger("pywebview").setLevel(logging.INFO)
+
+
 def _run_window(url: str) -> None:
     import webview  # imported here so headless runs never load Cocoa
 
+    _quiet_pywebview_logger()
     webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
     with _close_windows_on_signal(lambda: webview.windows):
         webview.start()
@@ -231,6 +243,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         except DatabaseBusyError as e:
             print(e)
+            return 2
+        except MigrationError as e:
+            print(
+                f"Sift could not update its database: {e}. "
+                "Nothing was changed; your backups are not affected."
+            )
             return 2
         setup_logging(paths, ctx.bus, level="INFO")
         logging_on = True

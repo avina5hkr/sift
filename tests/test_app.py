@@ -116,6 +116,25 @@ def test_main_refuses_damaged_database(paths: AppPaths, capsys: pytest.CaptureFi
     assert "database is damaged" in capsys.readouterr().out
 
 
+def test_main_refuses_in_plain_words_when_migration_fails(
+    paths: AppPaths, capfd: pytest.CaptureFixture[str]
+) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(paths.db)
+    conn.execute("CREATE TABLE device(x)")
+    conn.commit()
+    conn.close()
+    assert main(["--no-window"]) == 2
+    out, err = capfd.readouterr()
+    assert "Sift could not update its database: " in out
+    assert out.rstrip().endswith("Nothing was changed; your backups are not affected.")
+    assert "Traceback" not in out + err
+    lock = SingleInstanceLock(paths.lock)
+    lock.acquire()
+    lock.release()
+
+
 def test_find_web_dist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from sift.app import find_web_dist
 
@@ -224,6 +243,19 @@ class _FakeWindow:
 
     def destroy(self) -> None:
         self.destroyed += 1
+
+
+def test_quiet_pywebview_logger_pins_info() -> None:
+    from sift.app import _quiet_pywebview_logger
+
+    logger = logging.getLogger("pywebview")
+    saved = logger.level
+    try:
+        logger.setLevel(logging.DEBUG)
+        _quiet_pywebview_logger()
+        assert logger.level == logging.INFO
+    finally:
+        logger.setLevel(saved)
 
 
 def test_close_windows_destroys_every_window() -> None:
