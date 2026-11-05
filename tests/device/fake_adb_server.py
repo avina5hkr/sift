@@ -8,6 +8,7 @@ import contextlib
 import socket
 import struct
 import threading
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from types import TracebackType
 
@@ -57,6 +58,16 @@ class FakeAdbServer:
     features_length_override: bytes | None = None
     # Every sync command id received, in order (b"LST2", b"LIS2", ...).
     commands: list[bytes] = field(default_factory=list)
+    # Every host request received, in order (b"host:transport:FAKESERIAL", b"exec:...", ...).
+    requests: list[bytes] = field(default_factory=list)
+    # File contents served by RECV (a missing path gets FAIL, like adbd).
+    files: dict[bytes, bytes] = field(default_factory=dict)
+    # RECV: after this many bytes of file data, stop sending (until the server shuts down).
+    recv_stall_after: int | None = None
+    # RECV: leave out this many bytes at the end of the file, then send DONE as if complete.
+    recv_short_by: int = 0
+    # `exec:<command>`: the command bytes in, stdout chunks out. None refuses exec.
+    exec_handler: Callable[[bytes], Iterable[bytes]] | None = None
 
     def __post_init__(self) -> None:
         self._stop = threading.Event()
@@ -73,6 +84,11 @@ class FakeAdbServer:
     def port(self) -> int:
         port: int = self._listener.getsockname()[1]
         return port
+
+    @property
+    def stopping(self) -> threading.Event:
+        """Set when the server shuts down; a stalling exec handler can wait on it."""
+        return self._stop
 
     def __enter__(self) -> FakeAdbServer:
         self._accept_thread.start()
@@ -131,9 +147,11 @@ class FakeAdbServer:
             buf += chunk
         return buf
 
-    def _read_host_request(self, conn: socket.socket) -> str:
+    def _read_host_request(self, conn: socket.socket) -> bytes:
         length = int(self._recv(conn, 4), 16)
-        return self._recv(conn, length).decode("ascii")
+        request = self._recv(conn, length)
+        self.requests.append(request)
+        return request
 
     @staticmethod
     def _fail(conn: socket.socket, message: str) -> None:
@@ -144,22 +162,28 @@ class FakeAdbServer:
         selected = False
         while True:
             request = self._read_host_request(conn)
-            if request == f"host-serial:{self.serial}:features":
+            serial = self.serial.encode()
+            if request == b"host-serial:" + serial + b":features":
                 body = ",".join(self.features).encode()
                 length = self.features_length_override or b"%04x" % len(body)
                 conn.sendall(b"OKAY" + length + body)
                 return
-            if request.startswith("host:transport:"):
-                if request == f"host:transport:{self.serial}":
+            if request.startswith(b"host:transport:"):
+                if request == b"host:transport:" + serial:
                     selected = True
                     conn.sendall(b"OKAY")
                 else:
                     self._fail(conn, "device not found")
                     return
-            elif request == "sync:" and selected:
+            elif request == b"sync:" and selected:
                 conn.sendall(b"OKAY")
                 self._sync_phase(conn)
                 return
+            elif request.startswith(b"exec:") and selected and self.exec_handler is not None:
+                conn.sendall(b"OKAY")
+                for chunk in self.exec_handler(request.removeprefix(b"exec:")):
+                    conn.sendall(chunk)
+                return  # adbd closes the stream when the command exits
             else:
                 self._fail(conn, "unknown host service")
                 return
@@ -192,6 +216,10 @@ class FakeAdbServer:
                 reply = ident + found.pack()
             elif ident == b"LIS2":
                 reply = self._list_reply(path)
+            elif ident == b"RECV":
+                if not self._send_file(conn, path):
+                    return
+                continue
             else:
                 # Anything else, including v1 LIST/STAT, is refused.
                 body = b"unsupported sync command"
@@ -200,6 +228,25 @@ class FakeAdbServer:
                 return
             if reply.startswith(b"FAIL"):
                 return
+
+    def _send_file(self, conn: socket.socket, path: bytes) -> bool:
+        """Answer RECV: DATA chunks then DONE, or FAIL. False if the connection should drop."""
+        data = self.files.get(path)
+        if data is None:
+            body = b"No such file or directory"
+            conn.sendall(b"FAIL" + struct.pack("<I", len(body)) + body)
+            return False
+        data = data[: len(data) - self.recv_short_by]
+        if self.recv_stall_after is not None:
+            data = data[: self.recv_stall_after]
+        for start in range(0, len(data), 65536):
+            chunk = data[start : start + 65536]
+            conn.sendall(b"DATA" + struct.pack("<I", len(chunk)) + chunk)
+        if self.recv_stall_after is not None:
+            self._stop.wait()
+            return False
+        conn.sendall(b"DONE" + struct.pack("<I", 0))
+        return True
 
     def _list_reply(self, path: bytes) -> bytes:
         out = b""

@@ -4,12 +4,14 @@ import hashlib
 
 import pytest
 
+from sift.device.adb_transport import AdbTransport
 from sift.device.fake_phone import (
     ODD_NAME_FILES,
     SYMLINK,
     ZERO_BYTE_FILE,
 )
 from sift.device.transport import RemoteEntry, RemoteError, Transport
+from tests.contract.conftest import realphone_sample_dir
 
 CANDIDATE_ROOTS = [
     "/sdcard/DCIM",
@@ -24,8 +26,12 @@ MAX_SAMPLE_BYTES = 1_000_000
 
 
 def roots_of(transport: Transport) -> list[str]:
+    # On a real phone only the sample folder is used, so the suite stays quick and bounded.
+    candidates = (
+        [realphone_sample_dir()] if isinstance(transport, AdbTransport) else CANDIDATE_ROOTS
+    )
     roots = []
-    for root in CANDIDATE_ROOTS:
+    for root in candidates:
         entry = transport.stat(root)
         if entry is not None and entry.is_dir:
             roots.append(root)
