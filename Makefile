@@ -10,4 +10,13 @@ web:
 web-test:
 	npm --prefix web run lint && npm --prefix web run typecheck && npm --prefix web test -- --run
 
-.PHONY: test lint web web-test
+dev:
+	@trap 'kill 0' INT TERM EXIT; \
+	SIFT_HOME=.dev SIFT_DEV_TOKEN=dev uv run sift --no-window --port 8765 & \
+	npm --prefix web run dev & \
+	wait
+
+e2e: web
+	cd web && npm exec playwright test
+
+.PHONY: test lint web web-test dev e2e
