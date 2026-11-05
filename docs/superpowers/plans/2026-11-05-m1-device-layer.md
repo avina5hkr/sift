@@ -398,6 +398,21 @@ Decisions:
   - stream 10 files into `build/m1-spike/` and compare each hash with the phone's, then delete only that folder;
   - `tail -c +N` resume on one large video (bytes match the full read from offset N);
   - link speed from `usblink`.
+- [ ] Protocol and tool checks that unit tests cannot prove. All are read-only; record each result (no names) in `docs/spikes/m1-device.md`:
+  1. **`exec:` behaviour:** `exec:` runs a multi-line script through `sh -c`, and its stderr is merged into the stream. On a missing path the hash script prints exactly `!`.
+  2. **`sha256sum` output:** toybox `sha256sum < f` prints `<64 hex>  -`, and phone hashes equal host hashes for the 10 streamed files.
+  3. **Time to first byte of `tail -c +N`** at N = 1, about 1 GB, and over 4 GiB on the largest video, against the resume allowance. Bytes read from beyond 4 GiB must match the host.
+  4. **RECV of a file over 4 GiB:** it streams completely and its hash matches. An unreadable file raises `RemoteError` at `open_read`.
+  5. **The `/sdcard` symlink:** LST2 of `/sdcard/` is a folder, LIS2 follows it, and child paths are reported as `/sdcard/…`.
+  6. **Full walk of `/sdcard`:** record the folder count and time, the TIME_WAIT count on 5037 (`netstat -an | grep 5037 | grep -c TIME_WAIT`), and confirm there is no `EADDRNOTAVAIL`.
+  7. **Another app's `Android/data/<pkg>`:** record the LST2 error, and that the folder lists as empty (as documented).
+  8. **Interrupted read:** covered by the unplug step below, if the owner allows it. Expect `DeviceDisconnected` or `DeviceTimeout` within about 30 s, no `sift-read-watchdog` thread left, and the slot freed.
+  9. **Shared adb server:** its pid is the same before and after the run, and `adb devices` still lists the phone. With 6 streams open, a 7th call times out cleanly.
+  10. **Large requests:** a sha batch request close to 64 KiB is accepted by both the adb server and the phone.
+  11. **`info()` output shapes:** `getprop ro.serialno` works as the shell user, the `df /sdcard` header says `1K-blocks`, and the `wm size` and `dumpsys battery` formats match the parsers.
+  12. **`link_health`:** a USB link is reported as `usb`.
+  14. **`tail` with `--`:** toybox `tail` accepts `--` before the path. A full walk opens exactly one sync connection (count the connections on 5037 during the walk).
+  13. **Non-UTF-8 names:** stat, list, read and hash round-trip, but only for such a file if one already exists. Sift never creates files on the phone.
 - [ ] **Ask the owner before each hands-on step**, and skip it if the owner says so (those states stay covered by the fake-phone tests from Task 7):
   - (a) unplug then replug: expect `no_device` then `connected_usb` within about 1 s each;
   - (b) revoke USB debugging authorisations on the phone, then re-allow: expect `unauthorized` then `connected_usb`.
