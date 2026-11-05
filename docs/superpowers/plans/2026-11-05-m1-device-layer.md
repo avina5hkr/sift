@@ -413,6 +413,17 @@ Decisions:
   12. **`link_health`:** a USB link is reported as `usb`.
   14. **`tail` with `--`:** toybox `tail` accepts `--` before the path. A full walk opens exactly one sync connection (count the connections on 5037 during the walk).
   13. **Non-UTF-8 names:** stat, list, read and hash round-trip, but only for such a file if one already exists. Sift never creates files on the phone.
+- [ ] Final-review additions for the real phone. All are read-only, and only totals or yes/no answers are recorded:
+  15. **adb server pid:** record it before and after `uv run sift` itself, not only around the contract run. That step is the only one that goes through `ensure_server`.
+  16. **Cold sha256 rate against the batch timeout:** set `Limits.sha_assumed_bps` to about half the measured rate. The resume allowance uses the same number.
+  17. **Small-file throughput:** stream about 1,000 small files (stickers or thumbnails). Record files per second and the TIME_WAIT count on 5037. Each `open_read` costs two connections.
+  18. **Walk every default set root:** both WhatsApp roots, WhatsApp Business, Recordings, the legacy `/sdcard/WhatsApp`, and `list_dir("/sdcard")`. Record whether a per-entry lstat error aborts a root.
+  19. **Identity:** does `getprop ro.serialno` equal the adb serial and the USB serial number? Record yes or no only.
+  20. **Connect time:** the time from plug-in to the connected chip, measured during the replug step if the owner allows it.
+  21. **Request size:** if a request close to 64 KiB fails, lower `Limits.max_request_bytes`, for example to 4 KiB.
+  22. **A file that changes during a read:** only if the owner allows, and only with a file the owner is writing anyway, such as a running screen recording. Confirm `FileChanged`.
+  23. **Keep identifiers out:** pass `SIFT_REALPHONE_SERIAL` only on the command line, and scrub serials and paths from all output before writing `docs/spikes/m1-device.md`.
+  24. **Skipped tests:** note which contract tests ran and which were skipped as fake-only.
 - [ ] **Ask the owner before each hands-on step**, and skip it if the owner says so (those states stay covered by the fake-phone tests from Task 7):
   - (a) unplug then replug: expect `no_device` then `connected_usb` within about 1 s each;
   - (b) revoke USB debugging authorisations on the phone, then re-allow: expect `unauthorized` then `connected_usb`.
