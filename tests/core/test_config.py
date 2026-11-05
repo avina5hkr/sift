@@ -80,14 +80,68 @@ def test_unknown_keys_warn(tmp_path: Path) -> None:
     assert any("bogus" in x for x in w)
 
 
-def test_malformed_toml_is_set_aside(tmp_path: Path) -> None:
+def test_malformed_toml_is_set_aside_and_deleting_turned_off(tmp_path: Path) -> None:
     f = tmp_path / "config.toml"
     f.write_text("[phone\n")
     cfg, w = load_config(f)
-    assert cfg == Config()
-    assert not f.exists()
     assert len(list(tmp_path.glob("config.toml.invalid-*"))) == 1
     assert "could not be read" in w[0]
+    assert FALLBACK_WARNING in w
+    assert [s.name for s in cfg.backup.sets] == DEFAULT_NAMES
+    assert all(not s.deletable for s in cfg.backup.sets)
+    # a fresh config.toml holds the safe state, so the next launch keeps it
+    assert f.exists()
+    again, w2 = load_config(f)
+    assert w2 == []
+    assert [s.name for s in again.backup.sets] == DEFAULT_NAMES
+    assert all(not s.deletable for s in again.backup.sets)
+
+
+def test_malformed_toml_survives_when_the_fresh_file_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sift.core.config as config_mod
+
+    def boom(cfg: Config, path: Path) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config_mod, "save_config", boom)
+    f = tmp_path / "config.toml"
+    f.write_text("[phone\n")
+    cfg, w = load_config(f)
+    assert FALLBACK_WARNING in w
+    assert any("disk full" in x for x in w)
+    assert all(not s.deletable for s in cfg.backup.sets)
+
+
+def test_non_table_backup_uses_fallback_sets_without_rewriting(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text("backup = 3\n")
+    cfg, w = load_config(f)
+    assert FALLBACK_WARNING in w
+    assert any(x.startswith("backup:") for x in w)
+    assert all(not s.deletable for s in cfg.backup.sets)
+    assert f.read_text() == "backup = 3\n"
+
+
+def test_unreadable_config_never_raises(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.mkdir()
+    cfg, w = load_config(f)
+    assert len(w) == 2
+    assert w[0].startswith("config.toml could not be opened (")
+    assert w[0].endswith("); defaults are in use with deleting turned off.")
+    assert FALLBACK_WARNING in w
+    assert all(not s.deletable for s in cfg.backup.sets)
+    assert f.is_dir()
+
+
+def test_missing_file_keeps_spec_deletable_defaults(tmp_path: Path) -> None:
+    cfg, w = load_config(tmp_path / "config.toml")
+    by = {s.name: s for s in cfg.backup.sets}
+    assert w == []
+    assert by["Camera"].deletable
+    assert not by["Documents"].deletable
 
 
 def test_default_sets() -> None:

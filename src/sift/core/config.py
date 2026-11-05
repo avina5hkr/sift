@@ -1,8 +1,10 @@
 """Validated settings model, loaded from and saved to `config.toml`.
 
-Every key and default comes from spec section 13. Loading never raises on bad content: a bad
-value falls back to its default, an unknown key is ignored, and either one yields a
-human-readable warning string for the caller to show or log.
+Every key and default comes from spec section 13. Loading never raises on bad content or on a
+file it cannot open: a bad value falls back to its default, an unknown key is ignored, and either
+one yields a human-readable warning string for the caller to show or log. A config that cannot be
+used at all (unparseable, unreadable, or a `[backup]` that is not a table) gets the fallback
+backup sets, none of them deletable.
 """
 
 import os
@@ -462,19 +464,45 @@ def _set_aside(path: Path) -> str:
     return target.name
 
 
+def _fallback_config() -> Config:
+    return Config(backup=BackupConfig(sets=_fallback_sets()))
+
+
 def load_config(path: Path) -> tuple[Config, list[str]]:
-    """Read `path`; a missing file gives the defaults. Never raises on bad content."""
+    """Read `path`; a missing file gives the spec defaults. Never raises.
+
+    A file that cannot be used (unparseable, unreadable) gives the fallback sets with deleting
+    turned off. An unparseable file is set aside and replaced by a fresh one holding that safe
+    state, so it also holds on the next launch.
+    """
     warnings: list[str] = []
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return Config(), warnings
     except tomllib.TOMLDecodeError, UnicodeDecodeError:
+        cfg = _fallback_config()
         try:
             where = f" and was set aside as {_set_aside(path)}"
         except OSError:
-            where = ""
-        return Config(), [f"{path.name} could not be read{where}; defaults are in use."]
+            # Still in place: do not write over what the owner may want to repair.
+            return cfg, [f"{path.name} could not be read; defaults are in use.", _FALLBACK_WARNING]
+        warnings = [
+            f"{path.name} could not be read{where}; defaults are in use.",
+            _FALLBACK_WARNING,
+        ]
+        try:
+            save_config(cfg, path)
+        except OSError as err:
+            warnings.append(f"a new {path.name} could not be written ({err.strerror or err}).")
+        return cfg, warnings
+    except OSError as err:
+        reason = err.strerror or type(err).__name__
+        return _fallback_config(), [
+            f"{path.name} could not be opened ({reason}); "
+            "defaults are in use with deleting turned off.",
+            _FALLBACK_WARNING,
+        ]
 
     sections: dict[str, BaseModel] = {}
     for key, value in data.items():
@@ -484,6 +512,9 @@ def load_config(path: Path) -> tuple[Config, list[str]]:
             warnings.append(f"{key}: unknown setting, ignored")
         elif not isinstance(value, dict):
             warnings.append(f"{key}: invalid value, using the defaults")
+            if model is BackupConfig:
+                warnings.append(_FALLBACK_WARNING)
+                sections[key] = BackupConfig(sets=_fallback_sets())
         elif model is BackupConfig:
             sections[key] = _load_backup(value, warnings)
         else:
