@@ -5,12 +5,15 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
+from sift.core.context import AppContext
 from sift.core.db import Database
 from sift.core.events import EventBus
 from sift.core.logging import teardown_logging
 from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
+from tests import helpers
 
 
 @pytest.fixture(autouse=True)
@@ -67,3 +70,21 @@ def restore_process_state() -> Iterator[None]:
         logger = logging.getLogger(name)
         logger.handlers[:] = handlers
         logger.setLevel(level)
+
+
+@pytest.fixture(autouse=True)
+def _close_helper_resources() -> Iterator[None]:
+    """Close every Database opened through tests/helpers.py once the test is done."""
+    yield
+    helpers.close_all()
+
+
+@pytest.fixture
+def ctx(paths: AppPaths) -> AppContext:
+    """An AppContext over the tmp paths: migrated DB, token `t0k`, host 127.0.0.1:8765."""
+    return helpers.make_ctx(paths)
+
+
+@pytest.fixture
+def client(ctx: AppContext) -> TestClient:
+    return helpers.client_for(ctx)
