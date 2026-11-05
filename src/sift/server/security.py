@@ -4,6 +4,7 @@ Not `BaseHTTPMiddleware`: that wraps and buffers responses, which breaks streami
 """
 
 import hmac
+import logging
 from urllib.parse import parse_qs
 
 from starlette.responses import JSONResponse
@@ -13,6 +14,8 @@ from sift.core.context import AppContext
 from sift.server.errors import error_response
 
 TOKEN_HEADER = b"x-sift-token"
+
+_log = logging.getLogger("sift.server")
 
 
 def _query_token_allowed(method: str, path: str) -> bool:
@@ -37,6 +40,8 @@ class SecurityMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        # Method and path only: the query string and headers can carry the session token.
+        _log.debug("%s %s", scope["method"], scope["path"])
         refusal = self._check(scope)
         if refusal is not None:
             await refusal(scope, receive, send)
