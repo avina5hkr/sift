@@ -92,6 +92,11 @@ _RAW_CHUNK = 1 << 16
 _NETWORK_SERIAL = re.compile(r"^[^:\s]+:\d+$|_adb-tls-connect\._tcp")
 
 
+def is_wifi_serial(serial: str) -> bool:
+    """True for a Wi-Fi adb serial: `host:port`, or an mDNS `adb-…._adb-tls-connect._tcp` name."""
+    return _NETWORK_SERIAL.search(serial) is not None
+
+
 @dataclass(frozen=True)
 class Limits:
     stat_s: float = 10
@@ -773,7 +778,7 @@ class AdbTransport:
 
         adb does not report the link speed, so `speed_mbps` is None.
         """
-        wireless = _NETWORK_SERIAL.search(self.serial) is not None
+        wireless = is_wifi_serial(self.serial)
         started = time.monotonic()
         self._exec("true", self.limits.stat_s)
         latency_ms = (time.monotonic() - started) * 1000
