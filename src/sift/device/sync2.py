@@ -131,8 +131,23 @@ def device_features(host: str, port: int, serial: str, *, timeout_s: float = 10.
 class Sync2:
     """One sync-mode connection to one phone. Not thread-safe; use one per thread."""
 
-    def __init__(self, host: str, port: int, serial: str, *, timeout_s: float) -> None:
-        features = device_features(host, port, serial, timeout_s=timeout_s)
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        serial: str,
+        *,
+        timeout_s: float,
+        features: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """Open a sync connection.
+
+        `features` is the phone's adb feature set if the caller already has it (it is fetched
+        once per phone, not once per connection); otherwise it is asked for here. Either way the
+        phone must support `stat_v2` and `ls_v2`.
+        """
+        if features is None:
+            features = device_features(host, port, serial, timeout_s=timeout_s)
         if not features >= _REQUIRED_FEATURES:
             raise RemoteError(_TOO_OLD)
         sock = _connect(host, port, timeout_s)

@@ -6,19 +6,48 @@ bundled in its wheel). An adb of a different version kills and restarts the adb 
 already running, which would drop the phone's connection for whoever else is using it. Sift
 starts a server itself, once and deliberately (`AdbManager.ensure_server`), so every part of
 Sift that uses adbutils calls `install_no_spawn_guard()` first.
+
+The guard also replaces `AdbConnection._create_socket`, which leaves its socket open when the
+connect fails (a leaked file descriptor and a `ResourceWarning` each time the adb server is not
+answering). The replacement connects the same way and closes the socket on any failure.
 """
 
+import socket
 from typing import Any
 
 import adbutils
 from adbutils import _adb
+from adbutils.errors import AdbConnectionError, AdbTimeout
 
 PINNED_ADBUTILS_VERSION = "2.12.0"
+_CONNECT_TIMEOUT_S = 3.0  # what adbutils uses
 
 
 def _connect_only(self: Any) -> Any:
     """Connect to the adb server; on failure let adbutils' own connection errors propagate."""
     return self._create_socket()
+
+
+def _create_socket_closing(self: Any) -> socket.socket:
+    """adbutils' `_create_socket`, except that a failed connect closes the socket it made."""
+    host: str = self._AdbConnection__host
+    port: int = self._AdbConnection__port
+    s = socket.socket()
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        s.settimeout(_CONNECT_TIMEOUT_S)
+        s.connect((host, port))
+        s.settimeout(None)
+    except TimeoutError as e:
+        s.close()
+        raise AdbTimeout("connect to adb server timeout") from e
+    except OSError as e:
+        s.close()
+        raise AdbConnectionError(f"connect to adb server failed: {e}") from e
+    except BaseException:
+        s.close()
+        raise
+    return s
 
 
 def install_no_spawn_guard() -> None:
@@ -40,3 +69,4 @@ def install_no_spawn_guard() -> None:
             "(AdbConnection._safe_connect / _create_socket). Update adbutils_guard.py."
         )
     connection._safe_connect = _connect_only
+    connection._create_socket = _create_socket_closing

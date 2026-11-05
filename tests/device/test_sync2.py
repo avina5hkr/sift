@@ -263,3 +263,27 @@ def test_malformed_host_length_raises_transport_error(server: FakeAdbServer) -> 
     with pytest.raises(TransportError) as info:
         device_features("127.0.0.1", server.port, server.serial, timeout_s=TIMEOUT_S)
     assert not isinstance(info.value, DeviceDisconnected | DeviceTimeout | RemoteError)
+
+
+def _dead_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port: int = probe.getsockname()[1]
+    return port
+
+
+def test_given_features_skip_the_features_request(server: FakeAdbServer) -> None:
+    server.features = ()  # a features request would now make Sync2 refuse the phone
+    server.stats[b"/f"] = FakeStat(size=3)
+    sync = Sync2(
+        "127.0.0.1", server.port, server.serial, timeout_s=TIMEOUT_S, features={"stat_v2", "ls_v2"}
+    )
+    with sync:
+        assert sync.stat(b"/f").size == 3
+
+
+@pytest.mark.parametrize("features", [set(), {"stat_v2"}, {"ls_v2", "shell_v2"}])
+def test_given_features_are_still_checked(features: set[str]) -> None:
+    # Nothing listens on this port: the refusal must come before any connection is made.
+    with pytest.raises(RemoteError, match="too old for Sift"):
+        Sync2("127.0.0.1", _dead_port(), "FAKESERIAL", timeout_s=TIMEOUT_S, features=features)
