@@ -13,7 +13,12 @@ web-test:
 dev:
 	./scripts/dev.sh
 
+N ?= 200
+
+fake-phone:
+	uv run python scripts/fake_phone.py --files $(N)
+
 e2e: web
 	cd web && npm exec playwright test
 
-.PHONY: test lint web web-test dev e2e
+.PHONY: test lint web web-test dev fake-phone e2e
