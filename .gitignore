@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/.e2e-home/
+.dev/
+*.part
+.superpowers/
+.DS_Store
+*.swp

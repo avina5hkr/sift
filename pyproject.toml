@@ -1,0 +1,57 @@
+[project]
+name = "sift"
+version = "0.1.0"
+description = "Local-only macOS app that backs up an Android phone"
+readme = "README.md"
+authors = [
+    { name = "Sift contributors" }
+]
+requires-python = ">=3.14,<3.15"
+dependencies = []
+
+[project.scripts]
+sift = "sift.app:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "hypothesis>=6.170.14",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.17.3",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.format]
+# ruff 0.17 formats code blocks inside Markdown; the spec and plans are prose, not source.
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.14"
+check_untyped_defs = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["sift.core.*", "sift.backup.*", "sift.cleanup.*"]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 60
+markers = [
+    "realphone: needs a real connected phone",
+    "slow: slow test",
+    "e2e: end-to-end test",
+]
+addopts = '-m "not realphone"'
