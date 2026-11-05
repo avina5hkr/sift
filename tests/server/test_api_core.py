@@ -1,6 +1,9 @@
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from sift.server.app import create_app
+from sift.server.errors import install_error_handlers
+from sift.server.security import SecurityMiddleware
 from tests.helpers import H, make_client
 
 
@@ -74,7 +77,10 @@ def test_non_api_path_still_checks_host(client):
 
 
 def test_query_token_accepted_only_for_events_and_media(ctx):
-    app = create_app(ctx)
+    # Middleware only, over stub routes: the real /api/events would stream forever.
+    app = FastAPI()
+    app.add_middleware(SecurityMiddleware, ctx=ctx)
+    install_error_handlers(app)
 
     @app.get("/api/events")
     def events() -> dict[str, str]:
