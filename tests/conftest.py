@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import threading
 from collections.abc import Iterator
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from hypothesis import settings
 
 from sift.core.context import AppContext
 from sift.core.db import Database
@@ -14,6 +16,11 @@ from sift.core.logging import teardown_logging
 from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
 from tests import helpers
+
+# `dev` keeps local runs quick; `ci` runs 200 examples per property test with no deadline.
+settings.register_profile("dev", max_examples=50)
+settings.register_profile("ci", max_examples=200, deadline=None)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 
 
 @pytest.fixture(autouse=True)
