@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Every phone access goes through one `Transport` interface with a fault-injecting fake and a real adb implementation. The status bar shows the live connection state of the phone (and, if approved, the SSD) within about a second of any change.
+**Goal:** Every phone access goes through one `Transport` interface with a fault-injecting fake and a real adb implementation. The status bar shows the live connection state of the phone within about a second of any change. SSD detection is M3 (owner decision); the SSD chip stays "SSD not connected" until then.
 
 **Architecture:** `sift.device` holds the `Transport` protocol, `FakeTransport`/`FakePhone` (used by every test and by `make dev`), a minimal adb **sync v2** client (64-bit sizes), `AdbTransport` built on adbutils plus that client, `AdbManager` (locate or download adb; attach to the shared server on 5037; never kill it) and `DeviceTracker` (the track-devices stream → `ConnectionState` → `device` events). The server exposes typed device status; the React phone chip renders it. **Nothing in M1 writes to the phone.**
 
@@ -23,7 +23,7 @@
 - Plain-words UI text; no stack traces. The token never appears in logs (M0 rule stands).
 - No network except the adb download, and only after explicit consent (I8).
 - Commits are authored by the owner only, through repo-local git config; no AI attribution trailers. Never push.
-- Real-phone work happens only in Task 11. It is read-only, and **the controller asks the owner before any step that needs the owner's hands** (replug, revoke/re-allow USB debugging); the owner may choose fake-phone-only coverage for those states.
+- Real-phone work happens only in Task 10. It is read-only, and **the controller asks the owner before any step that needs the owner's hands** (replug, revoke/re-allow USB debugging); the owner may choose fake-phone-only coverage for those states.
 
 ## Review Focus
 
@@ -123,13 +123,13 @@ class FakeTransport:                                         # implements Transp
 
 def build_fake_phone(n_files: int = 200, *, seed: int = 0) -> FakePhone: ...
 ```
-`build_fake_phone` makes a tree shaped like the owner's phone (aggregates in `docs/spikes/pre-m2-inputs.md`, never the private inventory). It includes:
+`build_fake_phone` makes a tree shaped like a heavily used phone (aggregates in `docs/spikes/pre-m2-inputs.md`, never the private inventory). It includes:
 - `DCIM/Camera` with `YYYYMMDD_HHMMSS.jpg/.mp4` names and one WhatsApp-named stray;
 - `DCIM/Screenshots`; `Pictures/.thumbnails`;
 - WhatsApp Media at both the Android/media path and the legacy `/sdcard/WhatsApp/Media`, with `Sent` and `Private` folders, `.Links`, `.Statuses`, `.wamocache`, `.Wamo` and a random dot-folder;
 - `" AI Media"`, `WhatsApp Backup Excluded Stickers`, `WhatsApp Video Notes`;
 - names ending in a dot in `WhatsApp Documents/Sent`, non-ASCII names (Hindi, emoji), a non-UTF-8 name, and a name containing a newline;
-- zero-byte files, a symlink, one 4.12 GB lazily generated video;
+- zero-byte files, a symlink, one 4.12 GB lazily generated video, and files with mtime 0, a pre-1970 mtime and a post-2038 mtime;
 - `Recordings/Call` and loose files directly in `/sdcard`;
 - WhatsApp Business media, and `Android/data` (present but never readable).
 
@@ -142,6 +142,10 @@ The contract suite (`tests/contract/`) is parametrised by a `transport` fixture 
 - `sha256` is correct and returns `None` for a missing path;
 - a missing path's `stat` returns `None`;
 - `info()` fields are populated.
+
+Edge-case tests on the fake (owner request):
+- `test_fake_size_over_4gib_stat_walk_and_offset_read`: the 4.12 GB lazy file reports its exact size via `stat` and `walk`, and `open_read(p, offset=2**32 + 5)` returns the right bytes without materialising the file;
+- `test_fake_odd_and_zero_mtimes`: files with mtime 0, a negative mtime, 2**31 + 1 and 2**40 report them unchanged through `stat`, `walk` and `list_dir`.
 
 The fault tests (fake only):
 - disconnect after N bytes → `DeviceDisconnected`;
@@ -187,7 +191,10 @@ Decisions:
   - `test_stat_missing_returns_error_errno` (ENOENT=2);
   - `test_short_read_raises_disconnected`;
   - `test_features_gate`;
-  - `test_timeout_raises_device_timeout`.
+  - `test_timeout_raises_device_timeout`;
+  - `test_sta2_reports_size_over_4gib` (4_420_000_000 and 2**40 via STA2, not only LIS2);
+  - `test_odd_and_zero_mtimes_round_trip` (mtime 0, a pre-1970 negative mtime, 2**31 + 1 i.e. after 2038, and 2**40; all exact Unix seconds, never converted to local time or replaced with "now");
+  - `test_v1_truncation_is_not_used` (the client never sends LIST/STAT v1).
 - [ ] Implement, run, then commit `feat(device): adb sync v2 client with 64-bit sizes`.
 
 ---
@@ -367,30 +374,7 @@ Decisions:
 
 ---
 
-### Task 9 (proposed — owner to confirm or drop): live SSD detection, read-only
-
-**Files:** Create `src/sift/services/volumes.py`, `tests/services/test_volumes.py`. Modify `status.py` (`ssd: SsdStatusModel | None`), `app.py` (start/stop the watcher), `StatusBar.tsx` (+ test).
-
-**Interfaces — Produces:**
-```python
-@dataclass(frozen=True)
-class Volume: name: str; mount_point: Path; volume_uuid: str; fs: str; total_bytes: int; free_bytes: int; external: bool
-def list_external_volumes(*, run: Runner = subprocess_runner) -> list[Volume]: ...   # each /Volumes/* that os.path.ismount, via `diskutil info -plist`
-class VolumeWatcher:   # polls every 2 s; publishes an `ssd` event on change
-    def __init__(self, ctx: AppContext, *, lister: Callable[[], list[Volume]] = list_external_volumes, sleep=..., clock=...) -> None: ...
-```
-Status rules: if `backup.ssd_volume_uuid` is set and mounted, the chip shows `<volume name> · 450 GB free`. If it is set but not mounted: `SSD not connected`. If it is not set yet (until the M2 wizard), but external exFAT/APFS volumes exist: `SSD not chosen · 1 drive found`. Otherwise: `SSD not connected`. Identification is only ever by volume UUID, never by name; a stray folder in `/Volumes` that is not a mount point is ignored.
-
-- [ ] Tests:
-  - plist fixture parsing (captured from a real SSD, then anonymised: volume name, UUIDs and disk identifiers replaced);
-  - non-mount folders ignored;
-  - chip states;
-  - an event published on plug and on eject (fake lister sequence).
-- [ ] Implement, run, then commit `feat(services): live SSD detection (read-only)`.
-
----
-
-### Task 10: `make fake-phone` and docs
+### Task 9: `make fake-phone` and docs
 
 **Files:** Create `scripts/fake_phone.py` (prints a summary of `build_fake_phone(n)`, and optionally dumps the tree as JSON for inspection). Modify `Makefile` (`fake-phone: uv run python scripts/fake_phone.py --files $(N)`), `README.md` (a short "Develop without a phone" note).
 
@@ -398,7 +382,7 @@ Status rules: if `backup.ssd_volume_uuid` is set and mounted, the chip shows `<v
 
 ---
 
-### Task 11: Real-phone contract run and device spike (read-only, owner present)
+### Task 10: Real-phone contract run and device spike (read-only, owner present)
 
 **Files:** Create `scripts/spike_device.py` and `docs/spikes/m1-device.md`. Modify `tests/contract/conftest.py` only if the real-phone fixture needs a known-file override (environment variable `SIFT_REALPHONE_SAMPLE_DIR`, default `/sdcard/DCIM/Camera`).
 
