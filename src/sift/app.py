@@ -10,16 +10,19 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 import uvicorn
 
 from sift import __version__
 from sift.core.config import load_config
 from sift.core.context import AppContext
-from sift.core.db import Database, DatabaseCorruptError, DatabaseTooNewError
+from sift.core.db import Database, DatabaseBusyError, DatabaseCorruptError, DatabaseTooNewError
 from sift.core.events import EventBus
 from sift.core.instance import AlreadyRunningError, SingleInstanceLock
 from sift.core.logging import install_crash_handler, setup_logging, teardown_logging
@@ -146,11 +149,36 @@ def _wait_for_signal() -> None:
             signal.signal(s, handler)
 
 
+def close_windows(windows: Iterable[Any]) -> None:
+    """Destroy every window, so the GUI loop ends and `main` can clean up."""
+    for window in list(windows):
+        window.destroy()
+
+
+@contextmanager
+def _close_windows_on_signal(get_windows: Callable[[], Iterable[Any]]) -> Iterator[None]:
+    """SIGINT/SIGTERM close the windows instead of killing the process mid-cleanup."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def on_signal(signum: int, frame: FrameType | None) -> None:
+        close_windows(get_windows())
+
+    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
+
+
 def _run_window(url: str) -> None:
     import webview  # imported here so headless runs never load Cocoa
 
     webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
-    webview.start()
+    with _close_windows_on_signal(lambda: webview.windows):
+        webview.start()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -181,6 +209,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             # The port is only known after binding, so bind first and let build_context follow.
             sock = bind_socket(args.port)
+        except OSError:
+            print(
+                f"Sift can't use port {args.port} because another program is using it. "
+                "Try a different --port, or leave it out."
+            )
+            return 2
+        try:
             ctx = build_context(paths, token, sock.getsockname()[1], find_web_dist())
         except DatabaseTooNewError:
             print(
@@ -193,6 +228,9 @@ def main(argv: list[str] | None = None) -> int:
                 "The Sift database is damaged. "
                 "Move state.db aside and restart; your backups are not affected."
             )
+            return 2
+        except DatabaseBusyError as e:
+            print(e)
             return 2
         setup_logging(paths, ctx.bus, level="INFO")
         logging_on = True

@@ -10,8 +10,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-from sift.app import bind_socket, build_context, main, start_server
-from sift.core.db import Database
+from sift.app import (
+    _close_windows_on_signal,
+    bind_socket,
+    build_context,
+    close_windows,
+    main,
+    start_server,
+)
+from sift.core.db import Database, DatabaseBusyError
 from sift.core.events import EventBus
 from sift.core.instance import SingleInstanceLock
 from sift.core.logging import setup_logging
@@ -153,3 +160,86 @@ def test_headless_run_serves_and_stops_on_sigterm(paths: AppPaths) -> None:
     lock = SingleInstanceLock(paths.lock)
     lock.acquire()  # the lock was released
     lock.release()
+
+
+def test_main_reports_port_in_use(paths: AppPaths, capsys: pytest.CaptureFixture[str]) -> None:
+    holder = bind_socket(0)
+    port = holder.getsockname()[1]
+    try:
+        assert main(["--no-window", "--port", str(port)]) == 2
+    finally:
+        holder.close()
+    out = capsys.readouterr().out
+    assert out == (
+        f"Sift can't use port {port} because another program is using it. "
+        "Try a different --port, or leave it out.\n"
+    )
+    assert "Traceback" not in out
+    lock = SingleInstanceLock(paths.lock)
+    lock.acquire()  # the early return released the lock
+    lock.release()
+
+
+def test_main_reports_busy_database(
+    paths: AppPaths, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def busy(self: Database) -> None:
+        raise DatabaseBusyError("Sift's database is in use by another program. Try again shortly.")
+
+    monkeypatch.setattr(Database, "open", busy)
+    assert main(["--no-window"]) == 2
+    out = capsys.readouterr().out
+    assert out == "Sift's database is in use by another program. Try again shortly.\n"
+    lock = SingleInstanceLock(paths.lock)
+    lock.acquire()
+    lock.release()
+
+
+def test_server_never_enables_uvicorn_access_log(
+    paths: AppPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Access lines carry the query string (and the token), so the setting itself is guarded."""
+    import uvicorn
+
+    seen: dict[str, object] = {}
+    real_init = uvicorn.Config.__init__
+
+    def spy(self: uvicorn.Config, *args: object, **kwargs: object) -> None:
+        seen.update(kwargs)
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(uvicorn.Config, "__init__", spy)
+    sock = bind_socket(0)
+    ctx = build_context(paths, token="t0k", port=sock.getsockname()[1], web_dist=None)
+    handle = start_server(ctx, sock)
+    handle.stop()
+    ctx.db.close()
+    assert seen["access_log"] is False
+    assert seen["log_config"] is None
+
+
+class _FakeWindow:
+    def __init__(self) -> None:
+        self.destroyed = 0
+
+    def destroy(self) -> None:
+        self.destroyed += 1
+
+
+def test_close_windows_destroys_every_window() -> None:
+    windows = [_FakeWindow(), _FakeWindow()]
+    close_windows(windows)
+    assert [w.destroyed for w in windows] == [1, 1]
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_signal_in_window_mode_closes_windows(sig: signal.Signals) -> None:
+    windows = [_FakeWindow(), _FakeWindow()]
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    with _close_windows_on_signal(lambda: windows):
+        os.kill(os.getpid(), sig)
+        deadline = time.monotonic() + 2
+        while not all(w.destroyed for w in windows) and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert [w.destroyed for w in windows] == [1, 1]
+    assert {s: signal.getsignal(s) for s in before} == before  # handlers restored
