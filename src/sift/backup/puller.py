@@ -23,10 +23,12 @@ Copying one file:
    test's simulated crash there must raise a `BaseException` that is not an `Exception`, or it
    counts as a failed file instead of ending the run).
 5. **`TargetExists`:** a file is already at that path with no row (a crash at that crash
-   point, say). Its SHA-256 is read: the same bytes means it is the copy: the `.part` is
-   dropped and the rows are written for the existing file. Different bytes send the copy to
-   the `_HASH8` path; if that exists too with other bytes, the file is `failed`. An existing
-   file is never modified (I1).
+   point, say). Its SHA-256 is read: the same bytes means it is the copy: it is flushed to the
+   disk with its folder (it may never have been), the `.part` is dropped and the rows are
+   written for the existing file. Different bytes, or anything that is not a regular file (a
+   symlink, a FIFO, a folder: never opened or followed), send the copy to the `_HASH8` path;
+   if that is taken too by anything else, the file is `failed`. An existing file is never
+   modified (I1).
 
 Deciding on a copy (steps 3 to 5) is serialised, so two readers can never both store the same
 content or claim the same path; the transfers themselves run in parallel.
@@ -60,7 +62,8 @@ from sift.backup.staging import (
     IncompleteCopy,
     StagedFile,
     TargetExists,
-    sha256_of_file,
+    make_durable,
+    regular_file_sha256,
 )
 from sift.core.clock import Clock
 from sift.core.crashpoints import hit
@@ -93,6 +96,8 @@ RETRYABLE: tuple[type[BaseException], ...] = (
     OSError,
 )
 RECONNECT_PAUSE_S = 1.0
+# Stands for "something other than a regular file" at a path: never this copy's content.
+NOT_A_FILE = "not-a-regular-file"
 _COLLECT_S = 0.25  # how often the coordinator wakes to report progress
 
 Layout = Literal["mirror", "by_date"]
@@ -517,13 +522,14 @@ class Puller:
                 staged.commit(final, mtime=item.mtime)
                 return rel_path
             except TargetExists:
-                found = sha256_of_file(final)
+                found = regular_file_sha256(final)  # None: not a regular file, never opened
                 if found == digest:
                     log.info("Reusing an identical file already at %r", rel_path)
+                    make_durable(final)  # as durable as a commit before its rows are written
                     return rel_path  # the .part is dropped when the stage is left
                 if attempt == 1:
                     raise
-                on_disk[rel_key(rel_path)] = found
+                on_disk[rel_key(rel_path)] = found or NOT_A_FILE
         raise AssertionError("unreachable")
 
     # -- the database --------------------------------------------------------------------------

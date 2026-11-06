@@ -526,4 +526,49 @@ def test_stage_exposes_its_size_and_part_for_reading_before_commit(
         assert staged.part_path.parent == staging_dir
         assert staged.part_path.read_bytes() == b"hello"
         staged.commit(final_dir / "f", mtime=1)
-    assert staging.sha256_of_file(final_dir / "f") == sha256(b"hello").hexdigest()
+    assert staging.regular_file_sha256(final_dir / "f") == sha256(b"hello").hexdigest()
+
+
+def test_regular_file_sha256_never_opens_or_follows_anything_else(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.write_bytes(b"data")
+    (tmp_path / "link").symlink_to(real)
+    os.mkfifo(tmp_path / "fifo")  # opening it for reading would block
+    (tmp_path / "dir").mkdir()
+    assert staging.regular_file_sha256(real) == sha256(b"data").hexdigest()
+    for name in ("link", "fifo", "dir"):
+        assert staging.regular_file_sha256(tmp_path / name) is None
+
+
+def test_make_durable_flushes_the_file_and_its_folder_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "adopted.jpg"
+    path.write_bytes(b"identical bytes")
+    os.utime(path, (1, 1))
+    before = os.stat(path)
+    opened: list[tuple[str, int]] = []
+    flushed: list[int] = []
+    real_open, real_full_fsync = os.open, staging._full_fsync
+
+    def spy_open(p: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        opened.append((os.fspath(p), flags))
+        return real_open(p, flags, *args, **kwargs)
+
+    def spy_fsync(fd: int) -> None:
+        flushed.append(os.fstat(fd).st_ino)
+        real_full_fsync(fd)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(staging, "_full_fsync", spy_fsync)
+    staging.make_durable(path)
+    monkeypatch.undo()
+    assert flushed == [before.st_ino, os.stat(tmp_path).st_ino]  # the file, then its folder
+    writes = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+    assert opened and all(flags & writes == 0 for _p, flags in opened)
+    after = os.stat(path)
+    assert (after.st_mtime_ns, after.st_size, path.read_bytes()) == (
+        before.st_mtime_ns,
+        before.st_size,
+        b"identical bytes",
+    )

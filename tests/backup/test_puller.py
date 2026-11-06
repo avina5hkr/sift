@@ -3,6 +3,8 @@
 import hashlib
 import io
 import os
+import stat
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -11,6 +13,7 @@ from typing import BinaryIO, cast
 
 import pytest
 
+from sift.backup import puller as puller_module
 from sift.backup.layout import mirror_rel_path
 from sift.backup.puller import (
     CRASH_POINT,
@@ -460,6 +463,88 @@ def test_target_exists_same_hash_reuses_file(rig: Rig) -> None:
     assert replicas(rig.db) == {_target_of(path, data): (sha(data), len(data))}
     assert phone_rows(rig.db)[path][:3] == ("done", sha(data), _target_of(path, data))
     assert staging_files(rig.root) == []  # the .part is gone
+
+
+def test_reused_file_is_made_durable_before_its_rows(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, data = "/sdcard/DCIM/Camera/IMG_1.jpg", b"the same bytes" * 10
+    rig.add(path, data)
+    existing = rig.root / _target_of(path, data)
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(data)
+    events: list[tuple[str, object]] = []
+    real_durable, real_record = puller_module.make_durable, Puller._record_copy
+
+    def spy_durable(target: Path) -> None:
+        events.append(("durable", target))
+        real_durable(target)
+
+    def spy_record(self: Puller, item: object, digest: str, rel_path: str) -> None:
+        with rig.db.read() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM replica").fetchone()[0] == 0
+        events.append(("rows", rel_path))
+        real_record(self, item, digest, rel_path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(puller_module, "make_durable", spy_durable)
+    monkeypatch.setattr(Puller, "_record_copy", spy_record)
+    assert rig.pull().copied == 1
+    assert events == [("durable", existing), ("rows", _target_of(path, data))]
+
+
+def _pull_in_a_thread(rig: Rig) -> PullStats:
+    """Pull, but fail the test instead of hanging if something blocks (a FIFO opened)."""
+    out: list[PullStats] = []
+    thread = threading.Thread(target=lambda: out.append(rig.pull()), daemon=True)
+    thread.start()
+    thread.join(20)
+    assert not thread.is_alive(), "the pull hung on what was at the target"
+    return out[0]
+
+
+def test_a_fifo_or_symlink_at_the_target_is_never_opened_and_gets_hash8(
+    rig: Rig, tmp_path: Path
+) -> None:
+    fifo_path, fifo_data = "/sdcard/DCIM/Camera/IMG_1.jpg", b"first photo"
+    link_path, link_data = "/sdcard/DCIM/Camera/IMG_2.jpg", b"second photo"
+    rig.add(fifo_path, fifo_data)
+    rig.add(link_path, link_data)
+    fifo = rig.root / _target_of(fifo_path, fifo_data)
+    link = rig.root / _target_of(link_path, link_data)
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+    elsewhere = tmp_path / "elsewhere.jpg"
+    elsewhere.write_bytes(link_data)  # identical bytes, but outside the backup: never adopted
+    link.symlink_to(elsewhere)
+    stats = _pull_in_a_thread(rig)
+    assert (stats.copied, stats.failed) == (2, 0)
+    assert stat.S_ISFIFO(os.lstat(fifo).st_mode) and os.readlink(link) == str(elsewhere)
+    with rig.db.read() as conn:
+        rows = dict(conn.execute("SELECT rel_path, content_hash FROM replica").fetchall())
+    assert rows == {
+        f"Phone/DCIM/Camera/IMG_1_{sha(fifo_data)[:8]}.jpg": sha(fifo_data),
+        f"Phone/DCIM/Camera/IMG_2_{sha(link_data)[:8]}.jpg": sha(link_data),
+    }
+    for rel, digest in rows.items():
+        assert sha((rig.root / rel).read_bytes()) == digest
+
+
+def test_non_files_at_both_paths_fail_the_file_in_plain_words(rig: Rig, tmp_path: Path) -> None:
+    path, data = "/sdcard/DCIM/Camera/IMG_1.jpg", b"photo"
+    rig.add(path, data)
+    base = rig.root / _target_of(path, data)
+    hashed = rig.root / f"Phone/DCIM/Camera/IMG_1_{sha(data)[:8]}.jpg"
+    base.parent.mkdir(parents=True)
+    os.mkfifo(base)
+    elsewhere = tmp_path / "same.jpg"
+    elsewhere.write_bytes(data)
+    hashed.symlink_to(elsewhere)
+    stats = _pull_in_a_thread(rig)
+    assert (stats.copied, stats.failed) == (0, 1)
+    state, _digest, _rel, error = phone_rows(rig.db)[path]
+    assert (state, error) == ("failed", describe(TargetExists("x")))
+    assert stat.S_ISFIFO(os.lstat(base).st_mode) and os.readlink(hashed) == str(elsewhere)
+    assert replicas(rig.db) == {} and staging_files(rig.root) == []
 
 
 def test_target_exists_different_hash_gets_hash8(rig: Rig) -> None:

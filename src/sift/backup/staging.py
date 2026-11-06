@@ -33,6 +33,7 @@ import fcntl
 import hashlib
 import logging
 import os
+import stat
 import threading
 import uuid
 from collections.abc import Callable
@@ -144,9 +145,47 @@ def _hash_uncached(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_of_file(path: Path) -> str:
-    """The SHA-256 (hex) of a file, read with the cache off (`F_NOCACHE`). Never writes."""
-    return _hash_uncached(path)
+def regular_file_sha256(path: Path) -> str | None:
+    """The SHA-256 of `path` when it is a regular file, else None. Never writes, never blocks.
+
+    For a file found at a final path that has no row. Anything else there (a symlink, a FIFO, a
+    folder, a socket, a device) is never opened or followed, so it can neither hang the copy
+    nor be taken for a backed-up file. The bytes are read with the cache off (`F_NOCACHE`).
+    """
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as e:
+        if e.errno == errno.ELOOP:  # it became a symlink after the lstat
+            return None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):  # it was swapped after the lstat
+            return None
+        fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
+        digest = hashlib.sha256()
+        while chunk := os.read(fd, _READ_CHUNK):
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def make_durable(path: Path) -> None:
+    """Flush an existing regular file, then its folder, to the disk; the file is not modified.
+
+    For a file Sift adopts instead of writing (an identical file already at the final path),
+    so it is as durable as a committed copy before a row points at it (I2). The file is opened
+    read-only and without following a symlink; the flush is `F_FULLFSYNC`, with the same
+    `fsync` fallback (and warning) as a commit.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        _full_fsync(fd)
+    finally:
+        os.close(fd)
+    _flush_folder(path.parent)
 
 
 class StagedFile:
