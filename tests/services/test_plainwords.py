@@ -8,6 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import sift
+from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.core.db import (
     DatabaseBusyError,
@@ -48,6 +49,7 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "IncompleteCopy": IncompleteCopy,
     "ChecksumMismatch": ChecksumMismatch,
     "TargetExists": TargetExists,
+    "ScanNotPending": ScanNotPending,
     "ConsentRequired": ConsentRequired,
     "AdbDownloadError": AdbDownloadError,
     "AdbServerError": AdbServerError,

@@ -46,6 +46,9 @@ class FaultPlan:
     wrong_sha256: set[str] = field(default_factory=set)
     refuse_delete: set[str] = field(default_factory=set)
     unstatable: set[str] = field(default_factory=set)  # entries a listing cannot look at
+    # Folders that list as empty, with no error, though they hold files: how some phones answer
+    # for a folder they refuse to read.
+    lists_empty: set[str] = field(default_factory=set)
     offline_for_s: float | None = None  # every call raises DeviceDisconnected for this long
     identity: str | None = None  # report a different phone (serial and Android ID)
     garbage_output: bool = False  # shell-like calls return unparseable text
@@ -337,6 +340,8 @@ class FakeTransport:
             raise RemoteError(f"cannot list {path}: no such directory", path)
         if self.phone.is_unreadable(path):
             raise RemoteError(f"cannot list {path}: permission denied", path)
+        if path.rstrip("/") in self.faults.lists_empty:
+            return []
         entries: list[RemoteEntry] = []
         for entry in self.phone.children(path):
             if entry.path in self.faults.unstatable:

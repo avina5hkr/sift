@@ -207,6 +207,14 @@ def test_identity_override_changes_both_identifiers() -> None:
     assert transport.info().android_id != plain.info().android_id
 
 
+def test_a_folder_can_list_as_empty_without_an_error() -> None:
+    transport, _, _ = make(FaultPlan(lists_empty={"/sdcard/DCIM"}))
+    assert transport.list_dir("/sdcard/DCIM") == []
+    errors: list[RemoteError] = []
+    assert list(transport.walk("/sdcard", on_error=errors.append)) == []
+    assert errors == []
+
+
 def test_info_reports_the_phones_clock() -> None:
     phone = FakePhone(time_offset_s=-90)
     info = FakeTransport(phone, wall_clock=lambda: 1_700_000_000.4).info()
