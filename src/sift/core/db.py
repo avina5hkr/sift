@@ -14,6 +14,10 @@ _log = logging.getLogger(__name__)
 # Held by every writer in the process, whichever Database it goes through.
 _WRITE_LOCK = threading.Lock()
 
+# Whether the current thread is inside a write (it holds _WRITE_LOCK). The lock is not reentrant,
+# so code that would write on a thread already inside a write must be able to tell and refuse.
+_WRITE_STATE = threading.local()
+
 # Pauses (seconds) between attempts when BEGIN IMMEDIATE finds the database locked.
 _LOCK_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
 
@@ -146,6 +150,11 @@ class Database:
             del self._local.handle
             handle.release()
 
+    @staticmethod
+    def in_write_tx() -> bool:
+        """True when the calling thread is inside `tx()`: a write begun now would deadlock."""
+        return bool(getattr(_WRITE_STATE, "active", False))
+
     def open_read_connections(self) -> int:
         """How many read connections are open across all threads (for tests and diagnostics)."""
         with self._read_conns_lock:
@@ -185,7 +194,11 @@ class Database:
         if self._writer is None:
             raise RuntimeError("The database is not open")
         with _WRITE_LOCK:
-            yield self._writer
+            _WRITE_STATE.active = True
+            try:
+                yield self._writer
+            finally:
+                _WRITE_STATE.active = False
 
     def close(self) -> None:
         """Close every connection this Database opened, including other threads' readers."""

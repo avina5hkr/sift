@@ -744,3 +744,265 @@ def test_stop_all_abandons_a_job_that_will_not_stop_and_db_close_cannot_race_it(
     assert not thread.is_alive()
     assert len(late) == 1  # its own tx() failed ...
     assert state_of(jobs, job_id).state is JobState.failed  # ... and nothing rewrote the outcome
+
+
+# -- no lock held across the database or the bus (fix round 1) -------------------------------
+
+
+def call_bounded(fn: Callable[[], Any], timeout: float = 5.0) -> Any:
+    """Run `fn` on a thread; fail the test (instead of hanging it) if it does not return."""
+    box: list[Any] = []
+    thread = threading.Thread(target=lambda: box.append(fn()), daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), "call did not return: a lock is held across I/O"
+    return box[0] if box else None
+
+
+class TickingClock(ManualClock):
+    """Every `monotonic()` call moves time on, so the 500 ms throttle fires all the time."""
+
+    def monotonic(self) -> float:
+        self.advance(0.2)
+        return super().monotonic()
+
+
+def test_runner_and_api_threads_never_deadlock_over_pause_resume_stop(ctx: AppContext) -> None:
+    def runner(control: JobControl) -> None:
+        control.set_state(JobState.pulling)
+        for i in range(100_000):
+            control.checkpoint()
+            control.report(i, i * 10, 100_000, 1_000_000)
+            if i % 7 == 0:
+                control.set_state(JobState.scanning)
+                control.set_state(JobState.pulling)
+
+    jobs = manager(ctx, runner, clock=TickingClock())
+    job_id = jobs.start_backup(["camera"])
+    stop_flag = threading.Event()
+
+    def api() -> None:
+        while not stop_flag.is_set():
+            with contextlib.suppress(JobConflict):
+                jobs.pause(job_id)
+                jobs.snapshot()
+                jobs.resume(job_id)
+            time.sleep(0.003)  # let the runner through a checkpoint now and then
+
+    threads = [threading.Thread(target=api, daemon=True) for _ in range(3)]
+    for t in threads:
+        t.start()
+    wait_until(lambda: state_of(jobs, job_id).files_done > 20, timeout=30)
+    call_bounded(lambda: jobs.stop(job_id))
+    stop_flag.set()
+    for t in threads:
+        t.join(5)
+        assert not t.is_alive()
+    assert jobs.wait_finished(job_id, 10)
+    assert row(ctx, job_id)["state"] == "done"  # the last write won: nothing older overwrote it
+
+
+def test_a_slow_database_write_does_not_block_snapshot_or_other_callers(ctx: AppContext) -> None:
+    started: list[int] = []
+    gates = [threading.Event() for _ in range(3)]
+    jobs = manager(ctx, file_loop(started, gates))
+    job_id = jobs.start_backup(["camera"])
+    wait_until(lambda: started == [0])
+
+    release_db = threading.Event()
+    holding = threading.Event()
+
+    def hold_write_lock() -> None:
+        with ctx.db.tx():
+            holding.set()
+            release_db.wait(10)
+
+    holder = threading.Thread(target=hold_write_lock, daemon=True)
+    holder.start()
+    assert holding.wait(5)
+    pauser = threading.Thread(target=jobs.pause, args=(job_id,), daemon=True)
+    pauser.start()  # takes the lock, flags the pause, then waits for the database outside it
+    # snapshot() needs the job's lock: it must be free although a write is stuck.
+    wait_until(lambda: call_bounded(lambda: state_of(jobs, job_id)).pause_requested)
+    assert call_bounded(jobs.snapshot)
+    release_db.set()
+    pauser.join(5)
+    holder.join(5)
+    gates[0].set()
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.paused)
+    assert row(ctx, job_id)["state"] == "paused"
+    jobs.stop(job_id)
+    finished(jobs, job_id)
+
+
+def test_database_knows_when_a_thread_is_inside_a_write(ctx: AppContext) -> None:
+    assert not ctx.db.in_write_tx()
+    with ctx.db.tx():
+        assert ctx.db.in_write_tx()
+        assert call_bounded(ctx.db.in_write_tx) is False  # per thread
+    assert not ctx.db.in_write_tx()
+
+
+def test_job_control_inside_a_db_transaction_fails_loudly_instead_of_hanging(
+    ctx: AppContext,
+) -> None:
+    errors: list[str] = []
+
+    def runner(control: JobControl) -> None:
+        calls: list[Callable[[], Any]] = [
+            lambda: control.report(1, 1, 1, 1),
+            lambda: control.set_state(JobState.pulling),
+            control.checkpoint,
+            control.wait_for_phone,
+            lambda: control.retry(lambda: None, retry_on=(OSError,)),
+            lambda: control.on_phone(lambda s: None, disconnect_on=(OSError,)),
+        ]
+        for call in calls:
+            with ctx.db.tx():
+                try:
+                    call()
+                except RuntimeError as e:
+                    errors.append(str(e))
+        control.report(2, 2, 2, 2)  # outside a transaction it is fine again
+
+    jobs = manager(ctx, runner, clock=TickingClock())
+    snap = finished(jobs, jobs.start_backup(["camera"]))
+    assert len(errors) == 6
+    assert all("transaction" in e for e in errors)
+    assert snap.state is JobState.done and snap.files_done == 2
+
+
+# -- stop_all keeps its deadline (fix round 1) ---------------------------------------------------
+
+
+def test_stop_all_keeps_its_deadline_when_a_job_thread_holds_the_job_lock(
+    ctx: AppContext,
+) -> None:
+    holding = threading.Event()
+    release = threading.Event()
+
+    def runner(control: JobControl) -> None:
+        control.set_state(JobState.pulling)
+        with control._job.cond:  # a thread stuck while it holds the job's lock
+            holding.set()
+            release.wait(10)
+
+    jobs = manager(ctx, runner)
+    job_id = jobs.start_backup(["camera"])
+    assert holding.wait(5)
+    t0 = time.monotonic()
+    jobs.stop_all(0.3)
+    assert time.monotonic() - t0 < 1.5
+    r = row(ctx, job_id)
+    assert r["state"] == "failed" and r["error"] and r["finished_at"] is not None
+    release.set()
+    assert jobs.wait_finished(job_id, 5)
+    assert row(ctx, job_id)["state"] == "failed"  # the late outcome did not overwrite it
+    assert state_of(jobs, job_id).state is JobState.failed
+
+
+def test_stop_all_stops_paused_and_waiting_jobs(ctx: AppContext) -> None:
+    started: list[int] = []
+    gates = [threading.Event() for _ in range(3)]
+    jobs = manager(ctx, file_loop(started, gates))
+    job_id = jobs.start_backup(["camera"])
+    wait_until(lambda: started == [0])
+    jobs.pause(job_id)
+    gates[0].set()
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.paused)
+    jobs.stop_all(5)
+    assert state_of(jobs, job_id).state is JobState.done
+    assert state_of(jobs, job_id).stopped
+
+
+def test_stop_all_stops_a_job_waiting_for_the_phone(ctx: AppContext) -> None:
+    tracker: FakeTracker = ctx.tracker  # type: ignore[assignment]
+    gate = threading.Event()
+
+    def runner(control: JobControl) -> None:
+        assert gate.wait(5)
+        control.wait_for_phone()
+
+    jobs = manager(ctx, runner)
+    job_id = jobs.start_backup(["camera"])
+    tracker.disconnect()
+    gate.set()
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.waiting_for_phone)
+    jobs.stop_all(5)
+    assert state_of(jobs, job_id).state is JobState.done
+
+
+def test_pause_while_waiting_for_the_phone_takes_effect_after_it_returns(ctx: AppContext) -> None:
+    tracker: FakeTracker = ctx.tracker  # type: ignore[assignment]
+    gate = threading.Event()
+
+    def runner(control: JobControl) -> None:
+        control.set_state(JobState.pulling)
+        assert gate.wait(5)
+        control.wait_for_phone()
+        control.checkpoint()
+
+    jobs = manager(ctx, runner)
+    job_id = jobs.start_backup(["camera"])
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.pulling)
+    tracker.disconnect()
+    gate.set()
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.waiting_for_phone)
+    jobs.pause(job_id)
+    assert state_of(jobs, job_id).state is JobState.waiting_for_phone
+    tracker.connect(PHONE)
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.paused)
+    jobs.resume(job_id)
+    assert finished(jobs, job_id).state is JobState.done
+
+
+# -- on_phone: wait for the phone, then redo the piece of work -------------------------------
+
+
+def test_on_phone_redoes_the_work_on_the_new_session_after_a_disconnect(ctx: AppContext) -> None:
+    tracker: FakeTracker = ctx.tracker  # type: ignore[assignment]
+    seen: list[DeviceSession] = []
+    first_try = threading.Event()
+    results: list[str] = []
+
+    def work(session: DeviceSession) -> str:
+        seen.append(session)
+        if len(seen) == 1:
+            tracker.disconnect()  # the cable is pulled mid-file
+            first_try.set()
+            raise DeviceDisconnected("gone")
+        return "copied"
+
+    def runner(control: JobControl) -> None:
+        results.append(control.on_phone(work, disconnect_on=(DeviceDisconnected,)))
+
+    jobs = manager(ctx, runner)
+    job_id = jobs.start_backup(["camera"])
+    assert first_try.wait(5)
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.waiting_for_phone)
+    replacement = tracker.connect(PHONE)
+    assert finished(jobs, job_id).state is JobState.done
+    assert results == ["copied"]
+    assert seen[1] is replacement and seen[0] is not replacement
+
+
+def test_on_phone_does_not_swallow_other_errors_and_stop_ends_the_wait(ctx: AppContext) -> None:
+    jobs = manager(
+        ctx, lambda c: c.on_phone(lambda s: _raise_value_error(), disconnect_on=(OSError,))
+    )
+    assert finished(jobs, jobs.start_backup(["camera"])).state is JobState.failed
+
+    tracker: FakeTracker = ctx.tracker  # type: ignore[assignment]
+    calls: list[int] = []
+
+    def work(session: DeviceSession) -> None:
+        calls.append(1)
+        tracker.disconnect()
+        raise DeviceDisconnected("gone")
+
+    jobs2 = manager(ctx, lambda c: c.on_phone(work, disconnect_on=(DeviceDisconnected,)))
+    job_id = jobs2.start_backup(["camera"])
+    wait_until(lambda: state_of(jobs2, job_id).state is JobState.waiting_for_phone)
+    jobs2.stop(job_id)
+    snap = finished(jobs2, job_id)
+    assert snap.stopped and len(calls) == 1
