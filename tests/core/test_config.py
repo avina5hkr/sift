@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from sift.core.config import BackupSet, Config, load_config, save_config
+from sift.core.config import DEFAULT_SETS, BackupSet, Config, load_config, save_config
 
 
 def test_missing_file_gives_spec_defaults(tmp_path: Path) -> None:
@@ -664,3 +664,202 @@ def test_set_warnings_are_plain_words(tmp_path: Path) -> None:
     assert any("paths: must be a list" in x for x in w)
     assert any("name: must be text" in x for x in w)
     assert any("deletable: is required" in x for x in w)
+
+
+FLOOR = [
+    "/sdcard/Android/data",
+    "/sdcard/Android/obb",
+    "/sdcard/Android/media/com.whatsapp/WhatsApp/Databases",
+    "/sdcard/Android/media/com.whatsapp/WhatsApp/Backups",
+    "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases",
+    "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
+    "/sdcard/WhatsApp/Databases",
+    "/sdcard/WhatsApp/Backups",
+]
+
+
+def test_user_never_delete_cannot_drop_builtin_protection(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[cleanup]\nnever_delete = ["/sdcard/Mine"]\n[browse]\n'
+        'never_delete_extra = ["/sdcard/Extra"]\n'
+    )
+    cfg, _ = load_config(f)
+    eff = cfg.effective_never_delete()
+    for p in FLOOR:
+        assert p in eff
+    assert "/sdcard/Mine" in eff
+    assert "/sdcard/Extra" in eff
+    assert len(eff) == len(set(eff))
+    # the floor holds for an in-memory config too
+    bare = Config()
+    bare.cleanup.never_delete = []
+    assert set(FLOOR) <= set(bare.effective_never_delete())
+
+
+def test_default_never_delete_gives_no_floor_warning(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    save_config(Config(), f)
+    assert load_config(f)[1] == []
+
+
+def test_never_delete_missing_floor_entry_warns(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text('[cleanup]\nnever_delete = ["/sdcard/Mine", "/sdcard/android/DATA"]\n')
+    _, w = load_config(f)
+    missing = [x for x in w if "never_delete" in x and "protected" in x]
+    assert len(missing) == len(FLOOR) - 1  # the case-differing Android/data counts as present
+    assert not any("Android/data" in x for x in missing)
+    assert any("/sdcard/Android/obb" in x for x in missing)
+
+
+def test_path_lists_are_normalised_and_bad_entries_dropped(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[cleanup]\ndelete_roots = ["/storage/emulated/0/DCIM", "/sdcard/a/../b", "/tmp/x"]\n'
+        'never_delete = ["/sdcard/Keep/", "/sdcard/Keep2"]\n'
+        '[slate]\nkeep_folders = ["/storage/emulated/0/Documents", "/sdcard//x", "rel"]\n'
+        '[browse]\nnever_delete_extra = ["/sdcard", "/sdcard/Ok"]\n'
+    )
+    cfg, w = load_config(f)
+    assert cfg.cleanup.delete_roots == ["/sdcard/DCIM"]
+    assert cfg.cleanup.never_delete == ["/sdcard/Keep2"]
+    assert cfg.slate.keep_folders == ["/sdcard/Documents"]
+    assert cfg.browse.never_delete_extra == ["/sdcard/Ok"]
+    for where, item in [
+        ("cleanup.delete_roots", "/sdcard/a/../b"),
+        ("cleanup.delete_roots", "/tmp/x"),
+        ("cleanup.never_delete", "/sdcard/Keep/"),
+        ("slate.keep_folders", "/sdcard//x"),
+        ("slate.keep_folders", "rel"),
+        ("browse.never_delete_extra", "/sdcard"),
+    ]:
+        assert any(x.startswith(where) and f'"{item}"' in x and "dropped" in x for x in w), where
+
+
+def test_path_lists_reject_bad_entries_in_code() -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate({"slate": {"keep_folders": ["/nope"]}})
+    assert Config.model_validate(
+        {"browse": {"never_delete_extra": ["/storage/emulated/0/X"]}}
+    ).browse.never_delete_extra == ["/sdcard/X"]
+
+
+@pytest.mark.parametrize("bad", ["PhoneBackup", "", "relative/dir", "./x"])
+def test_relative_mac_root_falls_back(tmp_path: Path, bad: str) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(f'[backup]\nmac_root = "{bad}"\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.mac_root == "~/PhoneBackup"
+    assert any(x.startswith("backup.mac_root") and "~/PhoneBackup" in x for x in w)
+    with pytest.raises(ValidationError):
+        Config.model_validate({"backup": {"mac_root": bad}})
+
+
+@pytest.mark.parametrize("good", ["/Volumes/Disk/Backup", "~/B", "~"])
+def test_absolute_mac_root_is_kept(tmp_path: Path, good: str) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(f'[backup]\nmac_root = "{good}"\n')
+    cfg, w = load_config(f)
+    assert cfg.backup.mac_root == good
+    assert w == []
+
+
+def test_save_config_replaces_a_non_table_section(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text("phone = 3\n")
+    save_config(Config(), f)
+    cfg, w = load_config(f)
+    assert w == []
+    assert cfg == Config()
+
+
+def test_save_config_replaces_a_non_table_backup_and_sets(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text('backup = "x"\n')
+    save_config(Config(), f)
+    assert load_config(f) == (Config(), [])
+    f.write_text("[backup]\nsets = 3\n")
+    save_config(Config(), f)
+    assert load_config(f) == (Config(), [])
+
+
+def test_two_set_asides_in_the_same_second_keep_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    f = tmp_path / "config.toml"
+    for _ in range(2):
+        f.write_text("[phone\n")
+        load_config(f)
+    assert len(list(tmp_path.glob("config.toml.invalid-*"))) == 2
+
+
+def test_default_sets_cannot_be_mutated() -> None:
+    assert isinstance(DEFAULT_SETS, tuple)
+    assert len(DEFAULT_SETS) == 9
+    first = DEFAULT_SETS[0]
+    with pytest.raises((ValidationError, TypeError, AttributeError)):
+        first.name = "x"  # type: ignore[misc]
+    with pytest.raises((TypeError, AttributeError)):
+        first.paths.append("/sdcard/X")  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        DEFAULT_SETS[0] = first  # type: ignore[index]
+
+
+def test_config_sets_are_independent_copies() -> None:
+    a = Config()
+    a.backup.sets[0].paths.append("/sdcard/Extra")
+    a.backup.sets[0].name = "Changed"
+    assert Config().backup.sets[0].paths == ["/sdcard/DCIM"]
+    assert Config().backup.sets[0].name == "Camera"
+    assert DEFAULT_SETS[0].name == "Camera"
+
+
+def test_set_names_are_trimmed_and_case_folded_for_uniqueness(tmp_path: Path) -> None:
+    sets = [
+        BackupSet(name="Camera", paths=["/sdcard/DCIM"], enabled=True, deletable=True),
+        BackupSet(name=" camera ", paths=["/sdcard/X"], enabled=True, deletable=True),
+    ]
+    assert sets[1].name == "camera"
+    with pytest.raises(ValidationError, match="unique"):
+        Config.model_validate({"backup": {"sets": sets}})
+    f = tmp_path / "config.toml"
+    f.write_text(
+        '[[backup.sets]]\nname = "Camera"\npaths = ["/sdcard/DCIM"]\nenabled = true\n'
+        "deletable = true\n"
+        '[[backup.sets]]\nname = " camera "\npaths = ["/sdcard/X"]\nenabled = true\n'
+        "deletable = true\n"
+    )
+    cfg, w = load_config(f)
+    assert [s.name for s in cfg.backup.sets] == ["Camera"]
+    assert any("duplicate" in x for x in w)
+
+
+def test_exclude_is_matched_case_insensitively(tmp_path: Path) -> None:
+    s = BackupSet(
+        name="Camera",
+        paths=["/sdcard/DCIM"],
+        exclude=["/sdcard/dcim/Screenshots"],
+        enabled=True,
+        deletable=True,
+    )
+    assert s.exclude == ["/sdcard/dcim/Screenshots"]
+    f = tmp_path / "config.toml"
+    _write_set(f, 'paths = ["/sdcard/DCIM"]\nexclude = ["/SDCARD/x"]\n')
+    _, w = load_config(f)
+    assert any("outside /sdcard" in x for x in w)
+    _write_set(f, 'paths = ["/sdcard/DCIM"]\nexclude = ["/sdcard/dcim/Thumbs"]\n')
+    cfg, w = load_config(f)
+    assert w == []
+    assert cfg.backup.sets[0].exclude == ["/sdcard/dcim/Thumbs"]
+    with pytest.raises(ValidationError):
+        BackupSet(
+            name="C",
+            paths=["/sdcard/DCIM"],
+            exclude=["/sdcard/DCIMX"],
+            enabled=True,
+            deletable=True,
+        )

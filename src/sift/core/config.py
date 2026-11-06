@@ -17,6 +17,7 @@ from typing import Annotated, Any, Literal, cast
 import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from tomlkit.exceptions import TOMLKitError
+from tomlkit.items import Table
 
 SDCARD_PREFIX = "/sdcard/"
 
@@ -69,8 +70,27 @@ def normalize_set_path(value: str, *, allow_root: bool = False) -> str:
 
 
 def _is_inside(path: str, root: str) -> bool:
-    """True when `path` is below `root` by whole segments (so /sdcard/DCIMX is not inside DCIM)."""
-    return path.startswith(root + "/")
+    """True when `path` is below `root` by whole segments (so /sdcard/DCIMX is not inside DCIM).
+
+    Phone paths are compared ignoring case: shared storage on the phone is case-insensitive.
+    """
+    return path.casefold().startswith(root.casefold() + "/")
+
+
+def _normalize_list(values: list[str], *, allow_root: bool = False) -> list[str]:
+    """Normalise every entry with the set-path rules; the first bad one raises ValueError."""
+    out: list[str] = []
+    for item in values:
+        try:
+            out.append(normalize_set_path(item, allow_root=allow_root))
+        except ValueError as err:
+            raise ValueError(f"{item!r} is not allowed ({err})") from err
+    return out
+
+
+def _name_key(name: str) -> str:
+    """The form of a set name that must be unique: trimmed and case-folded."""
+    return name.strip().casefold()
 
 
 class BackupSet(_Section):
@@ -87,29 +107,17 @@ class BackupSet(_Section):
     def _name_not_blank(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("name must not be blank")
-        return v
+        return v.strip()
 
     @field_validator("paths", "exclude")
     @classmethod
     def _normalized(cls, v: list[str]) -> list[str]:
-        out: list[str] = []
-        for item in v:
-            try:
-                out.append(normalize_set_path(item))
-            except ValueError as err:
-                raise ValueError(f"{item!r} is not allowed ({err})") from err
-        return out
+        return _normalize_list(v)
 
     @field_validator("shallow_paths")
     @classmethod
     def _normalized_shallow(cls, v: list[str]) -> list[str]:
-        out: list[str] = []
-        for item in v:
-            try:
-                out.append(normalize_set_path(item, allow_root=True))
-            except ValueError as err:
-                raise ValueError(f"{item!r} is not allowed ({err})") from err
-        return out
+        return _normalize_list(v, allow_root=True)
 
     @model_validator(mode="after")
     def _has_something_to_back_up(self) -> BackupSet:
@@ -125,8 +133,31 @@ class BackupSet(_Section):
         return self
 
 
+class DefaultSet(BaseModel):
+    """A built-in backup set, frozen: tuples and no assignment. `to_backup_set` gives a copy."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    paths: tuple[str, ...]
+    shallow_paths: tuple[str, ...]
+    exclude: tuple[str, ...]
+    enabled: bool
+    deletable: bool
+    adopt_mode: AdoptMode
+
+    def to_backup_set(self, **update: Any) -> BackupSet:
+        fields = {k: list(v) if isinstance(v, tuple) else v for k, v in self.model_dump().items()}
+        return BackupSet.model_validate({**fields, **update})
+
+
+def _freeze(item: BackupSet) -> DefaultSet:
+    return DefaultSet.model_validate(item.model_dump())
+
+
 # Spec section 7, "Backup sets" table, in table order. "Custom" has no paths so it is not here.
-DEFAULT_SETS: list[BackupSet] = [
+# Each entry is validated as a BackupSet, then frozen.
+_DEFAULT_SET_LIST: list[BackupSet] = [
     BackupSet(
         name="Camera",
         paths=["/sdcard/DCIM"],
@@ -190,13 +221,16 @@ DEFAULT_SETS: list[BackupSet] = [
 ]
 
 
+DEFAULT_SETS: tuple[DefaultSet, ...] = tuple(_freeze(s) for s in _DEFAULT_SET_LIST)
+
+
 def _default_sets() -> list[BackupSet]:
-    return [s.model_copy(deep=True) for s in DEFAULT_SETS]
+    return [s.to_backup_set() for s in DEFAULT_SETS]
 
 
 def _fallback_sets() -> list[BackupSet]:
     """Default sets for a broken config: same sets, but nothing may be deleted."""
-    return [s.model_copy(deep=True, update={"deletable": False}) for s in DEFAULT_SETS]
+    return [s.to_backup_set(deletable=False) for s in DEFAULT_SETS]
 
 
 class PhoneConfig(_Section):
@@ -211,6 +245,11 @@ class PhoneConfig(_Section):
 
 def _both_destinations() -> list[Literal["mac", "ssd"]]:
     return ["mac", "ssd"]
+
+
+def _is_absolute_mac_path(value: str) -> bool:
+    """True when `value` is an absolute Mac path once a leading `~` is expanded."""
+    return os.path.isabs(os.path.expanduser(value))
 
 
 class BackupConfig(_Section):
@@ -231,10 +270,17 @@ class BackupConfig(_Section):
     confirmation_valid_days: Days = 30
     sets: list[BackupSet] = Field(default_factory=_default_sets)
 
+    @field_validator("mac_root")
+    @classmethod
+    def _mac_root_absolute(cls, v: str) -> str:
+        if not _is_absolute_mac_path(v):
+            raise ValueError("must be a full folder path (starting with / or ~)")
+        return v
+
     @field_validator("sets")
     @classmethod
     def _unique_names(cls, v: list[BackupSet]) -> list[BackupSet]:
-        names = [s.name for s in v]
+        names = [_name_key(s.name) for s in v]
         if len(set(names)) != len(names):
             raise ValueError("set names must be unique")
         return v
@@ -273,6 +319,20 @@ class ScoringConfig(_Section):
     calibration_sample: Positive = 300
 
 
+# Folders the app never deletes from, whatever the config says: app data, and the WhatsApp
+# databases and backups (current and legacy locations). Spec 13, after the 10A-10D block.
+NEVER_DELETE_FLOOR: tuple[str, ...] = (
+    "/sdcard/Android/data",
+    "/sdcard/Android/obb",
+    "/sdcard/Android/media/com.whatsapp/WhatsApp/Databases",
+    "/sdcard/Android/media/com.whatsapp/WhatsApp/Backups",
+    "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases",
+    "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
+    "/sdcard/WhatsApp/Databases",
+    "/sdcard/WhatsApp/Backups",
+)
+
+
 class CleanupConfig(_Section):
     min_age_days: Days = 7
     quarantine_days: Annotated[int, Field(ge=1)] = 30
@@ -291,21 +351,14 @@ class CleanupConfig(_Section):
         ]
     )
     never_delete: list[str] = Field(
-        default_factory=lambda: [
-            "/sdcard/Android/data",
-            "/sdcard/Documents",
-            "/sdcard/Download",
-            # Spec 13, last paragraph after the 10A-10D block.
-            "/sdcard/Android/obb",
-            "/sdcard/Android/media/com.whatsapp/WhatsApp/Databases",
-            "/sdcard/Android/media/com.whatsapp/WhatsApp/Backups",
-            "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases",
-            "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
-            "/sdcard/WhatsApp/Databases",
-            "/sdcard/WhatsApp/Backups",
-        ]
+        default_factory=lambda: [*NEVER_DELETE_FLOOR, "/sdcard/Documents", "/sdcard/Download"]
     )
     delete_reminder_days: Days = 0  # 0 = no reminder
+
+    @field_validator("delete_roots", "never_delete")
+    @classmethod
+    def _normalized_paths(cls, v: list[str]) -> list[str]:
+        return _normalize_list(v)
 
 
 class SlateConfig(_Section):
@@ -317,6 +370,11 @@ class SlateConfig(_Section):
     manifest_dir: str = ".sift/manifests"
     remove_empty_folders: bool = True
 
+    @field_validator("keep_folders")
+    @classmethod
+    def _normalized_paths(cls, v: list[str]) -> list[str]:
+        return _normalize_list(v)
+
 
 class BrowseConfig(_Section):
     disposition_default: Disposition = "quarantine"
@@ -324,6 +382,11 @@ class BrowseConfig(_Section):
     old_days: Days = 90
     typed_confirmation_over_files: Count = 200
     never_delete_extra: list[str] = Field(default_factory=list)  # added to cleanup.never_delete
+
+    @field_validator("never_delete_extra")
+    @classmethod
+    def _normalized_paths(cls, v: list[str]) -> list[str]:
+        return _normalize_list(v)
 
 
 class AppsConfig(_Section):
@@ -357,6 +420,18 @@ class Config(_Section):
     browse: BrowseConfig = Field(default_factory=BrowseConfig)
     apps: AppsConfig = Field(default_factory=AppsConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
+
+    def effective_never_delete(self) -> tuple[str, ...]:
+        """Every folder deleting must avoid: the built-in floor plus both user lists.
+
+        The floor comes first and cannot be removed by editing the config. Entries that differ
+        only in case count once.
+        """
+        out: dict[str, str] = {}
+        user = (*self.cleanup.never_delete, *self.browse.never_delete_extra)
+        for path in (*NEVER_DELETE_FLOOR, *user):
+            out.setdefault(path.casefold(), path)
+        return tuple(out.values())
 
 
 _FAST_NOTE = "adopt_mode fast is not built yet; hash is used"
@@ -493,10 +568,10 @@ def _load_sets(raw: object, warnings: list[str]) -> list[BackupSet]:
         item = _build_set(entry, label, f"{label}.paths", warnings)
         if item is None:
             continue
-        if item.name in seen:
+        if _name_key(item.name) in seen:
             warnings.append(f"{label}: duplicate name, dropped")
             continue
-        seen.add(item.name)
+        seen.add(_name_key(item.name))
         if item.adopt_mode == "fast":
             warnings.append(f"{label}.{_FAST_NOTE}")
         sets.append(item)
@@ -507,6 +582,13 @@ def _load_sets(raw: object, warnings: list[str]) -> list[BackupSet]:
 
 
 def _load_backup(table: dict[str, Any], warnings: list[str]) -> BackupConfig:
+    mac_root = table.get("mac_root")
+    if isinstance(mac_root, str) and not _is_absolute_mac_path(mac_root):
+        warnings.append(
+            f'backup.mac_root: "{mac_root}" is not a full folder path (it must start with / or ~); '
+            f"using {BackupConfig().mac_root}"
+        )
+        table = {k: v for k, v in table.items() if k != "mac_root"}
     kept = _valid_items(BackupConfig, "backup", table, warnings, skip=frozenset({"sets", "roots"}))
     if "sets" in table:
         kept["sets"] = _load_sets(table["sets"], warnings)
@@ -529,7 +611,11 @@ def _load_backup(table: dict[str, Any], warnings: list[str]) -> BackupConfig:
 
 
 def _set_aside(path: Path) -> str:
-    target = path.with_name(f"{path.name}.invalid-{int(time.time())}")
+    stamp = time.time_ns()
+    target = path.with_name(f"{path.name}.invalid-{stamp}")
+    while target.exists():  # never write over an earlier set-aside copy
+        stamp += 1
+        target = path.with_name(f"{path.name}.invalid-{stamp}")
     os.replace(path, target)
     return target.name
 
@@ -588,8 +674,34 @@ def load_config(path: Path) -> tuple[Config, list[str]]:
         elif model is BackupConfig:
             sections[key] = _load_backup(value, warnings)
         else:
+            for list_key in _PATH_LISTS.get(key, ()):
+                if list_key in value:
+                    value = {
+                        **value,
+                        list_key: _clean_paths(value[list_key], f"{key}.{list_key}", warnings),
+                    }
             sections[key] = model.model_validate(_valid_items(model, key, value, warnings))
+            if key == "cleanup" and "never_delete" in value:
+                _warn_missing_floor(cast("CleanupConfig", sections[key]), warnings)
     return Config.model_validate(sections), warnings
+
+
+# Path-list settings that get the same rules as set paths, by section.
+_PATH_LISTS: dict[str, tuple[str, ...]] = {
+    "cleanup": ("delete_roots", "never_delete"),
+    "slate": ("keep_folders",),
+    "browse": ("never_delete_extra",),
+}
+
+
+def _warn_missing_floor(cleanup: CleanupConfig, warnings: list[str]) -> None:
+    listed = {p.casefold() for p in cleanup.never_delete}
+    for path in NEVER_DELETE_FLOOR:
+        if path.casefold() not in listed:
+            warnings.append(
+                f'cleanup.never_delete: "{path}" is missing from the list; '
+                "it stays protected and cannot be removed"
+            )
 
 
 def _apply(table: Any, values: dict[str, Any]) -> None:
@@ -600,6 +712,11 @@ def _apply(table: Any, values: dict[str, Any]) -> None:
         table[key] = value
 
 
+def _same_sets(current: Any, sets: list[dict[str, Any]]) -> bool:
+    unwrap = getattr(current, "unwrap", None)
+    return unwrap is not None and bool(unwrap() == sets)
+
+
 def save_config(cfg: Config, path: Path) -> None:
     """Write `cfg` to `path` atomically, keeping the comments and layout of an existing file."""
     try:
@@ -608,14 +725,14 @@ def save_config(cfg: Config, path: Path) -> None:
         doc = tomlkit.document()
 
     for name, values in cfg.model_dump().items():
-        if name not in doc:
+        if not isinstance(doc.get(name), Table):  # missing, or a stray value like `phone = 3`
             doc[name] = tomlkit.table()
         table = cast("Any", doc[name])
         if name == "backup":
             sets = values.pop("sets")
             table.pop("roots", None)  # replaced by sets; never written back
         _apply(table, values)
-        if name == "backup" and ("sets" not in table or table["sets"].unwrap() != sets):
+        if name == "backup" and not _same_sets(table.get("sets"), sets):
             table.pop("sets", None)
             aot = tomlkit.aot()
             for entry in sets:
