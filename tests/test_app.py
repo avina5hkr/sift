@@ -13,10 +13,9 @@ import httpx
 import pytest
 
 from sift.app import (
-    _close_windows_on_signal,
+    _signals_request_shutdown,
     bind_socket,
     build_context,
-    close_windows,
     fake_announce_delay,
     main,
     start_server,
@@ -28,6 +27,7 @@ from sift.core.instance import SingleInstanceLock
 from sift.core.logging import setup_logging
 from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
+from sift.core.shutdown import Shutdown
 
 
 def test_live_server_serves_status_and_sse(paths: AppPaths) -> None:
@@ -241,14 +241,6 @@ def test_server_never_enables_uvicorn_access_log(
     assert seen["log_config"] is None
 
 
-class _FakeWindow:
-    def __init__(self) -> None:
-        self.destroyed = 0
-
-    def destroy(self) -> None:
-        self.destroyed += 1
-
-
 def test_quiet_pywebview_logger_pins_info() -> None:
     from sift.app import _quiet_pywebview_logger
 
@@ -262,22 +254,16 @@ def test_quiet_pywebview_logger_pins_info() -> None:
         logger.setLevel(saved)
 
 
-def test_close_windows_destroys_every_window() -> None:
-    windows = [_FakeWindow(), _FakeWindow()]
-    close_windows(windows)
-    assert [w.destroyed for w in windows] == [1, 1]
-
-
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
-def test_signal_in_window_mode_closes_windows(sig: signal.Signals) -> None:
-    windows = [_FakeWindow(), _FakeWindow()]
+def test_headless_signal_requests_shutdown(sig: signal.Signals) -> None:
+    shutdown = Shutdown()
     before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
-    with _close_windows_on_signal(lambda: windows):
+    with _signals_request_shutdown(shutdown):
         os.kill(os.getpid(), sig)
-        deadline = time.monotonic() + 2
-        while not all(w.destroyed for w in windows) and time.monotonic() < deadline:
-            time.sleep(0.01)
-    assert [w.destroyed for w in windows] == [1, 1]
+        assert shutdown.wait_requested(timeout=2)
+        os.kill(os.getpid(), sig)  # a second one during cleanup is absorbed
+        time.sleep(0.05)
+    assert shutdown.reason == f"signal {sig.name}"
     assert {s: signal.getsignal(s) for s in before} == before  # handlers restored
 
 

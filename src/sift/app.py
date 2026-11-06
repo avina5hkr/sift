@@ -10,16 +10,16 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
-from typing import Any
 
 import uvicorn
 
 from sift import __version__
+from sift.core import testhooks
 from sift.core.config import load_config
 from sift.core.context import AppContext
 from sift.core.db import (
@@ -34,13 +34,23 @@ from sift.core.instance import AlreadyRunningError, SingleInstanceLock
 from sift.core.logging import install_crash_handler, setup_logging, teardown_logging
 from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
+from sift.core.shutdown import Shutdown
+from sift.core.slow_job import SlowJob
 from sift.device.fake_tracker import FAKE_ANNOUNCE_AFTER_S, fake_tracker
 from sift.device.tracker import DeviceTracker, adb_tracker
 from sift.server.app import create_app
+from sift.window_quit import WindowQuit
 
 _HOST = "127.0.0.1"
 _START_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 10.0
+# Time budgets for the shutdown steps (seconds). The jobs step waits for a file boundary.
+_JOBS_STOP_TIMEOUT_S = 30.0
+_TRACKER_STEP_S = 10.0
+_SERVER_STEP_S = _STOP_TIMEOUT_S + 5
+_LOGGING_STEP_S = 5.0
+_DB_STEP_S = 10.0
+_LOCK_STEP_S = 5.0
 _log = logging.getLogger("sift.app")
 FAKE_NEEDS_HOME_MESSAGE = (
     "Fake-phone mode needs a separate data folder. "
@@ -181,35 +191,41 @@ def find_web_dist() -> Path | None:
     return next((c for c in candidates if c.is_dir()), None)
 
 
-def _wait_for_signal() -> None:
-    stop = threading.Event()
+def start_test_jobs(ctx: AppContext) -> SlowJob | None:
+    """Start the test-only slow job when SIFT_TEST_SLOW_JOB=1 (see `core.testhooks`).
 
-    def on_signal(signum: int, frame: FrameType | None) -> None:
-        stop.set()
+    Like the fake phone it needs SIFT_HOME, so it never writes into the owner's real database.
+    """
+    if not testhooks.flag("SIFT_TEST_SLOW_JOB"):
+        return None
+    home = os.environ.get("SIFT_HOME")
+    if not home:
+        _log.warning("SIFT_TEST_SLOW_JOB needs SIFT_HOME set to a test folder; not starting it")
+        return None
+    job = SlowJob(ctx.db, Path(home).expanduser() / "slow-job")
+    job.start()
+    return job
 
-    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
-    try:
-        stop.wait()
-    finally:
-        for s, handler in previous.items():
-            signal.signal(s, handler)
 
+def _stop_jobs(job: SlowJob | None) -> None:
+    """Ask running jobs to stop at a file boundary and wait up to _JOBS_STOP_TIMEOUT_S.
 
-def close_windows(windows: Iterable[Any]) -> None:
-    """Destroy every window, so the GUI loop ends and `main` can clean up."""
-    for window in list(windows):
-        window.destroy()
+    Only the test-only slow job exists so far; JobManager.stop_all (plan Task 11) takes over.
+    """
+    if job is not None and not job.stop(_JOBS_STOP_TIMEOUT_S):
+        _log.warning("The backup job did not stop within %s s", _JOBS_STOP_TIMEOUT_S)
 
 
 @contextmanager
-def _close_windows_on_signal(get_windows: Callable[[], Iterable[Any]]) -> Iterator[None]:
-    """SIGINT/SIGTERM close the windows instead of killing the process mid-cleanup."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
+def _signals_request_shutdown(shutdown: Shutdown) -> Iterator[None]:
+    """Headless mode: SIGINT and SIGTERM ask for shutdown, and `main` then runs it.
+
+    The handlers stay in place until the block ends, so a second Ctrl-C during cleanup does
+    not cut it short.
+    """
 
     def on_signal(signum: int, frame: FrameType | None) -> None:
-        close_windows(get_windows())
+        shutdown.request(f"signal {signal.Signals(signum).name}")
 
     previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
     try:
@@ -224,13 +240,29 @@ def _quiet_pywebview_logger() -> None:
     logging.getLogger("pywebview").setLevel(logging.INFO)
 
 
-def _run_window(url: str) -> None:
+def _run_window(url: str, shutdown: Shutdown) -> None:
+    """Show the window until the app quits. Every quit route runs `shutdown` (see WindowQuit).
+
+    Cmd-Q, the close button and SIGINT/SIGTERM all end in `applicationShouldTerminate:`, which
+    runs the shutdown and then lets AppKit exit the process, so this may never return. It does
+    return if the window goes away by itself; `main` then runs the shutdown.
+    """
     import webview  # imported here so headless runs never load Cocoa
 
+    from sift import cocoa_quit
+
     _quiet_pywebview_logger()
-    webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
-    with _close_windows_on_signal(lambda: webview.windows):
-        webview.start()
+    window = webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
+    if window is None:  # only when an `initialized` handler cancels it; Sift adds none
+        return
+    quit = WindowQuit(
+        shutdown,
+        ask_app_to_terminate=cocoa_quit.ask_app_to_terminate,
+        reply_to_terminate=cocoa_quit.reply_to_terminate,
+    )
+    window.events.closing += quit.on_window_closing
+    cocoa_quit.install(quit)
+    webview.start(gui="cocoa")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,11 +293,10 @@ def main(argv: list[str] | None = None) -> int:
         print("Sift is already running.")
         return 1
 
-    ctx: AppContext | None = None
+    # Every exit from here on, early or not, runs these steps in reverse order of adding.
+    shutdown = Shutdown()
+    shutdown.add("lock", lock.release, timeout_s=_LOCK_STEP_S)
     sock: socket.socket | None = None
-    handle: ServerHandle | None = None
-    tracker: DeviceTracker | None = None
-    logging_on = False
     try:
         install_crash_handler(paths)
         token = secrets.token_urlsafe(32)
@@ -303,31 +334,30 @@ def main(argv: list[str] | None = None) -> int:
                 "Nothing was changed; your backups are not affected."
             )
             return 2
+        shutdown.add("db", ctx.db.close, timeout_s=_DB_STEP_S)
         setup_logging(paths, ctx.bus, level="INFO")
-        logging_on = True
+        shutdown.add("logging", teardown_logging, timeout_s=_LOGGING_STEP_S)
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
         handle = start_server(ctx, sock)
+        shutdown.add("server", handle.stop, timeout_s=_SERVER_STEP_S)
         tracker = build_tracker(mode, ctx, os.environ)
         if tracker is not None:
             ctx.tracker = tracker
+            shutdown.add("tracker", tracker.stop, timeout_s=_TRACKER_STEP_S)  # before the DB closes
             tracker.start()
+        jobs = start_test_jobs(ctx)
+        shutdown.add("jobs", lambda: _stop_jobs(jobs), timeout_s=_JOBS_STOP_TIMEOUT_S + 5)
         url = f"{handle.url}/?t={token}"
         if args.no_window:
-            print(f"Sift running at {url}", flush=True)
-            _wait_for_signal()
+            with _signals_request_shutdown(shutdown):
+                print(f"Sift running at {url}", flush=True)
+                shutdown.wait_requested()
+                shutdown.run()
         else:
-            _run_window(url)
+            _run_window(url, shutdown)
         return 0
     finally:
-        if tracker is not None:
-            tracker.stop()  # before the database closes: the tracker writes to it
-        if handle is not None:
-            handle.stop()
-        elif sock is not None:
-            sock.close()
-        if ctx is not None:
-            ctx.db.close()
-        if logging_on:
-            teardown_logging()
-        lock.release()
+        shutdown.run()
+        if sock is not None:
+            sock.close()  # in case the server never took it over; closing twice is harmless
