@@ -18,6 +18,7 @@ from sift.core.db import (
 )
 from sift.core.events import BusClosed
 from sift.core.instance import AlreadyRunningError
+from sift.core.jobs import JobConflict, JobError, JobNotFound, JobRefused, JobStopped, NoPhone
 from sift.device.adb_manager import (
     AdbDownloadError,
     AdbError,
@@ -58,6 +59,12 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "AdbPortBusy": AdbPortBusy,
     "AlreadyRunningError": AlreadyRunningError,
     "BusClosed": BusClosed,
+    "NoPhone": NoPhone,
+    "JobNotFound": JobNotFound,
+    "JobConflict": JobConflict,
+    "JobError": JobError,
+    "JobRefused": JobRefused,
+    "JobStopped": JobStopped,
     "DatabaseCorruptError": DatabaseCorruptError,
     "DatabaseTooNewError": DatabaseTooNewError,
     "DatabaseBusyError": DatabaseBusyError,

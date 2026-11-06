@@ -16,6 +16,7 @@ from sift.core.db import (
 )
 from sift.core.events import BusClosed
 from sift.core.instance import AlreadyRunningError
+from sift.core.jobs import JobConflict, JobError, JobNotFound, JobRefused, JobStopped, NoPhone
 from sift.device.adb_manager import (
     AdbDownloadError,
     AdbError,
@@ -57,6 +58,12 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (AdbPortBusy, "Another program is using adb's port and is not answering."),
     (AlreadyRunningError, "Sift is already running."),
     (BusClosed, "Sift is closing."),
+    (NoPhone, "Connect your phone to start a backup."),
+    (JobNotFound, "That backup was not found."),
+    (JobConflict, "That is not possible while a backup is running or Sift is closing."),
+    (JobError, "That backup request could not be completed."),
+    (JobRefused, "Sift stopped this backup because the phone was not the expected one."),
+    (JobStopped, "The backup was stopped."),
     (DatabaseCorruptError, "Sift's database is damaged."),
     (DatabaseTooNewError, "Sift's data was written by a newer version of Sift."),
     (DatabaseBusyError, "Sift's database is busy. Try again in a moment."),
