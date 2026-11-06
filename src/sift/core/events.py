@@ -6,6 +6,7 @@ Publishers must never block: a stalled subscriber costs a publisher one deque ap
 
 import asyncio
 import contextlib
+import json
 import threading
 from collections import deque
 from collections.abc import AsyncIterator
@@ -16,9 +17,30 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Event:
+    """One published event. The payload is stored as JSON text, so it cannot change after publish.
+
+    `text` is what SSE sends. `data` parses it afresh, so a reader can never alter what another
+    reader (or the wire) sees.
+    """
+
     id: int
     name: str
-    data: dict[str, Any]
+    text: str
+
+    @classmethod
+    def of(cls, id: int, name: str, data: dict[str, Any]) -> Event:
+        """Serialise `data` now. TypeError or ValueError if it is not valid JSON."""
+        return cls(id, name, _dumps(data))
+
+    @property
+    def data(self) -> dict[str, Any]:
+        parsed: dict[str, Any] = json.loads(self.text)
+        return parsed
+
+
+def _dumps(data: dict[str, Any]) -> str:
+    # allow_nan=False: NaN and Infinity are not JSON, and the browser's JSON.parse rejects them.
+    return json.dumps(data, separators=(",", ":"), allow_nan=False)
 
 
 class Subscription:
@@ -69,10 +91,15 @@ class EventBus:
         self._next_id = 1
 
     def publish(self, name: str, data: dict[str, Any]) -> None:
-        """Deliver to every subscriber. Callable from any thread; never blocks."""
+        """Deliver to every subscriber. Callable from any thread; never blocks.
+
+        The payload is serialised here, before the lock: a payload that is not JSON raises at the
+        publisher (where the bug is) and uses no id, and the lock is held only for the appends.
+        """
+        text = _dumps(data)
         # Id assignment and delivery share one lock so every subscriber sees ids in order.
         with self._lock:
-            event = Event(self._next_id, name, data)
+            event = Event(self._next_id, name, text)
             self._next_id += 1
             for sub in self._subscriptions:
                 sub._push(event)

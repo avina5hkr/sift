@@ -100,3 +100,70 @@ def test_tx_gives_up_with_a_plain_error_and_frees_the_lock(db):
             c.execute("INSERT INTO setting VALUES ('a', '1')")
     finally:
         holder.close()
+
+
+def test_short_lived_threads_leave_no_read_connections(db):
+    db.release_thread()  # the fixture's migrations read on this thread; start from none
+
+    def read_once():
+        with db.read() as c:
+            c.execute("SELECT 1").fetchone()
+
+    for _ in range(20):
+        t = threading.Thread(target=read_once)
+        t.start()
+        t.join()
+    assert db.open_read_connections() == 0
+
+
+def test_a_live_thread_keeps_its_read_connection_until_released(db):
+    with db.read() as first:
+        pass
+    with db.read() as again:
+        assert again is first
+    assert db.open_read_connections() == 1
+    db.release_thread()
+    assert db.open_read_connections() == 0
+    db.release_thread()  # nothing left to release; harmless
+    with db.read() as c:  # and the thread can read again
+        assert c.execute("SELECT 1").fetchone()[0] == 1
+    assert db.open_read_connections() == 1
+
+
+def test_release_thread_closes_the_connection(db):
+    with db.read() as c:
+        pass
+    db.release_thread()
+    with pytest.raises(sqlite3.ProgrammingError):
+        c.execute("SELECT 1")
+
+
+def test_close_still_closes_live_readers(paths):
+    database = Database(paths.db)
+    database.open()
+    seen = []
+    done = threading.Event()
+    stop = threading.Event()
+
+    def reader():
+        with database.read() as c:
+            seen.append(c)
+        done.set()
+        stop.wait(2)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    assert done.wait(2)
+    assert database.open_read_connections() == 1
+    database.close()
+    assert database.open_read_connections() == 0
+    with pytest.raises(sqlite3.ProgrammingError):
+        seen[0].execute("SELECT 1")
+    stop.set()
+    t.join()
+
+
+def test_write_connection_is_migration_only(db):
+    assert not hasattr(db, "write_connection")
+    with db._write_connection() as conn:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1

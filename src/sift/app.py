@@ -10,9 +10,9 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
 
@@ -51,6 +51,7 @@ _SERVER_STEP_S = _STOP_TIMEOUT_S + 5
 _LOGGING_STEP_S = 5.0
 _DB_STEP_S = 10.0
 _LOCK_STEP_S = 5.0
+_SOCKET_STEP_S = 5.0
 _log = logging.getLogger("sift.app")
 FAKE_NEEDS_HOME_MESSAGE = (
     "Fake-phone mode needs a separate data folder. "
@@ -108,13 +109,31 @@ class ServerHandle:
     thread: threading.Thread
     sock: socket.socket
     _forwarder: logging.Handler
+    _stopped: bool = field(default=False, init=False)
 
     def stop(self) -> None:
-        """Ask the server to exit, wait for its thread (bounded) and free the socket."""
+        """Ask the server to exit, wait for its thread (bounded) and free the socket.
+
+        Idempotent, and never raises: a failure is logged and the remaining parts still run, so
+        one bad part cannot leave the socket open or the log handler attached.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
         self.server.should_exit = True
-        self.thread.join(_STOP_TIMEOUT_S)
-        logging.getLogger("uvicorn.error").removeHandler(self._forwarder)
-        self.sock.close()
+        parts: list[tuple[str, Callable[[], object]]] = [
+            ("wait for the server thread", lambda: self.thread.join(_STOP_TIMEOUT_S)),
+            (
+                "detach the log forwarder",
+                lambda: logging.getLogger("uvicorn.error").removeHandler(self._forwarder),
+            ),
+            ("close the server socket", self.sock.close),
+        ]
+        for part, action in parts:
+            try:
+                action()
+            except Exception:
+                _log.exception("Could not %s", part)
 
 
 def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
@@ -296,7 +315,6 @@ def main(argv: list[str] | None = None) -> int:
     # Every exit from here on, early or not, runs these steps in reverse order of adding.
     shutdown = Shutdown()
     shutdown.add("lock", lock.release, timeout_s=_LOCK_STEP_S)
-    sock: socket.socket | None = None
     try:
         install_crash_handler(paths)
         token = secrets.token_urlsafe(32)
@@ -311,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
                 "Try a different --port, or leave it out."
             )
             return 2
+        # Closing twice is harmless: the server takes the socket over and closes it on stop.
+        shutdown.add("socket", sock.close, timeout_s=_SOCKET_STEP_S)
         try:
             ctx = build_context(paths, token, sock.getsockname()[1], find_web_dist())
         except DatabaseTooNewError:
@@ -359,5 +379,3 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         shutdown.run()
-        if sock is not None:
-            sock.close()  # in case the server never took it over; closing twice is harmless

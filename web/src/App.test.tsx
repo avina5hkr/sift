@@ -192,3 +192,9 @@ test('a Retry that cannot reach the engine shows a plain message, not an error d
   expect(alert).toHaveTextContent('Sift could not reach its engine. Try again in a moment.')
   expect(alert).not.toHaveTextContent('Failed to fetch')
 })
+
+test('the Settings page says when Settings arrive', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(STATUS), { status: 200 })))
+  renderApp('/settings')
+  expect(await screen.findByText('Settings arrive in a later update.')).toBeInTheDocument()
+})

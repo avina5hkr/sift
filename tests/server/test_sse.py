@@ -8,7 +8,7 @@ from sift.server.sse import format_sse, sse_stream
 
 def test_format_sse():
     assert (
-        format_sse(Event(id=7, name="toast", data={"text": "hi"}))
+        format_sse(Event.of(7, "toast", {"text": "hi"}))
         == 'id: 7\nevent: toast\ndata: {"text":"hi"}\n\n'
     )
 
@@ -56,3 +56,7 @@ async def test_stream_unsubscribes_on_disconnect(bus):
 
 def test_events_requires_token(client):
     assert client.get("/api/events").status_code == 401
+
+
+def test_format_sse_sends_the_stored_text():
+    assert format_sse(Event(id=3, name="x", text='{"a":1}')) == 'id: 3\nevent: x\ndata: {"a":1}\n\n'

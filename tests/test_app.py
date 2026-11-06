@@ -2,10 +2,11 @@ import itertools
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import httpx
 import pytest
 
 from sift.app import (
+    ServerHandle,
     _signals_request_shutdown,
     bind_socket,
     build_context,
@@ -21,6 +23,7 @@ from sift.app import (
     start_server,
     tracker_mode,
 )
+from sift.core.context import AppContext
 from sift.core.db import Database, DatabaseBusyError
 from sift.core.events import EventBus
 from sift.core.instance import SingleInstanceLock
@@ -408,3 +411,66 @@ def test_fake_phone_without_sift_home_is_refused(
     assert main(argv) == 2
     assert capsys.readouterr().out == _NEEDS_HOME
     assert list(fake_user.iterdir()) == []  # no folder, lock or database was created
+
+
+def test_server_handle_stop_is_idempotent_and_never_raises(paths: AppPaths) -> None:
+    sock = bind_socket(0)
+    ctx = build_context(paths, token="t0k", port=sock.getsockname()[1], web_dist=None)
+    handle = start_server(ctx, sock)
+    try:
+        handle.stop()
+        handle.stop()  # a second call (shutdown plus an error path) is harmless
+        assert sock.fileno() == -1
+    finally:
+        ctx.db.close()
+
+
+def test_server_handle_stop_logs_instead_of_raising(
+    paths: AppPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    sock = bind_socket(0)
+    ctx = build_context(paths, token="t0k", port=sock.getsockname()[1], web_dist=None)
+    handle = start_server(ctx, sock)
+
+    def explode() -> None:
+        raise OSError("close failed")
+
+    real_close = sock.close
+    handle.sock = _ExplodingSock(sock, explode)  # type: ignore[assignment]
+    try:
+        with caplog.at_level(logging.WARNING, logger="sift.app"):
+            handle.stop()  # must not raise
+        assert any(r.exc_info for r in caplog.records)
+    finally:
+        real_close()
+        ctx.db.close()
+
+
+class _ExplodingSock:
+    def __init__(self, real: socket.socket, boom: Callable[[], None]) -> None:
+        self._real, self._boom = real, boom
+
+    def close(self) -> None:
+        self._boom()
+
+
+def test_main_frees_the_socket_through_shutdown(
+    paths: AppPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No cleanup in main() runs outside Shutdown: the listening socket is a step too."""
+    steps: list[str] = []
+    real_add = Shutdown.add
+
+    def spy(self: Shutdown, name: str, step: Callable[[], None], *, timeout_s: float) -> None:
+        steps.append(name)
+        real_add(self, name, step, timeout_s=timeout_s)
+
+    def failing_start(ctx: AppContext, sock: socket.socket) -> ServerHandle:
+        raise RuntimeError("server did not start")
+
+    monkeypatch.setattr(Shutdown, "add", spy)
+    monkeypatch.setattr("sift.app.start_server", failing_start)
+    with pytest.raises(RuntimeError, match="did not start"):
+        main(["--no-window"])
+    assert "socket" in steps
+    assert steps.index("socket") < steps.index("db")  # added early, so it runs late

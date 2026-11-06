@@ -1,15 +1,13 @@
 """Server-sent events: wire format and the per-connection stream."""
 
 import asyncio
-import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from sift.core.events import Event, EventBus
 
 
 def format_sse(event: Event) -> str:
-    data = json.dumps(event.data, separators=(",", ":"))
-    return f"id: {event.id}\nevent: {event.name}\ndata: {data}\n\n"
+    return f"id: {event.id}\nevent: {event.name}\ndata: {event.text}\n\n"
 
 
 async def sse_stream(
@@ -25,7 +23,7 @@ async def sse_stream(
     detected disconnect always unsubscribes.
     """
     async with bus.subscribe() as sub:
-        yield format_sse(Event(id=0, name="hello", data={"version": version}))
+        yield format_sse(Event.of(0, "hello", {"version": version}))
         while True:
             try:
                 event = await asyncio.wait_for(sub.get(), heartbeat_s)
