@@ -163,7 +163,7 @@ Migration `0005_apps_health`. Probes, actions, server-side protection and unlock
 Optional probes, verdict rules, export, bugreport, checklist, restore helper. Parser fixtures include **Android 16** output (redacted as in M13).
 
 ### M9 Wi-Fi and hardening [6 Wi-Fi, 15, 16 perf]
-Pairing, reconnect, heartbeat, Wi-Fi reader count, private-port option (decision 10), full fault-injection sweep, benchmarks, Logs screen, diagnostics.
+Pairing, reconnect, heartbeat, Wi-Fi reader count, private-port option (decision 10), full fault-injection sweep, benchmarks, Logs screen, Settings screens, diagnostics.
 
 ### M10 Package and polish [14]
 PyInstaller spec, Info.plist, ad-hoc signing, dmg, THIRD_PARTY.md, README, crash dialog, accessibility pass. **Exit:** a fresh Mac installs from the dmg; all acceptance criteria met.

@@ -196,5 +196,5 @@ test('a Retry that cannot reach the engine shows a plain message, not an error d
 test('the Settings page says when Settings arrive', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(STATUS), { status: 200 })))
   renderApp('/settings')
-  expect(await screen.findByText('Settings arrive in a later update.')).toBeInTheDocument()
+  expect(await screen.findByText('The Settings screens arrive in milestone M9.')).toBeInTheDocument()
 })
