@@ -548,3 +548,81 @@ def test_record_summary_survives_a_bad_database_call_without_raising(rig: Rig) -
         stats=PullStats(),
         warnings=[],
     )
+
+
+# -- fix round 1 ---------------------------------------------------------------------------------
+
+
+def test_a_discarded_scan_shows_as_discarded_in_the_summary(rig: Rig) -> None:
+    job_id, scan_id = _guarded(rig)
+    rig.post(f"scan/{scan_id}/discard")
+    rig.wait_job(job_id, 10)
+    summary = rig.get("summary").json()
+    assert summary["job_id"] == job_id and summary["outcome"] == "discarded"
+    assert summary["new_files"] == 0
+
+
+def test_retry_only_resets_files_of_sets_still_in_the_settings(rig: Rig) -> None:
+    rig.run(["Screenshots", "Documents"])
+    ids = _fail_rows(rig, 3)
+    with rig.ctx.db.tx() as conn:
+        conn.execute("UPDATE phone_file SET set_name = 'Removed set' WHERE id = ?", (ids[0],))
+    resp = rig.post("retry")
+    assert resp.status_code == 200 and resp.json()["retried"] == 2
+    rig.wait_job(resp.json()["job_id"])
+    failures = rig.get("failures").json()
+    assert [f["id"] for f in failures["files"]] == [ids[0]]  # still listed, untouched
+    assert failures["files"][0]["attempts"] == 4
+
+
+def test_retry_with_only_files_of_removed_sets_changes_nothing(rig: Rig) -> None:
+    rig.run(["Screenshots"])
+    (fid,) = _fail_rows(rig, 1)
+    with rig.ctx.db.tx() as conn:
+        conn.execute("UPDATE phone_file SET set_name = 'Removed set' WHERE id = ?", (fid,))
+    resp = rig.post("retry")
+    assert resp.status_code == 422 and resp.json()["code"] == "unknown_set"
+    assert rig.get("failures").json()["count"] == 1
+
+
+def test_an_unexpected_error_from_start_restores_the_failed_rows(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig.run(["Screenshots", "Documents"])
+    _fail_rows(rig, 2)
+    assert rig.ctx.jobs is not None
+
+    def broken(*_a: object, **_k: object) -> int:
+        raise RuntimeError("database exploded")
+
+    monkeypatch.setattr(rig.ctx.jobs, "start_backup", broken)
+    client = TestClient(rig.client.app, base_url=rig.client.base_url, raise_server_exceptions=False)
+    resp = client.post("/api/backup/retry", headers=H)
+    assert resp.status_code == 500
+    failures = rig.get("failures").json()
+    assert failures["count"] == 2 and {f["attempts"] for f in failures["files"]} == {4}
+
+
+def test_concurrent_retries_start_exactly_one_backup(rig: Rig) -> None:
+    rig.run(["Screenshots", "Documents"])
+    _fail_rows(rig, 3)
+    jobs, release = blocking_jobs(rig.ctx)
+    rig.ctx.jobs = jobs
+    codes: list[int] = []
+    barrier = threading.Barrier(4)
+
+    def go() -> None:
+        barrier.wait()
+        codes.append(rig.client.post("/api/backup/retry", headers=H).status_code)
+
+    threads = [threading.Thread(target=go) for _ in range(4)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+        assert sorted(codes) == [200, 409, 409, 409]
+        assert len([s for s in jobs.snapshot()]) == 1
+    finally:
+        release.set()
+        jobs.stop_all(5)

@@ -7,6 +7,7 @@ for a byte that is not UTF-8), never the stored NUL-escaped text.
 
 import json
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,23 +36,27 @@ def record_summary(
     device_id: int | None,
     sets: list[str],
     outcome: str,
+    discarded: bool = False,
     started_at: int,
     finished_at: int,
     stats: PullStats,
     warnings: list[str],
 ) -> None:
-    """Save the run's counts. A failure is logged, never raised: it must not end the job."""
+    """Save the run's counts. A failure is logged, never raised: it must not end the job.
+
+    A discarded run is stored as outcome `stopped` with its flag set (see migration 0004).
+    """
     try:
         with db.tx() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO run_summary (job_id, device_id, sets, outcome, started_at, "
                 "finished_at, new_files, duplicates_skipped, failed, moved_links, changed_files, "
-                "bytes, warnings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "bytes, warnings, discarded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     device_id,
                     json.dumps(sets),
-                    outcome,
+                    "stopped" if discarded else outcome,
                     started_at,
                     finished_at,
                     stats.copied,
@@ -61,6 +66,7 @@ def record_summary(
                     stats.changed,
                     stats.bytes_copied,
                     json.dumps([*warnings, *stats.warnings]),
+                    int(discarded),
                 ),
             )
     except Exception:
@@ -69,7 +75,8 @@ def record_summary(
 
 _SUMMARY_COLUMNS = (
     "s.job_id, s.sets, s.outcome, s.started_at, s.finished_at, s.new_files, "
-    "s.duplicates_skipped, s.failed, s.moved_links, s.changed_files, s.bytes, s.warnings, j.error"
+    "s.duplicates_skipped, s.failed, s.moved_links, s.changed_files, s.bytes, s.warnings, j.error, "
+    "s.discarded"
 )
 
 
@@ -87,7 +94,7 @@ def latest_summary(db: Database, job_id: int | None = None) -> dict[str, Any] | 
     return {
         "job_id": r[0],
         "sets": json.loads(r[1] or "[]"),
-        "outcome": r[2],
+        "outcome": "discarded" if r[13] else r[2],
         "started_at": r[3],
         "finished_at": r[4],
         "duration_s": max(0, r[4] - r[3]),
@@ -122,16 +129,25 @@ def failed_files(db: Database) -> list[FailedFile]:
     ]
 
 
-def reset_failed(db: Database) -> list[tuple[int, str | None, int, str | None]]:
-    """Put every failed file back to `discovered`, so the next run copies it again.
+def reset_failed(
+    db: Database, only_sets: Collection[str]
+) -> list[tuple[int, str | None, int, str | None]]:
+    """Put failed files of the sets named (ignoring case) back to `discovered`.
 
-    Returns (id, error, attempts, set_name) of each, so a caller can undo it.
+    A failed file of any other set (one no longer in the settings) is left as it is, still
+    listed as failed: a run would never copy it. Returns (id, error, attempts, set_name) of
+    each file reset, so a caller can undo it.
     """
+    wanted = {name.casefold() for name in only_sets}
     with db.tx() as conn:
-        rows = conn.execute(
-            "SELECT id, error, attempts, set_name FROM phone_file "
-            "WHERE state = 'failed' AND present = 1"
-        ).fetchall()
+        rows = [
+            r
+            for r in conn.execute(
+                "SELECT id, error, attempts, set_name FROM phone_file "
+                "WHERE state = 'failed' AND present = 1"
+            )
+            if r[3] is not None and r[3].casefold() in wanted
+        ]
         conn.executemany(
             "UPDATE phone_file SET state = 'discovered', attempts = 0, error = NULL WHERE id = ?",
             [(r[0],) for r in rows],

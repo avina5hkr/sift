@@ -53,7 +53,7 @@ def test_rotation_never_touches_other_files(db: Database, tmp_path: Path) -> Non
     tmp_path.mkdir()
     others = [
         "state-v1-20260101T000000Z.db",  # a migration copy
-        "state-daily-20260101.db.partial",
+        "state-v1-20260101T000000Z.db.partial",  # a migration copy that was left half done
         "state-daily-2026.db",
         "notes.txt",
         "state-daily-20260101.db.bak",
@@ -90,3 +90,26 @@ def test_a_failed_copy_leaves_nothing_behind(
 
 def test_a_folder_that_does_not_exist_is_made(db: Database, tmp_path: Path) -> None:
     assert daily_copy(db, tmp_path / "a" / "b", DAY) is not None
+
+
+def test_stale_partial_copies_are_swept_but_only_our_own(db: Database, tmp_path: Path) -> None:
+    folder = tmp_path / "c"
+    folder.mkdir()
+    stale = folder / "state-daily-20250101.db.partial"
+    stale.write_text("half")
+    ours_not = [folder / "state-v1-x.db.partial", folder / "other.partial", folder / "a.txt"]
+    for p in ours_not:
+        p.write_text("keep")
+    (folder / "state-daily-20250102.db.partial").mkdir()  # not a file: left alone
+    daily_copy(db, folder, DAY)
+    assert not stale.exists()
+    assert all(p.read_text() == "keep" for p in ours_not)
+    assert (folder / "state-daily-20250102.db.partial").is_dir()
+
+
+def test_stale_partials_go_even_when_todays_copy_exists(db: Database, tmp_path: Path) -> None:
+    daily_copy(db, tmp_path / "c", DAY)
+    stale = tmp_path / "c" / "state-daily-20250101.db.partial"
+    stale.write_text("half")
+    assert daily_copy(db, tmp_path / "c", DAY) is None
+    assert not stale.exists()

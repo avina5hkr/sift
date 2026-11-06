@@ -28,7 +28,8 @@ def message_for(snap: JobSnapshot, summary: dict[str, Any] | None) -> tuple[str,
     if snap.state is JobState.failed:
         return "Backup did not finish", snap.error or "Something went wrong.", "error"
     if summary is None:
-        return "Backup finished", "Nothing was copied.", "info"
+        title = "Backup stopped" if snap.stopped else "Backup finished"
+        return title, "Nothing was copied.", "info"
     new, dup, failed = summary["new_files"], summary["duplicates_skipped"], summary["failed"]
     parts = [
         f"{_plural(new, 'new file', 'new files')} backed up",
@@ -36,8 +37,11 @@ def message_for(snap: JobSnapshot, summary: dict[str, Any] | None) -> tuple[str,
     ]
     if failed:
         parts.append(f"{_plural(failed, 'file', 'files')} failed")
-    title = "Backup stopped" if snap.stopped else "Backup finished"
-    return title, ", ".join(parts) + ".", "warning" if failed else "info"
+    level = "warning" if failed else "info"
+    if summary["outcome"] == "discarded":
+        return "Backup ended", "You discarded the scan, so nothing was copied.", "info"
+    stopped = summary["outcome"] == "stopped" or snap.stopped
+    return ("Backup stopped" if stopped else "Backup finished"), ", ".join(parts) + ".", level
 
 
 def after_run(
@@ -46,15 +50,22 @@ def after_run(
     notifier: Notifier,
     *,
     today: Callable[[], date] = date.today,
+    closing: Callable[[], bool] = lambda: False,
 ) -> None:
+    """The daily copy first (so a slow permission prompt never delays it), then the message.
+
+    While Sift is closing nothing is announced: the owner is leaving and quit must not wait.
+    """
     if snap.dry_run:
         return
-    try:
-        title, body, level = message_for(snap, latest_summary(ctx.db, snap.id))
-        announce(ctx.bus, notifier, title, body, level=level)
-    except Exception:
-        log.exception("Could not announce the end of backup %d", snap.id)
     try:
         daily_copy(ctx.db, ctx.paths.db_backups, today())
     except Exception:
         log.exception("Could not make the daily copy of the database")
+    if closing():
+        return
+    try:
+        title, body, level = message_for(snap, latest_summary(ctx.db, snap.id))
+        announce(ctx.bus, notifier, title, body, level=level, cancelled=closing)
+    except Exception:
+        log.exception("Could not announce the end of backup %d", snap.id)

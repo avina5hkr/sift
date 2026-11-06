@@ -526,6 +526,11 @@ class JobManager:
         self._starting = False  # a start_backup is between its checks and registering the job
         self._fail_stale_jobs()
 
+    @property
+    def closing(self) -> bool:
+        """True once Sift began closing (`stop_all` was called)."""
+        return self._closing
+
     # -- requests ---------------------------------------------------------------------------
 
     def start_backup(self, sets: Sequence[str], *, dry_run: bool = False) -> int:

@@ -253,14 +253,15 @@ def build_jobs(ctx: AppContext, notifier: Notifier | None = None) -> JobManager:
     def runner(control: JobControl) -> None:
         run_backup(ctx, control, control.sets, control.dry_run)  # leaves its run_summary row
 
-    return JobManager(
+    jobs = JobManager(
         ctx,
         clock=SystemClock(),
         runner=runner,
         describe=describe,
         stored_speed=lambda: stored_read_speed(ctx),
-        on_finished=lambda snap: after_run(ctx, snap, notify),
+        on_finished=lambda snap: after_run(ctx, snap, notify, closing=lambda: jobs.closing),
     )
+    return jobs
 
 
 def start_test_backup(ctx: AppContext, jobs: JobManager) -> threading.Thread | None:

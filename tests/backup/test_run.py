@@ -314,3 +314,47 @@ def test_scan_warnings_are_kept_in_the_summary(rig: Rig) -> None:
     discard_scan(rig.ctx.db, scan_id)
     finished(jobs, job_id)
     assert summary_rows(rig)[-1][5] >= 1  # the guard's warning
+
+
+def test_a_discarded_scan_is_recorded_as_discarded_not_done(rig: Rig) -> None:
+    jobs = rig.jobs()
+    finished(jobs, jobs.start_backup(["Screenshots"]))
+    for path in [p for p in rig.transport.phone.files if "/Screenshots/" in p]:
+        rig.transport.phone.remove(path)
+    job_id = jobs.start_backup(["Screenshots"])
+    deadline = time.monotonic() + 10
+    while next(s for s in jobs.snapshot() if s.id == job_id).state is not (
+        JobState.awaiting_confirmation
+    ):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    with rig.ctx.db.read() as conn:
+        (scan_id,) = conn.execute(
+            "SELECT id FROM scan WHERE state = 'awaiting_confirmation'"
+        ).fetchone()
+    discard_scan(rig.ctx.db, scan_id)
+    finished(jobs, job_id)
+    with rig.ctx.db.read() as conn:
+        row = conn.execute(
+            "SELECT outcome, discarded, new_files FROM run_summary WHERE job_id = ?", (job_id,)
+        ).fetchone()
+    assert row == ("stopped", 1, 0)  # stored within the table's CHECK; the API says "discarded"
+    from sift.backup.summary import latest_summary
+
+    summary = latest_summary(rig.ctx.db)
+    assert summary is not None and summary["outcome"] == "discarded"
+
+
+def test_a_stop_asked_for_as_the_run_ends_is_still_a_stop(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs = rig.jobs()
+
+    def ends_normally_after_a_stop(_ctx: AppContext, ctl: JobControl, *_a: object) -> None:
+        jobs.stop(ctl.job_id)  # the owner pressed Stop; the run returns without noticing
+
+    monkeypatch.setattr(run_module, "_run", ends_normally_after_a_stop)
+    job_id = jobs.start_backup(["Screenshots"])
+    finished(jobs, job_id)
+    ((_, outcome, *_rest),) = summary_rows(rig)
+    assert outcome == "stopped"

@@ -24,7 +24,7 @@ class Notifier:
     def app_in_background(self) -> bool:
         return self.background
 
-    def post(self, title: str, body: str) -> bool:
+    def post(self, title: str, body: str, cancelled: Any = None) -> bool:
         self.posted.append((title, body))
         return self.allowed
 
@@ -40,7 +40,7 @@ def snapshot(**changes: Any) -> JobSnapshot:
 
 
 def summary(**changes: Any) -> dict[str, Any]:
-    return {"new_files": 12, "duplicates_skipped": 1, "failed": 0, **changes}
+    return {"outcome": "done", "new_files": 12, "duplicates_skipped": 1, "failed": 0, **changes}
 
 
 def test_the_message_says_what_was_done_in_plain_words() -> None:
@@ -53,6 +53,13 @@ def test_the_message_says_what_was_done_in_plain_words() -> None:
     assert (title, level) == ("Backup finished", "warning")
     assert body == "1 new file backed up, 1 duplicate skipped, 2 files failed."
     assert message_for(snapshot(stopped=True), summary())[0] == "Backup stopped"
+    assert message_for(snapshot(), summary(outcome="stopped"))[0] == "Backup stopped"
+    assert message_for(snapshot(stopped=True), None)[0] == "Backup stopped"
+    assert message_for(snapshot(), summary(outcome="discarded", new_files=0)) == (
+        "Backup ended",
+        "You discarded the scan, so nothing was copied.",
+        "info",
+    )
     failed = snapshot(state=JobState.failed, error="The Mac needs more free space.")
     assert message_for(failed, None) == (
         "Backup did not finish",
@@ -122,3 +129,39 @@ def test_a_failed_job_is_announced_with_its_reason(ctx: AppContext) -> None:
 
 def test_the_headless_notifier_is_never_a_system_one() -> None:
     assert NullNotifier().post("t", "b") is False
+
+
+def test_the_copy_is_made_before_the_notification_is_posted(ctx: AppContext) -> None:
+    seen: list[bool] = []
+    copy = ctx.paths.db_backups / copy_name(TODAY)
+
+    class Slow(Notifier):
+        def post(self, title: str, body: str, cancelled: Any = None) -> bool:
+            seen.append(copy.is_file())  # the copy was already there when the prompt began
+            return True
+
+    after_run(ctx, snapshot(), Slow(), today=lambda: TODAY)
+    assert seen == [True]
+
+
+def test_nothing_is_announced_while_sift_is_closing_but_the_copy_is_made(
+    ctx: AppContext, monkeypatch: Any
+) -> None:
+    toasts: list[Any] = []
+    monkeypatch.setattr(ctx.bus, "publish", lambda *a: toasts.append(a))
+    notifier = Notifier()
+    after_run(ctx, snapshot(), notifier, today=lambda: TODAY, closing=lambda: True)
+    assert notifier.posted == [] and toasts == []
+    assert (ctx.paths.db_backups / copy_name(TODAY)).is_file()
+
+
+def test_the_permission_wait_is_given_the_closing_check(ctx: AppContext) -> None:
+    got: list[Any] = []
+
+    class Spy(Notifier):
+        def post(self, title: str, body: str, cancelled: Any = None) -> bool:
+            got.append(cancelled)
+            return True
+
+    after_run(ctx, snapshot(), Spy(), today=lambda: TODAY, closing=lambda: False)
+    assert got and got[0]() is False

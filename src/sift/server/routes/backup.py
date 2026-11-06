@@ -32,6 +32,7 @@ from sift.services.plainwords import describe
 router = APIRouter(prefix="/backup")
 _log = logging.getLogger("sift.server")
 _sets_lock = threading.Lock()
+_run_lock = threading.Lock()  # Start and Retry: check, change and start as one step
 
 
 def _jobs(ctx: Ctx) -> JobManager:
@@ -78,7 +79,8 @@ def start_backup(ctx: Ctx, body: StartRequest) -> JobStarted:
     except ValueError as e:
         raise _unknown_set(e) from e
     try:
-        return JobStarted(job_id=jobs.start_backup(body.sets, dry_run=body.dry_run))
+        with _run_lock:
+            return JobStarted(job_id=jobs.start_backup(body.sets, dry_run=body.dry_run))
     except JobError as e:
         raise _job_error(e) from e
 
@@ -181,34 +183,35 @@ class RetryOut(BaseModel):
 def retry_failed(ctx: Ctx) -> RetryOut:
     """Put the failed files back in the queue and start a backup (409 if one is running).
 
-    A normal backup never retries them by itself.
+    A normal backup never retries them by itself. Only files of sets that are still in the
+    settings are queued; the rest stay listed as failed. The whole sequence (is one running,
+    reset, start) runs under one lock, shared with Start, so two requests cannot interleave.
     """
     jobs = _jobs(ctx)
-    if any(s.state not in TERMINAL for s in jobs.snapshot()):
-        raise ApiError(409, "job_conflict", "A backup is already running.")
-    reset = reset_failed(ctx.db)
-    if not reset:
-        raise ApiError(409, "nothing_to_retry", "No files failed, so there is nothing to retry.")
-    configured = {s.name.casefold(): s.name for s in ctx.config.backup.sets}
-    wanted = list(
-        dict.fromkeys(
-            configured[r[3].casefold()] for r in reset if r[3] and r[3].casefold() in configured
-        )
-    )
-    try:
-        if not wanted:
-            raise ValueError("no backup set for these files")
-        job_id = jobs.start_backup(wanted)
-    except JobError as e:
-        undo_reset(ctx.db, reset)
-        raise _job_error(e) from e
-    except ValueError as e:
-        undo_reset(ctx.db, reset)
-        raise ApiError(
-            422,
-            "unknown_set",
-            "The sets these files belong to are no longer in the settings.",
-        ) from e
+    with _run_lock:
+        if any(s.state not in TERMINAL for s in jobs.snapshot()):
+            raise ApiError(409, "job_conflict", "A backup is already running.")
+        configured = {s.name.casefold(): s.name for s in ctx.config.backup.sets}
+        reset = reset_failed(ctx.db, configured)
+        if not reset:
+            if failed_files(ctx.db):
+                raise ApiError(
+                    422,
+                    "unknown_set",
+                    "The sets these files belong to are no longer in the settings.",
+                )
+            raise ApiError(
+                409, "nothing_to_retry", "No files failed, so there is nothing to retry."
+            )
+        wanted = list(dict.fromkeys(configured[r[3].casefold()] for r in reset if r[3]))
+        try:
+            job_id = jobs.start_backup(wanted)
+        except JobError as e:
+            undo_reset(ctx.db, reset)
+            raise _job_error(e) from e
+        except BaseException:
+            undo_reset(ctx.db, reset)  # whatever went wrong, the files stay listed as failed
+            raise
     return RetryOut(job_id=job_id, retried=len(reset))
 
 

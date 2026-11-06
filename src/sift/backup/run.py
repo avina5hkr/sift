@@ -85,6 +85,7 @@ class _Progress:
     stats: PullStats = field(default_factory=PullStats)
     device_id: int | None = None
     warnings: list[str] = field(default_factory=list)
+    discarded: bool = False  # the owner discarded the scan the guard held: nothing was copied
 
 
 def run_backup(
@@ -99,8 +100,8 @@ def run_backup(
 ) -> PullStats | None:
     """Back up `sets` from the job's phone. Returns the pull's counts (None if nothing was pulled).
 
-    Whatever ends the run (done, stopped, failed), a real run leaves one `run_summary` row with
-    its counts and scan warnings; a dry run copies nothing and leaves none.
+    Whatever ends the run (done, stopped, discarded, failed), a real run leaves one
+    `run_summary` row with its counts and scan warnings; a dry run leaves none.
 
     `sleep` is the scanner's wait before looking at recent files again, and
     `reconnect_pause_s` the puller's pause after a disconnect (tests shorten both).
@@ -111,7 +112,8 @@ def run_backup(
     outcome = "failed"
     try:
         result = _run(ctx, ctl, sets, dry_run, clock, sleep, reconnect_pause_s, progress)
-        outcome = "done"
+        # A stop asked for just as the run ended is still a stop, not a plain "done".
+        outcome = "stopped" if ctl.stop_requested else "done"
         return result
     except JobStopped:
         outcome = "stopped"
@@ -124,6 +126,7 @@ def run_backup(
                 device_id=progress.device_id,
                 sets=list(sets),
                 outcome=outcome,
+                discarded=progress.discarded,
                 started_at=started,
                 finished_at=clock.now(),
                 stats=progress.stats,
@@ -173,6 +176,7 @@ def _run(
         ctl.wait_until(lambda: _scan_state(db, result.scan_id) != "awaiting_confirmation")
         if _scan_state(db, result.scan_id) != "applied":
             log.info("The owner discarded scan %d; nothing is copied", result.scan_id)
+            progress.discarded = True
             return None
 
     session = ctl.wait_for_phone()
