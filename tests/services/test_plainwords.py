@@ -9,7 +9,6 @@ from hypothesis import strategies as st
 
 import sift
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
-from sift.core import plainwords
 from sift.core.db import (
     DatabaseBusyError,
     DatabaseCorruptError,
@@ -17,7 +16,6 @@ from sift.core.db import (
     MigrationError,
 )
 from sift.core.instance import AlreadyRunningError
-from sift.core.plainwords import describe
 from sift.device.adb_manager import (
     AdbDownloadError,
     AdbError,
@@ -33,6 +31,8 @@ from sift.device.transport import (
     TransportError,
 )
 from sift.server.errors import ApiError
+from sift.services import plainwords
+from sift.services.plainwords import describe
 
 # One way to build each Sift error type from a message.
 MAKERS: dict[str, Callable[[str], BaseException]] = {

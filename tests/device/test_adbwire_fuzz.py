@@ -17,7 +17,7 @@ checks that.
 
 import re
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from sift.device import adbwire
@@ -27,6 +27,7 @@ from tests.device.fake_socket import ScriptedSocket, as_socket
 MIN_EXAMPLES = 500
 FUZZ = settings(max_examples=max(MIN_EXAMPLES, settings().max_examples), deadline=None)
 CAP = 64
+FAIL_CAP = adbwire.MAX_FAIL_TEXT
 
 _HEX4 = re.compile(rb"[0-9a-fA-F]{4}")
 
@@ -37,7 +38,14 @@ chunks = st.integers(min_value=1, max_value=9)
 @st.composite
 def peer_bytes(draw: st.DrawFn) -> bytes:
     """A reply to a host request, from well formed to garbage."""
-    body = draw(st.binary(max_size=2 * CAP))
+    # Bodies straddle the caps: CAP (64) for strings, MAX_FAIL_TEXT (4096) for FAIL text.
+    size = draw(
+        st.one_of(
+            st.integers(0, 2 * CAP),
+            st.sampled_from([CAP - 1, CAP, CAP + 1, FAIL_CAP - 1, FAIL_CAP, FAIL_CAP + 1, 5000]),
+        )
+    )
+    body = draw(st.binary(min_size=size, max_size=size))
     kind = draw(
         st.sampled_from(
             [
@@ -90,11 +98,13 @@ def bound(data: bytes, cap: int) -> int:
     if not _HEX4.fullmatch(header):
         return 4 + min(len(header), 4)
     length = int(header, 16)
-    limit = min(cap, adbwire.MAX_FAIL_TEXT) if data[:4] == b"FAIL" else cap
+    limit = FAIL_CAP if data[:4] == b"FAIL" else cap
     return 8 if length > limit else 8 + length
 
 
 @FUZZ
+@example(data=b"FAIL0064" + b"x" * 100, chunk=9, end="eof")  # FAIL text may exceed the string cap
+@example(data=b"FAIL1001" + b"x" * 5000, chunk=9, end="eof")  # over the FAIL cap: body unread
 @given(data=peer_bytes(), chunk=chunks, end=ends)
 def test_host_request_then_string_never_misbehaves(data: bytes, chunk: int, end: str) -> None:
     fake = ScriptedSocket(data, chunk=chunk, end=end)  # type: ignore[arg-type]
@@ -105,7 +115,7 @@ def test_host_request_then_string_never_misbehaves(data: bytes, chunk: int, end:
         outcome = e
     assert isinstance(outcome, str | TransportError)
     assert fake.delivered <= bound(data, CAP)
-    assert fake.largest_request <= 4 + CAP  # never more than a status, or a capped body
+    assert fake.largest_request <= max(CAP, FAIL_CAP)  # never more than a capped body
     if isinstance(outcome, str):
         # A value means the peer really sent OKAY, a well formed length and the whole string.
         assert data[:4] == b"OKAY"
