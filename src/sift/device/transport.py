@@ -1,6 +1,6 @@
 """Transport interface: how Sift talks to a phone, independent of the mechanism."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal, Protocol, runtime_checkable
@@ -24,13 +24,21 @@ NO_IDENTITY_MESSAGE = (
 
 @dataclass(frozen=True)
 class DeviceInfo:
-    serial: str  # the phone's identity: ro.serialno, else android_id (never empty)
+    """What one probe of the phone reports. At least one of `serial` and `android_id` is set.
+
+    The two identifiers are kept apart (see `sift.device.session.PhoneIdentity`): a phone is the
+    same phone when either one is the same.
+    """
+
+    serial: str | None  # ro.serialno; None when the phone reports none
     model: str
     android_version: str
     battery_pct: int | None
     free_bytes: int | None
     total_bytes: int | None
     screen_sizes: tuple[tuple[int, int], ...]  # physical and override from `wm size`
+    android_id: str | None = None  # `settings get secure android_id`; None when not reported
+    phone_time: int | None = None  # the phone's clock, Unix seconds (`date +%s`), when it said
 
 
 @dataclass(frozen=True)
@@ -83,20 +91,26 @@ class Transport(Protocol):
     """
 
     def info(self) -> DeviceInfo:
-        """Model, Android version, storage, battery and the phone's identity.
+        """Model, Android version, storage, battery, the phone's clock and its identity.
 
-        `serial` is `ro.serialno`, or `android_id` when the phone reports no serial number.
-        Raises `RemoteError` (with `NO_IDENTITY_MESSAGE`) when it reports neither.
+        `serial` is `ro.serialno` and `android_id` the Android ID; either may be None, but not
+        both: `RemoteError` (with `NO_IDENTITY_MESSAGE`) is raised when the phone reports
+        neither. All of it is read in one request to the phone.
         """
         ...
 
-    def walk(self, root: str) -> Iterator[RemoteEntry]:
+    def walk(
+        self, root: str, on_error: Callable[[RemoteError], None] | None = None
+    ) -> Iterator[RemoteEntry]:
         """Depth-first listing of everything under `root`.
 
         Yields files and symlinks (not directories). A symlink is yielded as an entry with
         `is_symlink=True` and the link's own size and mtime, and is never descended into.
-        Raises `RemoteError` naming the path if a subdirectory cannot be listed: it fails
-        loudly rather than skipping.
+        Without `on_error`, a subdirectory that cannot be listed (or an entry the phone cannot
+        look at) raises `RemoteError` naming the path: it fails loudly rather than skipping.
+        With `on_error`, that `RemoteError` is passed to it instead and the folder or entry is
+        skipped; the walk goes on. `root` itself must be listable either way, or the walk
+        raises. (Some phones list a folder they refuse to read as empty, without any error.)
         """
         ...
 
@@ -111,8 +125,14 @@ class Transport(Protocol):
         """The entry for `path` (a symlink is reported as itself), or None if it is missing."""
         ...
 
-    def open_read(self, path: str, offset: int = 0) -> BinaryIO:
+    def open_read(
+        self, path: str, offset: int = 0, *, entry: RemoteEntry | None = None
+    ) -> BinaryIO:
         """A stream of the file's bytes starting at byte `offset`; the caller must close it.
+
+        `entry` is what a recent `walk`, `list_dir` or `stat` returned for this path. When given
+        it is trusted as the file's size at open (no extra look at the phone); a file that has
+        changed since then ends short or long of it, which is reported as for any change.
 
         Like any raw stream, `read(n)` may return fewer than `n` bytes before the end: loop
         until it returns b"". `read()` with no size returns everything that is left.

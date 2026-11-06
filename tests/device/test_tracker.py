@@ -22,6 +22,8 @@ from sift.core.events import EventBus
 from sift.device.adb_manager import PORT_BUSY_MESSAGE, AdbError, AdbManager, AdbServerError
 from sift.device.fake_phone import FakePhone
 from sift.device.fake_transport import FakeTransport, ManualClock
+from sift.device.session import DeviceSession, PhoneIdentity, WrongDevice
+from sift.device.shell import INFO_SCRIPT
 from sift.device.track_devices import Snapshot
 from sift.device.tracker import (
     HELD_BY_OTHER_MESSAGE,
@@ -822,6 +824,7 @@ def test_a_changed_identity_on_refresh_is_the_wrong_device(ctx: AppContext) -> N
 
     def swap() -> None:
         phone.serial = "OTHER-0002"
+        phone.android_id = "0000fake000000bb"  # a different phone has neither identifier
 
     r.run([{USB: "device"}, swap, *_ticks(r, 60), STOP])
     assert r.bus.states() == ["connected_usb", "wrong_device"]
@@ -835,6 +838,115 @@ def test_refreshes_write_last_seen_at_most_every_10_minutes(ctx: AppContext) -> 
     r.run([{USB: "device"}, note, *_ticks(r, 540), note, *_ticks(r, 60), note, STOP])
     first = 1_700_000_000 + 1000
     assert stamps == [first, first, first + 600]
+
+
+# -- the shared session and two-part identity ----------------------------------------------------
+
+
+def test_session_is_the_connected_phones_one_shared_transport(ctx: AppContext) -> None:
+    r = rig(ctx)
+    seen: list[DeviceSession | None] = []
+    grab = lambda: seen.append(r.tracker.session())  # noqa: E731
+    assert r.tracker.session() is None
+    r.run([{USB: "device"}, grab, {}, grab, {USB: "device"}, grab, STOP])
+    first, gone, again = seen
+    assert first is not None
+    assert first.transport is r.phones[USB]  # every user goes through this one transport
+    assert first.device_uuid == r.tracker.status().device_uuid
+    assert first.identity.matches(PhoneIdentity("FAKE-0001", None))
+    assert gone is None  # unplugged: no session
+    assert again is not None
+    assert again.device_uuid == first.device_uuid
+    assert r.tracker.session() is None  # stopped
+
+
+def test_no_session_for_the_wrong_phone_or_an_offline_one(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.phones["OTHER-0002"] = FakeTransport(FakePhone(serial="OTHER-0002"))
+    r.run([{USB: "device"}, STOP])
+    other = rig(ctx)
+    other.phones["OTHER-0002"] = FakeTransport(FakePhone(serial="OTHER-0002"))
+    sessions: list[DeviceSession | None] = []
+    other.run([{"OTHER-0002": "device"}, lambda: sessions.append(other.tracker.session()), STOP])
+    assert other.tracker.status().state is S.wrong_device
+    assert sessions == [None]
+    offline = rig(ctx)
+    offline.run([{USB: "offline"}, lambda: sessions.append(offline.tracker.session()), STOP])
+    assert sessions == [None, None]
+
+
+def test_the_session_can_check_the_phone_is_still_the_same(ctx: AppContext) -> None:
+    r, _, phone = _flaky_rig(ctx)
+    outcomes: list[object] = []
+
+    def check() -> None:
+        session = r.tracker.session()
+        assert session is not None
+        try:
+            session.check_identity()
+            outcomes.append("same")
+        except WrongDevice:
+            outcomes.append("wrong")
+
+    def swap() -> None:
+        phone.serial, phone.android_id = "OTHER-0002", "0000fake000000bb"
+
+    r.run([{USB: "device"}, check, swap, check, STOP])
+    assert outcomes == ["same", "wrong"]
+
+
+def test_the_same_phone_with_a_new_serial_is_still_that_phone(ctx: AppContext) -> None:
+    """Either identifier is enough: here only the serial changed, the Android ID did not."""
+    r, _, phone = _flaky_rig(ctx)
+    sessions: list[DeviceSession | None] = []
+
+    def reserial() -> None:
+        phone.serial = "RENUMBERED-9"
+
+    r.run(
+        [
+            {USB: "device"},
+            reserial,
+            *_ticks(r, 60),
+            lambda: sessions.append(r.tracker.session()),
+            STOP,
+        ]
+    )
+    assert r.bus.states() == ["connected_usb"]  # never wrong_device
+    (session,) = sessions
+    assert session is not None
+    assert session.identity.serial == "RENUMBERED-9"  # learned, in memory
+    assert session.identity.android_id == phone.android_id
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]  # the table is not written yet
+
+
+def test_the_same_phone_with_a_new_android_id_is_still_that_phone(ctx: AppContext) -> None:
+    r, _, phone = _flaky_rig(ctx)
+
+    def reset() -> None:
+        phone.android_id = "0000fake000000cc"  # e.g. after a factory reset
+
+    r.run([{USB: "device"}, reset, *_ticks(r, 60), STOP])
+    assert r.bus.states() == ["connected_usb"]
+
+
+def test_an_android_id_learned_in_memory_survives_a_retry(ctx: AppContext) -> None:
+    r, _, phone = _flaky_rig(ctx)
+    learned = phone.android_id
+    seen: list[PhoneIdentity] = []
+
+    def swap_serial() -> None:
+        phone.serial = "RENUMBERED-9"
+
+    def grab() -> None:
+        session = r.tracker.session()
+        assert session is not None
+        seen.append(session.identity)
+
+    # After the Retry the table is read again, and it only knows the old serial.
+    r.run([{USB: "device"}, swap_serial, RETRY], [{USB: "device"}, grab, STOP])
+    assert r.bus.states() == ["connected_usb"]
+    assert seen[0].android_id == learned
 
 
 # -- stop -------------------------------------------------------------------------------------
@@ -982,12 +1094,10 @@ def test_context_has_no_tracker_by_default(ctx: AppContext) -> None:
 
 
 def _phone_shell(command: bytes) -> list[bytes]:
-    answers = {
-        b"getprop ro.serialno": b"FAKESERIAL\n",
-        b"getprop ro.product.model": b"TestPhone\n",
-        b"getprop ro.build.version.release": b"16\n",
-    }
-    return [answers.get(command, b"")]
+    if command != INFO_SCRIPT.encode():
+        return [b""]
+    sections = {"model": "TestPhone", "release": "16", "serial": "FAKESERIAL"}
+    return [b"".join(f"\n@@sift:{name}@@\n{text}\n".encode() for name, text in sections.items())]
 
 
 class TrackingServer(FakeAdbServer):
@@ -1042,15 +1152,5 @@ def test_adb_tracker_reads_the_real_protocols(ctx: AppContext) -> None:
         assert server.requests[0] == b"host:track-devices"
         commands = [r.removeprefix(b"exec:") for r in server.requests if r.startswith(b"exec:")]
         assert commands
-        assert set(commands) <= READ_COMMANDS  # reads only
+        assert set(commands) <= {INFO_SCRIPT.encode()}  # the one read-only probe, nothing else
     assert _tracker_threads() == []
-
-
-READ_COMMANDS = {
-    b"getprop ro.serialno",
-    b"getprop ro.product.model",
-    b"getprop ro.build.version.release",
-    b"df /sdcard",
-    b"wm size",
-    b"dumpsys battery",
-}

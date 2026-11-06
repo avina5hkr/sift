@@ -106,6 +106,11 @@ class Sync2:
     ) -> None:
         self.close()
 
+    @property
+    def is_open(self) -> bool:
+        """False once the connection was closed, by `close()` or by a failed request."""
+        return self._sock is not None
+
     def close(self) -> None:
         sock, self._sock = self._sock, None
         if sock is not None:

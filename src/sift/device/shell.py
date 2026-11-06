@@ -10,6 +10,7 @@ All of these commands only read. Nothing here writes to the phone.
 
 import re
 import shlex
+from dataclasses import dataclass
 
 from sift.device.transport import RemoteError
 
@@ -19,6 +20,28 @@ _WM_SIZE = re.compile(r"^\s*(?:Physical|Override) size:\s*(\d+)x(\d+)\s*$", re.M
 _LEVEL = re.compile(r"^\s*level:\s*(-?\d+)\s*$", re.MULTILINE)
 _SCALE = re.compile(r"^\s*scale:\s*(-?\d+)\s*$", re.MULTILINE)
 _DF_BLOCK_SIZES = {"1k-blocks": 1024, "1024-blocks": 1024, "512-blocks": 512}
+_SECTION_LINE = re.compile(r"@@sift:([a-z_]+)@@")
+_ID_TEXT = re.compile(r"[0-9A-Za-z]{1,64}")
+_EPOCH_TEXT = re.compile(r"\d{1,12}")
+# Values a phone may report for "no serial number" (ro.serialno on some builds).
+_NO_SERIAL = frozenset({"", "unknown", "null"})
+
+# One request that probes everything `info()` needs. Each probe prints its own marked section;
+# the marker starts on a fresh line even when the previous probe did not end its output with a
+# newline, and stderr goes to /dev/null so an error message never lands inside a section.
+_INFO_PROBES: tuple[tuple[str, str], ...] = (
+    ("model", "getprop ro.product.model"),
+    ("release", "getprop ro.build.version.release"),
+    ("serial", "getprop ro.serialno"),
+    ("android_id", "settings get secure android_id"),
+    ("epoch", "date +%s"),
+    ("df", "df /sdcard"),
+    ("wm", "wm size"),
+    ("battery", "dumpsys battery"),
+)
+INFO_SCRIPT = "\n".join(
+    f"printf '\\n@@sift:{name}@@\\n'; {command} 2>/dev/null" for name, command in _INFO_PROBES
+)
 
 
 def encode_command(command: str) -> bytes:
@@ -112,3 +135,61 @@ def parse_battery(out: str) -> int | None:
         return None
     percent = round(int(level.group(1)) * 100 / scale)
     return percent if 0 <= percent <= 100 else None
+
+
+def parse_sections(out: str) -> dict[str, str]:
+    """The text of each marked section of `INFO_SCRIPT`'s output, by name.
+
+    Text before the first marker is ignored; if a name repeats, the first one wins. A section
+    the phone never printed is simply absent, never an error.
+    """
+    sections: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in out.splitlines():
+        marker = _SECTION_LINE.fullmatch(line.strip())
+        if marker is not None:
+            name = marker.group(1)
+            current = sections.setdefault(name, []) if name not in sections else None
+            continue
+        if current is not None:
+            current.append(line)
+    return {name: "\n".join(lines) for name, lines in sections.items()}
+
+
+@dataclass(frozen=True)
+class InfoProbe:
+    """What `INFO_SCRIPT` printed, field by field; None (or empty) where it was missing."""
+
+    model: str
+    release: str
+    serial: str | None
+    android_id: str | None
+    phone_time: int | None
+    storage: tuple[int, int] | None  # (free, total) bytes
+    screen_sizes: tuple[tuple[int, int], ...]
+    battery_pct: int | None
+
+
+def _first_line(text: str | None) -> str:
+    if text is None:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[0] if lines else ""
+
+
+def parse_info(out: str) -> InfoProbe:
+    """Parse the output of `INFO_SCRIPT`. Never raises: a missing or odd section gives None."""
+    sections = parse_sections(out)
+    serial = _first_line(sections.get("serial"))
+    android_id = _first_line(sections.get("android_id"))
+    epoch = _first_line(sections.get("epoch"))
+    return InfoProbe(
+        model=_first_line(sections.get("model")),
+        release=_first_line(sections.get("release")),
+        serial=None if serial.lower() in _NO_SERIAL or " " in serial else serial,
+        android_id=android_id if _ID_TEXT.fullmatch(android_id) and android_id != "null" else None,
+        phone_time=int(epoch) if _EPOCH_TEXT.fullmatch(epoch) else None,
+        storage=parse_df(sections.get("df", "")),
+        screen_sizes=parse_wm_size(sections.get("wm", "")),
+        battery_pct=parse_battery(sections.get("battery", "")),
+    )

@@ -2,17 +2,25 @@
 
 Time never comes from the wall clock directly: `clock` and `sleep` are injected, so a hang or a
 slow link can be tested instantly with a ManualClock.
+
+Like the real transport it has a pool of `Limits.max_connections` connection slots. A call holds
+one while it runs; an open read stream holds one until it is closed, and a walk from its first
+`next()` until it ends, is closed or is collected. A call that cannot get a slot within its time
+limit raises `DeviceTimeout`.
 """
 
 import hashlib
 import io
+import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, cast
 
-from sift.device.fake_phone import FakePhone
+from sift.device.adb_transport import DEFAULT_LIMITS, Limits
+from sift.device.fake_phone import FakePhone, derived_android_id
 from sift.device.transport import (
     NO_IDENTITY_MESSAGE,
     DeviceDisconnected,
@@ -37,8 +45,9 @@ class FaultPlan:
     size_change_mid_read: set[str] = field(default_factory=set)  # FileChanged at the old end
     wrong_sha256: set[str] = field(default_factory=set)
     refuse_delete: set[str] = field(default_factory=set)
+    unstatable: set[str] = field(default_factory=set)  # entries a listing cannot look at
     offline_for_s: float | None = None  # every call raises DeviceDisconnected for this long
-    identity: str | None = None  # report a different serial
+    identity: str | None = None  # report a different phone (serial and Android ID)
     garbage_output: bool = False  # shell-like calls return unparseable text
     short_reads: bool = False  # read(n) returns about a third of n (at least 1 byte)
 
@@ -77,6 +86,7 @@ class _FakeStream(io.RawIOBase):
 
     def __init__(self, transport: FakeTransport, path: str, size: int, offset: int) -> None:
         super().__init__()
+        self._slot_held = True  # taken by `open_read`; given back on close
         self._t = transport
         self._path = path
         self._pos = offset
@@ -87,6 +97,12 @@ class _FakeStream(io.RawIOBase):
 
     def readable(self) -> bool:
         return True
+
+    def close(self) -> None:
+        if self._slot_held:
+            self._slot_held = False
+            self._t.release_slot()
+        super().close()
 
     def readinto(self, buffer: bytearray | memoryview) -> int:  # type: ignore[override]
         data = self.read(len(buffer))
@@ -166,8 +182,14 @@ class FakeTransport:
         clock: Callable[[], float] = time.monotonic,
         stall_timeout_s: float = 30.0,
         sleep: Callable[[float], None] = time.sleep,
+        limits: Limits = DEFAULT_LIMITS,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.phone = phone
+        self.limits = limits
+        self.wall_clock = wall_clock
+        self._slots_lock = threading.Lock()
+        self._slots_used = 0
         self.faults = faults if faults is not None else FaultPlan()
         self.clock = clock
         self.sleep = sleep
@@ -201,6 +223,36 @@ class FakeTransport:
                 raise DeviceTimeout(f"no data from the phone for {self.stall_timeout_s:g} s")
             self.sleep(min(self.stall_timeout_s - waited, 1.0))
 
+    def acquire_slot(self, wait_s: float) -> None:
+        """Take a connection slot, waiting (on the injected clock) up to `wait_s` for one."""
+        deadline = self.clock() + wait_s
+        while True:
+            with self._slots_lock:
+                if self._slots_used < self.limits.max_connections:
+                    self._slots_used += 1
+                    return
+            left = deadline - self.clock()
+            if left <= 0:
+                raise DeviceTimeout("Too many connections to the phone are open at once.")
+            self.sleep(min(left, 0.05))
+
+    def release_slot(self) -> None:
+        with self._slots_lock:
+            self._slots_used -= 1
+
+    @property
+    def slots_in_use(self) -> int:
+        with self._slots_lock:
+            return self._slots_used
+
+    @contextmanager
+    def _slot(self, wait_s: float) -> Iterator[None]:
+        self.acquire_slot(wait_s)
+        try:
+            yield
+        finally:
+            self.release_slot()
+
     def _begin(self, op: str, path: str | None = None, *, mutating: bool = False) -> None:
         self.journal.append(JournalEntry(op, path, mutating))
         self.check_online()
@@ -217,105 +269,156 @@ class FakeTransport:
 
     def info(self) -> DeviceInfo:
         self._begin("info")
-        self._shell("info")
-        phone = self.phone
-        free = None if phone.total_bytes is None else max(phone.total_bytes - phone.used_bytes(), 0)
-        identity = self.faults.identity or phone.serial or phone.android_id
-        if not identity:
-            raise RemoteError(NO_IDENTITY_MESSAGE)
-        return DeviceInfo(
-            serial=identity,
-            model=phone.model,
-            android_version=phone.android_version,
-            battery_pct=phone.battery_pct,
-            free_bytes=free,
-            total_bytes=phone.total_bytes,
-            screen_sizes=phone.screen_sizes,
-        )
+        with self._slot(self.limits.stat_s):
+            self._shell("info")
+            phone = self.phone
+            free = (
+                None
+                if phone.total_bytes is None
+                else max(phone.total_bytes - phone.used_bytes(), 0)
+            )
+            if self.faults.identity:
+                serial: str | None = self.faults.identity
+                android_id: str | None = derived_android_id(serial)
+            else:
+                serial, android_id = phone.serial or None, phone.android_id or None
+            if not serial and not android_id:
+                raise RemoteError(NO_IDENTITY_MESSAGE)
+            return DeviceInfo(
+                serial=serial,
+                model=phone.model,
+                android_version=phone.android_version,
+                battery_pct=phone.battery_pct,
+                free_bytes=free,
+                total_bytes=phone.total_bytes,
+                screen_sizes=phone.screen_sizes,
+                android_id=android_id,
+                phone_time=int(self.wall_clock()) + phone.time_offset_s,
+            )
 
-    def walk(self, root: str) -> Iterator[RemoteEntry]:
+    def walk(
+        self, root: str, on_error: Callable[[RemoteError], None] | None = None
+    ) -> Iterator[RemoteEntry]:
         self._begin("walk", root)
-        return self._walk(root)
+        return self._walk_held(root, on_error)
 
-    def _walk(self, root: str) -> Iterator[RemoteEntry]:
-        for entry in self._list(root):
+    def _walk_held(
+        self, root: str, on_error: Callable[[RemoteError], None] | None
+    ) -> Iterator[RemoteEntry]:
+        with self._slot(self.limits.list_s):
+            yield from self._walk(root, on_error, is_root=True)
+
+    def _walk(
+        self, root: str, on_error: Callable[[RemoteError], None] | None, *, is_root: bool = False
+    ) -> Iterator[RemoteEntry]:
+        try:
+            entries = self._list(root, on_error)
+        except RemoteError as e:
+            if on_error is None or is_root:
+                raise
+            on_error(e)
+            return
+        for entry in entries:
             if entry.is_dir:
-                yield from self._walk(entry.path)
+                yield from self._walk(entry.path, on_error)
             else:
                 yield entry
 
     def list_dir(self, path: str) -> list[RemoteEntry]:
         self._begin("list_dir", path)
-        return self._list(path)
+        with self._slot(self.limits.list_s):
+            return self._list(path)
 
-    def _list(self, path: str) -> list[RemoteEntry]:
+    def _list(
+        self, path: str, on_error: Callable[[RemoteError], None] | None = None
+    ) -> list[RemoteEntry]:
         self.check_online()
         if not self.phone.is_dir(path):
             raise RemoteError(f"cannot list {path}: no such directory", path)
-        if path.rstrip("/") in self.phone.unreadable:
+        if self.phone.is_unreadable(path):
             raise RemoteError(f"cannot list {path}: permission denied", path)
-        return self.phone.children(path)
+        entries: list[RemoteEntry] = []
+        for entry in self.phone.children(path):
+            if entry.path in self.faults.unstatable:
+                failure = RemoteError(f"cannot look at {entry.path}: permission denied", entry.path)
+                if on_error is None:
+                    raise failure
+                on_error(failure)
+                continue
+            entries.append(entry)
+        return entries
 
     def stat(self, path: str) -> RemoteEntry | None:
         self._begin("stat", path)
-        return self.phone.entry(path)
+        with self._slot(self.limits.stat_s):
+            return self.phone.entry(path)
 
-    def open_read(self, path: str, offset: int = 0) -> BinaryIO:
+    def open_read(
+        self, path: str, offset: int = 0, *, entry: RemoteEntry | None = None
+    ) -> BinaryIO:
         self._begin("open_read", path)
         if offset < 0:
             raise ValueError(f"offset must not be negative: {offset}")
-        entry = self.phone.entry(path)
+        if entry is None:
+            with self._slot(self.limits.stat_s):
+                entry = self.phone.entry(path)
         if entry is None:
             raise RemoteError(f"cannot open {path}: no such file", path)
         if entry.is_dir or entry.is_symlink:
             kind = "a directory" if entry.is_dir else "a symlink"
             raise RemoteError(f"cannot open {path}: it is {kind}", path)
+        self.acquire_slot(self.limits.stat_s)
         return cast(BinaryIO, _FakeStream(self, path.rstrip("/"), entry.size, offset))
 
     def sha256(self, paths: list[str]) -> dict[str, str | None]:
         self._record_each("sha256", paths, mutating=False)
         self.check_online()
-        self._shell("sha256")
-        result: dict[str, str | None] = {}
-        for path in paths:
-            entry = self.phone.entry(path)
-            if entry is None or entry.is_dir or entry.is_symlink:
-                result[path] = None
-                continue
-            if path in self.faults.hang_on:
-                self.wait_for_stall()
-            digest = self.phone.sha256_of(path)
-            if path in self.faults.wrong_sha256:
-                digest = hashlib.sha256(b"wrong:" + digest.encode()).hexdigest()
-            result[path] = digest
-        return result
+        with self._slot(self.limits.stat_s):
+            self._shell("sha256")
+            result: dict[str, str | None] = {}
+            for path in paths:
+                entry = self.phone.entry(path)
+                if entry is None or entry.is_dir or entry.is_symlink:
+                    result[path] = None
+                    continue
+                if path in self.faults.hang_on:
+                    self.wait_for_stall()
+                digest = self.phone.sha256_of(path)
+                if path in self.faults.wrong_sha256:
+                    digest = hashlib.sha256(b"wrong:" + digest.encode()).hexdigest()
+                result[path] = digest
+            return result
 
     def delete(self, path: str) -> None:
         self._begin("delete", path, mutating=True)
-        self._shell("delete")
-        if path in self.faults.refuse_delete:
-            raise RemoteError(f"cannot delete {path}: permission denied", path)
-        entry = self.phone.entry(path)
-        if entry is None:
-            raise RemoteError(f"cannot delete {path}: no such file", path)
-        if entry.is_dir:
-            raise RemoteError(f"cannot delete {path}: it is a directory", path)
-        self.phone.remove(path)
+        with self._slot(self.limits.delete_s):
+            self._shell("delete")
+            if path in self.faults.refuse_delete:
+                raise RemoteError(f"cannot delete {path}: permission denied", path)
+            entry = self.phone.entry(path)
+            if entry is None:
+                raise RemoteError(f"cannot delete {path}: no such file", path)
+            if entry.is_dir:
+                raise RemoteError(f"cannot delete {path}: it is a directory", path)
+            self.phone.remove(path)
 
     def push(self, local: Path, remote: str, mtime: int) -> None:
         self._begin("push", remote, mutating=True)
         parent = remote.rstrip("/").rsplit("/", 1)[0] or "/"
-        if parent in self.phone.unreadable:
-            raise RemoteError(f"cannot write {remote}: permission denied", remote)
-        self.phone.add_file(remote, local.read_bytes(), mtime=mtime)
+        with self._slot(self.limits.stat_s):
+            if self.phone.is_unreadable(parent):
+                raise RemoteError(f"cannot write {remote}: permission denied", remote)
+            self.phone.add_file(remote, local.read_bytes(), mtime=mtime)
 
     def media_rescan(self, paths: list[str]) -> bool:
         self._record_each("media_rescan", paths, mutating=True)
         self.check_online()
-        self._shell("media_rescan")
-        return True
+        with self._slot(self.limits.stat_s):
+            self._shell("media_rescan")
+            return True
 
     def link_health(self) -> LinkHealth:
         self._begin("link_health")
-        self._shell("link_health")
-        return LinkHealth(kind="usb", speed_mbps=480, latency_ms=1.0)
+        with self._slot(self.limits.stat_s):
+            self._shell("link_health")
+            return LinkHealth(kind="usb", speed_mbps=480, latency_ms=1.0)

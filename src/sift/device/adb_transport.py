@@ -13,9 +13,14 @@ How each call reaches the phone:
   and `DeviceDisconnected` when it is not.
 - `sha256` stats the paths, then hashes on the phone with one `sha256sum` line per file, in
   batches (see `shell.build_sha256_script` for why no name ever appears in the output).
-- `info` and `link_health` run read-only commands (`getprop`, `df`, `wm size`,
-  `dumpsys battery`, `true`, and `settings get secure android_id` when the phone reports no
-  `ro.serialno`). `DeviceInfo.serial` is the phone's identity: `ro.serialno`, else `android_id`.
+- `info` runs ONE read-only exec script (`shell.INFO_SCRIPT`: `getprop`, `settings get secure
+  android_id`, `date +%s`, `df`, `wm size`, `dumpsys battery`) with marked sections, so one
+  probe costs one connection. `DeviceInfo` keeps `serial` (`ro.serialno`) and `android_id`
+  apart; `link_health` runs `true`.
+- `open_read(path, offset, entry=...)` trusts a `RemoteEntry` the caller already has and skips
+  the extra LST2.
+- `walk(root, on_error)` hands an unlistable subfolder (or an entry the phone cannot look at)
+  to `on_error` and carries on, instead of raising.
 
 Connections to the adb server come from `adbwire.open_service`, which only ever connects (no
 adb program is run and no server is started or restarted here); the service requests on them
@@ -50,12 +55,11 @@ from typing import BinaryIO, cast
 from sift.device import adbwire
 from sift.device.adb_manager import ADB_SERVER_HOST
 from sift.device.shell import (
+    INFO_SCRIPT,
     build_sha256_script,
     encode_command,
-    parse_battery,
-    parse_df,
+    parse_info,
     parse_sha256_output,
-    parse_wm_size,
     tail_command,
 )
 from sift.device.sync2 import Sync2, SyncStat, device_features
@@ -101,6 +105,8 @@ class Limits:
     sha_min_s: float = 120
     # ~half the ~86 MB/s cold rate measured on a reference phone; also drives tail resume allowance
     sha_assumed_bps: int = 40 * 10**6
+    # `tail -c +N` is silent while it skips N bytes; never wait longer than this for it
+    resume_max_s: float = 600
     max_connections: int = 6
     max_request_bytes: int = 0xFFFF  # an adb host request's length is 4 hex digits
 
@@ -139,9 +145,11 @@ def resume_allowance_s(offset: int, limits: Limits) -> float:
 
     `tail -c +N` reads and throws away the first N-1 bytes before it prints anything, so a
     resume deep into a big file is silent for a while: `max(read_stall_s, offset /
-    sha_assumed_bps)`. After the first bytes arrive the normal `read_stall_s` applies.
+    sha_assumed_bps)`, but the part that comes from the offset is capped at `resume_max_s`
+    (600 s), so a wrong guess can never make a dead phone look alive for hours. It is never
+    less than `read_stall_s`. After the first bytes arrive the normal `read_stall_s` applies.
     """
-    return max(limits.read_stall_s, offset / limits.sha_assumed_bps)
+    return max(limits.read_stall_s, min(offset / limits.sha_assumed_bps, limits.resume_max_s))
 
 
 def _norm(path: str) -> str:
@@ -576,32 +584,22 @@ class AdbTransport:
 
     def info(self) -> DeviceInfo:
         timeout = self.limits.stat_s
-
-        def text(command: str) -> str:
-            return self._exec(command, timeout).decode("utf-8", "replace")
-
-        model = text("getprop ro.product.model").strip()
-        release = text("getprop ro.build.version.release").strip()
-        if not model or not release:
+        probe = parse_info(self._exec(INFO_SCRIPT, timeout).decode("utf-8", "replace"))
+        if not probe.model or not probe.release:
             raise RemoteError("The phone did not report its model and Android version.")
-        serial = text("getprop ro.serialno").strip()
-        if not serial:
-            # `settings get` is a read; it prints "null" when the value is not set.
-            serial = text("settings get secure android_id").strip()
-            if serial == "null":
-                serial = ""
-        if not serial:
+        if probe.serial is None and probe.android_id is None:
             raise RemoteError(NO_IDENTITY_MESSAGE)
-        storage = parse_df(text("df /sdcard"))
-        free, total = storage if storage is not None else (None, None)
+        free, total = probe.storage if probe.storage is not None else (None, None)
         return DeviceInfo(
-            serial=serial,
-            model=model,
-            android_version=release,
-            battery_pct=parse_battery(text("dumpsys battery")),
+            serial=probe.serial,
+            model=probe.model,
+            android_version=probe.release,
+            battery_pct=probe.battery_pct,
             free_bytes=free,
             total_bytes=total,
-            screen_sizes=parse_wm_size(text("wm size")),
+            screen_sizes=probe.screen_sizes,
+            android_id=probe.android_id,
+            phone_time=probe.phone_time,
         )
 
     def stat(self, path: str) -> RemoteEntry | None:
@@ -621,7 +619,9 @@ class AdbTransport:
         """One level, folders included. An unreadable folder may come back empty (see top)."""
         return self._list_folder(_norm(path))
 
-    def walk(self, root: str) -> Iterator[RemoteEntry]:
+    def walk(
+        self, root: str, on_error: Callable[[RemoteError], None] | None = None
+    ) -> Iterator[RemoteEntry]:
         """Depth-first files and symlinks under `root`; symlinks are never descended into.
 
         If `root` is a symlink to a folder, as `/sdcard` is on a phone, the folder it points
@@ -630,21 +630,48 @@ class AdbTransport:
         is exhausted, closed or collected. Folders are handled one after another on it: each
         is checked with LST2, then its LIS2 listing is read to the end before anything else
         is sent, so nothing ever overlaps on the connection.
-        """
-        return self._walk(_norm(root))
 
-    def _walk(self, root: str) -> Iterator[RemoteEntry]:
+        With `on_error`, a subfolder that cannot be listed, or an entry the phone cannot look
+        at, is passed to it as a `RemoteError` and skipped. `root` must always be listable.
+        """
+        return self._walk(_norm(root), on_error)
+
+    def _walk(
+        self, root: str, on_error: Callable[[RemoteError], None] | None
+    ) -> Iterator[RemoteEntry]:
         _encode_path(root)  # refuse a bad root before connecting
-        with self._sync(self.limits.list_s) as sync:
-            stack = [iter(self._list_with(sync, root))]
-            while stack:
-                entry = next(stack[-1], None)
-                if entry is None:
-                    stack.pop()
-                elif entry.is_dir:
-                    stack.append(iter(self._list_with(sync, entry.path)))
-                else:
-                    yield entry
+        features = self._phone_features()
+        timeout = self.limits.list_s
+
+        def connect() -> Sync2:
+            return Sync2(self._host, self._port, self.serial, timeout_s=timeout, features=features)
+
+        with self._slot(timeout):
+            sync = connect()
+            try:
+                stack = [iter(self._list_with(sync, root, on_error))]
+                while stack:
+                    entry = next(stack[-1], None)
+                    if entry is None:
+                        stack.pop()
+                    elif entry.is_dir:
+                        try:
+                            children = self._list_with(sync, entry.path, on_error)
+                        except RemoteError as e:
+                            if on_error is None:
+                                raise
+                            on_error(e)
+                            if not sync.is_open:
+                                # The phone answered with a sync FAIL, which ends the connection
+                                # (never a half-read reply to the next folder): carry on afresh.
+                                sync.close()
+                                sync = connect()
+                            continue
+                        stack.append(iter(children))
+                    else:
+                        yield entry
+            finally:
+                sync.close()
 
     def _list_folder(self, folder: str) -> list[RemoteEntry]:
         """Check and list one folder on a connection of its own."""
@@ -653,8 +680,14 @@ class AdbTransport:
             return self._list_with(sync, folder)
 
     @staticmethod
-    def _list_with(sync: Sync2, folder: str) -> list[RemoteEntry]:
-        """Check `folder` with LST2, then list it with LIS2 (read to the end) on `sync`."""
+    def _list_with(
+        sync: Sync2, folder: str, on_error: Callable[[RemoteError], None] | None = None
+    ) -> list[RemoteEntry]:
+        """Check `folder` with LST2, then list it with LIS2 (read to the end) on `sync`.
+
+        An entry the phone cannot look at raises `RemoteError`, or goes to `on_error` (and is
+        left out) when that is given.
+        """
         raw = _encode_path(folder)
         st = sync.stat(raw)
         if st.error == 0 and stat_mode.S_ISLNK(st.mode):
@@ -671,15 +704,22 @@ class AdbTransport:
             child = _join(folder, name.decode("utf-8", "surrogateescape"))
             if child_stat.error:
                 message = f"The phone cannot look at {child}: {_describe(child_stat.error)}."
-                raise RemoteError(message, child, errno=child_stat.error)
+                failure = RemoteError(message, child, errno=child_stat.error)
+                if on_error is None:
+                    raise failure
+                on_error(failure)
+                continue
             entries.append(_entry(child, child_stat))
         return entries
 
-    def open_read(self, path: str, offset: int = 0) -> BinaryIO:
+    def open_read(
+        self, path: str, offset: int = 0, *, entry: RemoteEntry | None = None
+    ) -> BinaryIO:
         if offset < 0:
             raise ValueError(f"offset must not be negative: {offset}")
         path = _norm(path)
-        entry = self.stat(path)
+        if entry is None:
+            entry = self.stat(path)
         if entry is None:
             raise RemoteError(f"Cannot read {path}: no such file.", path)
         if entry.is_dir or entry.is_symlink:

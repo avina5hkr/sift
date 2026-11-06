@@ -1,6 +1,7 @@
 """Behaviour every Transport must have: the fake always, a real phone with -m realphone."""
 
 import hashlib
+import itertools
 
 import pytest
 
@@ -8,6 +9,7 @@ from sift.device.adb_transport import AdbTransport
 from sift.device.fake_phone import (
     ODD_NAME_FILES,
     SYMLINK,
+    UNREADABLE_DIR,
     ZERO_BYTE_FILE,
 )
 from sift.device.fake_transport import FakeTransport
@@ -250,7 +252,10 @@ def test_odd_names_survive_walk_and_stat(transport: Transport) -> None:
 
 def test_info_fields_are_populated(transport: Transport) -> None:
     info = transport.info()
-    assert info.serial
+    assert info.serial or info.android_id  # at least one identifier, never both missing
+    assert info.serial != ""
+    assert info.android_id != ""
+    assert info.phone_time is None or info.phone_time > 1_500_000_000
     assert info.model
     assert info.android_version
     assert info.battery_pct is None or 0 <= info.battery_pct <= 100
@@ -263,3 +268,74 @@ def test_info_fields_are_populated(transport: Transport) -> None:
 def test_link_health_is_reported(transport: Transport) -> None:
     health = transport.link_health()
     assert health.kind in ("usb", "wifi")
+
+
+def test_identity_is_the_same_on_every_probe(transport: Transport) -> None:
+    first, second = transport.info(), transport.info()
+    assert (first.serial, first.android_id) == (second.serial, second.android_id)
+
+
+def test_sdcard_is_a_symlink_that_listings_follow(transport: Transport) -> None:
+    entry = transport.stat("/sdcard")
+    assert entry is not None
+    assert entry.is_symlink
+    assert not entry.is_dir
+    # ... yet listing it shows the storage folder's contents, and walking it starts inside.
+    assert any(e.is_dir for e in transport.list_dir("/sdcard"))
+    assert not any(e.path == "/sdcard" for e in itertools.islice(transport.walk("/sdcard"), 1))
+
+
+def test_walk_with_on_error_matches_a_plain_walk_where_nothing_fails(transport: Transport) -> None:
+    for root in roots_of(transport):
+        errors: list[RemoteError] = []
+        try:
+            plain = [e.path for e in transport.walk(root)]
+        except RemoteError:
+            continue  # this root has a folder the phone will not list; the next test covers it
+        assert [e.path for e in transport.walk(root, on_error=errors.append)] == plain
+        assert errors == []
+
+
+def test_walk_with_on_error_skips_an_unlistable_folder_instead_of_raising(
+    transport: Transport,
+) -> None:
+    errors: list[RemoteError] = []
+    # /sdcard/Android holds Android/data, which the phone refuses to list (the fake refuses
+    # loudly; a real phone may show it empty). Either way this walk must neither raise nor
+    # report anything but RemoteErrors that name a path.
+    root = "/sdcard/Android"
+    if isinstance(transport, AdbTransport):
+        root = realphone_sample_dir()
+    if transport.stat(root) is None:
+        pytest.skip("no Android folder on this phone")
+    entries = list(transport.walk(root, on_error=errors.append))
+    assert all(not e.is_dir for e in entries)
+    assert all(isinstance(e, RemoteError) and e.path for e in errors)
+    if isinstance(transport, FakeTransport):
+        assert [e.path for e in errors] == [UNREADABLE_DIR]
+        with pytest.raises(RemoteError):
+            list(transport.walk(root))
+
+
+def test_walk_with_on_error_still_raises_for_a_missing_root(transport: Transport) -> None:
+    with pytest.raises(RemoteError) as info:
+        list(transport.walk(MISSING, on_error=lambda error: None))
+    assert info.value.path == MISSING
+
+
+def test_open_read_with_a_known_entry_returns_the_same_bytes(transport: Transport) -> None:
+    for entry in sample_files(transport, min_size=16, limit=3):
+        with transport.open_read(entry.path) as stream:
+            whole = stream.read()
+        with transport.open_read(entry.path, entry=entry) as stream:
+            assert stream.read() == whole
+        with transport.open_read(entry.path, 7, entry=entry) as stream:
+            assert stream.read() == whole[7:]
+
+
+def test_open_read_with_an_entry_for_a_folder_is_refused(transport: Transport) -> None:
+    root = roots_of(transport)[0]
+    folder = transport.stat(root)
+    assert folder is not None
+    with pytest.raises(RemoteError):
+        transport.open_read(root, entry=folder)

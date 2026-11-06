@@ -23,6 +23,7 @@ from sift.device.adb_manager import (
     AdbServerError,
     ConsentRequired,
 )
+from sift.device.session import WrongDevice
 from sift.device.transport import (
     DeviceDisconnected,
     DeviceTimeout,
@@ -38,6 +39,7 @@ from sift.services.plainwords import describe
 MAKERS: dict[str, Callable[[str], BaseException]] = {
     "DeviceDisconnected": DeviceDisconnected,
     "DeviceTimeout": DeviceTimeout,
+    "WrongDevice": WrongDevice,
     "FileChanged": lambda m: FileChanged(m, m),
     "RemoteError": lambda m: RemoteError(m, m),
     "RemoteError(ENOENT)": lambda m: RemoteError(m, m, errno=2),
@@ -100,6 +102,7 @@ def test_every_sift_error_type_has_its_own_sentence() -> None:
 def test_subclasses_get_their_own_sentence_not_their_parents() -> None:
     assert describe(FileChanged("x")) != describe(RemoteError("x"))
     assert describe(DeviceDisconnected("x")) != describe(TransportError("x"))
+    assert describe(WrongDevice("x")) != describe(TransportError("x"))
     assert describe(ConsentRequired("x")) != describe(AdbError("x"))
 
 

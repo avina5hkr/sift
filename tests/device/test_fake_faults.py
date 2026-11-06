@@ -195,9 +195,22 @@ def test_identity_override_changes_info_serial() -> None:
     assert plain.info().serial == phone2.serial
 
 
-def test_info_identity_falls_back_to_android_id() -> None:
+def test_info_without_a_serial_reports_the_android_id_alone() -> None:
     phone = FakePhone(serial="", android_id="0000fake000000aa")
-    assert FakeTransport(phone).info().serial == "0000fake000000aa"
+    info = FakeTransport(phone).info()
+    assert (info.serial, info.android_id) == (None, "0000fake000000aa")
+
+
+def test_identity_override_changes_both_identifiers() -> None:
+    transport, _, _ = make(FaultPlan(identity="SOMEONE-ELSE"))
+    plain, _, _ = make()
+    assert transport.info().android_id != plain.info().android_id
+
+
+def test_info_reports_the_phones_clock() -> None:
+    phone = FakePhone(time_offset_s=-90)
+    info = FakeTransport(phone, wall_clock=lambda: 1_700_000_000.4).info()
+    assert info.phone_time == 1_700_000_000 - 90
 
 
 def test_info_without_serial_or_android_id_raises() -> None:

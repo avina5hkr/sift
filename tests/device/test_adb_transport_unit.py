@@ -26,6 +26,7 @@ from sift.device.adb_transport import (
     plan_sha_batches,
     resume_allowance_s,
 )
+from sift.device.shell import INFO_SCRIPT
 from sift.device.transport import (
     DeviceDisconnected,
     DeviceTimeout,
@@ -64,6 +65,23 @@ class Phone:
         self.server = server
         server.exec_handler = self.run
         self.add_dir(b"/sdcard")
+        # What each probe of INFO_SCRIPT prints; a test changes one to change what info() sees.
+        self.probes: dict[str, bytes] = {
+            "model": b"Pretend Phone\n",
+            "release": b"16\n",
+            "serial": b"FAKESERIAL\n",
+            "android_id": b"0000fake000000aa\n",
+            "epoch": b"1700000123\n",
+            "df": (FIXTURES / "df_sdcard.txt").read_bytes(),
+            "wm": (FIXTURES / "wm_size_override.txt").read_bytes(),
+            "battery": (FIXTURES / "dumpsys_battery.txt").read_bytes(),
+        }
+
+    def info_output(self) -> bytes:
+        """What the phone's shell prints for INFO_SCRIPT."""
+        return b"".join(
+            b"\n@@sift:" + name.encode() + b"@@\n" + text for name, text in self.probes.items()
+        )
 
     def _link(self, path: bytes, stat: FakeStat) -> None:
         self.server.stats[path] = stat
@@ -89,17 +107,10 @@ class Phone:
     def run(self, command: bytes) -> Iterable[bytes]:
         text = command.decode("utf-8", "surrogateescape")
         words = shlex.split(text)
-        fixed = {
-            "getprop ro.serialno": b"FAKESERIAL\n",
-            "getprop ro.product.model": b"Pretend Phone\n",
-            "getprop ro.build.version.release": b"16\n",
-            "df /sdcard": (FIXTURES / "df_sdcard.txt").read_bytes(),
-            "wm size": (FIXTURES / "wm_size_override.txt").read_bytes(),
-            "dumpsys battery": (FIXTURES / "dumpsys_battery.txt").read_bytes(),
-            "true": b"",
-        }
-        if text in fixed:
-            return [fixed[text]]
+        if text == INFO_SCRIPT:
+            return [self.info_output()]
+        if text == "true":
+            return [b""]
         if words[:2] == ["tail", "-c"] and words[3] == "--" and words[5:] == ["2>/dev/null"]:
             data = self.server.files.get(words[4].encode("utf-8", "surrogateescape"), b"")
             return [data[int(words[2].lstrip("+")) - 1 :]]
@@ -299,6 +310,71 @@ def test_walk_fails_loudly_on_an_entry_the_phone_cannot_stat(
     assert info.value.errno == 13
 
 
+def _two_folders_and_a_file(phone: Phone) -> None:
+    phone.add_dir(b"/sdcard/A")
+    phone.add_file(b"/sdcard/A/1.jpg", b"1")
+    phone.add_dir(b"/sdcard/B")
+    phone.add_file(b"/sdcard/B/2.jpg", b"2")
+    phone.add_dir(b"/sdcard/C")
+    phone.add_file(b"/sdcard/C/3.jpg", b"3")
+
+
+def test_walk_on_error_skips_an_unlistable_subfolder(
+    transport: AdbTransport, phone: Phone, server: FakeAdbServer
+) -> None:
+    _two_folders_and_a_file(phone)
+    server.stats[b"/sdcard/B"] = FakeStat.missing(error=13)
+    errors: list[RemoteError] = []
+    entries = list(transport.walk("/sdcard", on_error=errors.append))
+    assert [e.path for e in entries] == ["/sdcard/A/1.jpg", "/sdcard/C/3.jpg"]
+    assert [(e.path, e.errno) for e in errors] == [("/sdcard/B", 13)]
+    with pytest.raises(RemoteError):  # without on_error it still raises (M1 behaviour)
+        list(transport.walk("/sdcard"))
+
+
+def test_walk_on_error_skips_an_entry_the_phone_cannot_stat(
+    transport: AdbTransport, phone: Phone, server: FakeAdbServer
+) -> None:
+    phone.add_file(b"/sdcard/good.txt", b"g")
+    server.dirs[b"/sdcard"].append((b"bad", FakeStat.missing(error=13)))
+    errors: list[RemoteError] = []
+    entries = list(transport.walk("/sdcard", on_error=errors.append))
+    assert [e.path for e in entries] == ["/sdcard/good.txt"]
+    assert [(e.path, e.errno) for e in errors] == [("/sdcard/bad", 13)]
+
+
+def test_walk_on_error_does_not_hide_an_unlistable_root(transport: AdbTransport) -> None:
+    errors: list[RemoteError] = []
+    with pytest.raises(RemoteError) as info:
+        list(transport.walk("/sdcard/nope", on_error=errors.append))
+    assert info.value.path == "/sdcard/nope"
+    assert errors == []
+
+
+def test_walk_carries_on_on_a_fresh_connection_after_a_sync_fail(
+    transport: AdbTransport, phone: Phone, server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sync FAIL ends the connection; the walk must not read the next folder from a dead one."""
+    _two_folders_and_a_file(phone)
+    real = AdbTransport._list_with
+
+    def flaky(
+        sync: Any, folder: str, on_error: Callable[[RemoteError], None] | None = None
+    ) -> list[RemoteEntry]:
+        if folder == "/sdcard/B":
+            sync.close()
+            raise RemoteError("the phone refused", folder)
+        return real(sync, folder, on_error)
+
+    monkeypatch.setattr(AdbTransport, "_list_with", staticmethod(flaky))
+    errors: list[RemoteError] = []
+    entries = list(transport.walk("/sdcard", on_error=errors.append))
+    assert [e.path for e in entries] == ["/sdcard/A/1.jpg", "/sdcard/C/3.jpg"]
+    assert [e.path for e in errors] == ["/sdcard/B"]
+    assert server.requests.count(b"sync:") == 2
+    assert transport._slots._value == FAST.max_connections  # type: ignore[attr-defined]
+
+
 def test_remote_errors_carry_the_phones_errno(
     transport: AdbTransport, server: FakeAdbServer
 ) -> None:
@@ -353,6 +429,45 @@ def test_open_read_from_an_offset_uses_one_based_tail(
     [request] = [r for r in server.requests if r.startswith(b"exec:")]
     assert request.startswith(b"exec:tail -c +%d -- " % (offset + 1))
     assert b"RECV" not in server.commands
+
+
+def test_open_read_with_an_entry_sends_no_lst2(
+    transport: AdbTransport, phone: Phone, server: FakeAdbServer
+) -> None:
+    phone.add_file(b"/sdcard/known.bin", b"0123456789")
+    entry = RemoteEntry("/sdcard/known.bin", 10, 1_700_000_000, is_dir=False, is_symlink=False)
+    with transport.open_read("/sdcard/known.bin", entry=entry) as stream:
+        assert stream.read() == b"0123456789"
+    with transport.open_read("/sdcard/known.bin", 4, entry=entry) as stream:
+        assert stream.read() == b"456789"
+    assert b"LST2" not in server.commands
+    with transport.open_read("/sdcard/known.bin") as stream:  # without one it still looks first
+        stream.read()
+    assert server.commands.count(b"LST2") == 1
+
+
+def test_open_read_with_an_entry_that_is_a_folder_or_link_is_refused(
+    transport: AdbTransport, phone: Phone, server: FakeAdbServer
+) -> None:
+    phone.add_dir(b"/sdcard/dir")
+    folder = RemoteEntry("/sdcard/dir", 0, 0, is_dir=True, is_symlink=False)
+    link = RemoteEntry("/sdcard/dir", 0, 0, is_dir=False, is_symlink=True)
+    for entry in (folder, link):
+        with pytest.raises(RemoteError):
+            transport.open_read("/sdcard/dir", entry=entry)
+    assert not [r for r in server.requests if r in (b"sync:",)]
+
+
+def test_open_read_with_an_entry_larger_than_the_file_reports_a_change(
+    transport: AdbTransport, phone: Phone
+) -> None:
+    phone.add_file(b"/sdcard/shrunk.bin", b"abc")
+    entry = RemoteEntry("/sdcard/shrunk.bin", 10, 0, is_dir=False, is_symlink=False)
+    with (
+        transport.open_read("/sdcard/shrunk.bin", entry=entry) as stream,
+        pytest.raises(FileChanged),
+    ):
+        stream.read()
 
 
 def test_open_read_of_a_non_utf8_name(transport: AdbTransport, phone: Phone) -> None:
@@ -756,6 +871,8 @@ def test_a_request_over_the_limit_is_refused_before_it_is_sent(
 def test_info_reads_props_storage_screen_and_battery(transport: AdbTransport) -> None:
     info = transport.info()
     assert info.serial == "FAKESERIAL"
+    assert info.android_id == "0000fake000000aa"
+    assert info.phone_time == 1_700_000_123
     assert info.model == "Pretend Phone"
     assert info.android_version == "16"
     assert info.battery_pct == 87
@@ -763,51 +880,64 @@ def test_info_reads_props_storage_screen_and_battery(transport: AdbTransport) ->
     assert info.screen_sizes == ((1080, 2400), (720, 1600))
 
 
-def test_info_tolerates_unreadable_extras(transport: AdbTransport, server: FakeAdbServer) -> None:
-    def props_only(command: bytes) -> list[bytes]:
-        if command.startswith(b"getprop"):
-            return [b"value\n"]
-        return [b"error: not available\n"]
+def test_info_is_one_exec_and_nothing_else(transport: AdbTransport, server: FakeAdbServer) -> None:
+    transport.info()
+    services = [r for r in server.requests if not r.startswith(b"host:")]
+    assert [r for r in services if r.startswith(b"exec:")] == [b"exec:" + INFO_SCRIPT.encode()]
+    assert not any(r.startswith(b"sync:") for r in services)
+    assert len(server.requests) <= 2  # the transport-id lookup (if any) and the one exec
 
-    server.exec_handler = props_only
+
+def test_info_script_only_reads() -> None:
+    assert not any(
+        word in INFO_SCRIPT for word in ("rm ", "mv ", "> /", ">>", " cp ", "pm ", "am ")
+    )
+    for command in ("getprop", "settings get", "date +%s", "df ", "wm size", "dumpsys battery"):
+        assert command in INFO_SCRIPT
+
+
+def test_info_tolerates_unreadable_extras(transport: AdbTransport, phone: Phone) -> None:
+    for name in ("android_id", "epoch", "df", "wm", "battery"):
+        phone.probes[name] = b"error: not available\n"
     info = transport.info()
     assert (info.battery_pct, info.free_bytes, info.total_bytes) == (None, None, None)
+    assert (info.android_id, info.phone_time) == (None, None)
+    assert info.serial == "FAKESERIAL"
     assert info.screen_sizes == ()
 
 
-def _without_serialno(phone: Phone, android_id: bytes) -> list[bytes]:
-    seen: list[bytes] = []
-
-    def run(command: bytes) -> Iterable[bytes]:
-        seen.append(command)
-        if command == b"getprop ro.serialno":
-            return [b"\n"]
-        if command == b"settings get secure android_id":
-            return [android_id]
-        return phone.run(command)
-
-    phone.server.exec_handler = run
-    return seen
+def test_info_survives_missing_sections(transport: AdbTransport, phone: Phone) -> None:
+    for name in ("android_id", "epoch", "df", "wm", "battery"):
+        del phone.probes[name]
+    info = transport.info()
+    assert (info.android_id, info.phone_time, info.free_bytes, info.battery_pct) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert info.screen_sizes == ()
 
 
-def test_info_identity_falls_back_to_android_id(transport: AdbTransport, phone: Phone) -> None:
-    seen = _without_serialno(phone, b"0000fake000000aa\n")
-    assert transport.info().serial == "0000fake000000aa"
-    assert b"settings get secure android_id" in seen
+def test_info_keeps_serial_and_android_id_apart(transport: AdbTransport, phone: Phone) -> None:
+    phone.probes["serial"] = b"\n"
+    info = transport.info()
+    assert info.serial is None
+    assert info.android_id == "0000fake000000aa"
 
 
-def test_info_reads_android_id_only_when_serialno_is_empty(
-    transport: AdbTransport, server: FakeAdbServer
-) -> None:
-    transport.info()
-    assert b"exec:settings get secure android_id" not in server.requests
+def test_info_with_only_a_serial_has_no_android_id(transport: AdbTransport, phone: Phone) -> None:
+    phone.probes["android_id"] = b"null\n"
+    info = transport.info()
+    assert (info.serial, info.android_id) == ("FAKESERIAL", None)
 
 
 @pytest.mark.parametrize("android_id", [b"\n", b"null\n"])
 def test_info_without_serial_or_android_id_raises(
     transport: AdbTransport, phone: Phone, android_id: bytes
 ) -> None:
-    _without_serialno(phone, android_id)
+    phone.probes["serial"] = b"\n"
+    phone.probes["android_id"] = android_id
     with pytest.raises(RemoteError, match="serial number"):
         transport.info()
 
@@ -919,6 +1049,18 @@ def test_resume_allowance_covers_the_bytes_tail_must_skip() -> None:
     assert resume_allowance_s(0, limits) == limits.read_stall_s
     assert resume_allowance_s(int(limits.read_stall_s * bps / 2), limits) == limits.read_stall_s
     assert resume_allowance_s(int(limits.read_stall_s * bps * 2), limits) == limits.read_stall_s * 2
+
+
+def test_resume_allowance_is_capped_at_600_s() -> None:
+    limits = Limits()
+    assert limits.resume_max_s == 600
+    far = int(limits.sha_assumed_bps * 100_000)  # would be 100,000 s uncapped
+    assert resume_allowance_s(far, limits) == 600
+    just_under = int(limits.sha_assumed_bps * 599)
+    assert resume_allowance_s(just_under, limits) == pytest.approx(599)
+    # the cap never shortens the normal stall limit
+    patient = Limits(read_stall_s=900)
+    assert resume_allowance_s(far, patient) == 900
 
 
 def _clocked_stream(chunks: Iterator[bytes], now: list[float], aborted: threading.Event):

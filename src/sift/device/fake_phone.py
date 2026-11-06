@@ -40,8 +40,28 @@ def lazy_bytes(path: str, size: int, offset: int, length: int) -> bytes:
     return (pattern * repeats)[start : start + count]
 
 
+# On a real phone /sdcard is a symlink (lstat says so; reads and listings follow it) to the
+# storage folder. Files are kept under the /sdcard spelling; the storage spelling is an alias.
+SDCARD = "/sdcard"
+STORAGE_ROOT = "/storage/emulated/0"
+_STORAGE_PARENTS = ("/storage", "/storage/emulated")
+
+
 def _norm(path: str) -> str:
     return path if path == "/" else path.rstrip("/")
+
+
+def _canon(path: str) -> str:
+    """The key a path is stored under: the storage spelling becomes the /sdcard one."""
+    path = _norm(path)
+    if path == STORAGE_ROOT or path.startswith(STORAGE_ROOT + "/"):
+        return SDCARD + path[len(STORAGE_ROOT) :]
+    return path
+
+
+def derived_android_id(serial: str | None) -> str:
+    """A stable pretend Android ID for a phone with this serial (16 hex digits)."""
+    return hashlib.sha1(f"fake:{serial}".encode()).hexdigest()[:16]
 
 
 class FakePhone:
@@ -50,10 +70,11 @@ class FakePhone:
     def __init__(
         self,
         *,
-        serial: str = "FAKE-0001",
+        serial: str | None = "FAKE-0001",
         model: str = "TestPhone",
         android_version: str = "14",
-        android_id: str = "0000fake00000001",
+        android_id: str | None = None,
+        time_offset_s: int = 0,
         battery_pct: int | None = 80,
         total_bytes: int | None = 128 * 10**9,
         screen_sizes: tuple[tuple[int, int], ...] = ((1080, 2400),),
@@ -61,18 +82,29 @@ class FakePhone:
         self.serial = serial
         self.model = model
         self.android_version = android_version
+        # Unless given, the Android ID follows the serial, so two phones with different serials
+        # are different phones under either identifier.
+        if android_id is None:
+            android_id = derived_android_id(serial)
         self.android_id = android_id
+        self.time_offset_s = time_offset_s  # the phone's clock minus the Mac's, in seconds
         self.battery_pct = battery_pct
         self.total_bytes = total_bytes
         self.screen_sizes = screen_sizes
         self.files: dict[str, FakeFile] = {}  # files and symlinks by absolute path
         self.unreadable: set[str] = set()  # folders that exist but cannot be listed
-        self._dirs: dict[str, set[str]] = {"/": set()}  # folder path -> child paths
+        # folder path -> child paths. /sdcard holds the storage; it is a symlink in `entry()`.
+        self._dirs: dict[str, set[str]] = {
+            "/": {SDCARD, "/storage"},
+            "/storage": {"/storage/emulated"},
+            "/storage/emulated": {STORAGE_ROOT},
+            SDCARD: set(),
+        }
 
     # -- building -------------------------------------------------------------------------
 
     def add_dir(self, path: str, *, readable: bool = True) -> None:
-        path = _norm(path)
+        path = _canon(path)
         if path in self.files:
             raise ValueError(f"{path} is a file")
         self._ensure_dir(path)
@@ -83,7 +115,7 @@ class FakePhone:
         self, path: str, data: bytes | None = None, *, size: int | None = None, mtime: int = 0
     ) -> None:
         """Add a file. With `data=None` and a `size`, its bytes are generated lazily."""
-        path = _norm(path)
+        path = _canon(path)
         if data is not None and size is not None and size != len(data):
             raise ValueError(f"size {size} does not match len(data) {len(data)}")
         if data is None and size is None:
@@ -92,22 +124,22 @@ class FakePhone:
         self._put(path, file)
 
     def add_symlink(self, path: str, target: str, *, mtime: int = 0) -> None:
-        path = _norm(path)
+        path = _canon(path)
         size = len(target.encode("utf-8", "surrogateescape"))
         self._put(path, FakeFile(data=None, size=size, mtime=mtime, is_symlink_to=target))
 
     def modify(self, path: str, data: bytes, mtime: int) -> None:
-        file = self.files[_norm(path)]
+        file = self.files[_canon(path)]
         file.data = data
         file.size = len(data)
         file.mtime = mtime
 
     def remove(self, path: str) -> None:
         """Remove a file or symlink, or a folder with everything in it."""
-        path = _norm(path)
+        path = _canon(path)
         if path in self.files:
             del self.files[path]
-        elif path in self._dirs and path != "/":
+        elif path in self._dirs and path not in ("/", SDCARD, *_STORAGE_PARENTS, STORAGE_ROOT):
             for child in list(self._dirs[path]):
                 self.remove(child)
             del self._dirs[path]
@@ -136,39 +168,62 @@ class FakePhone:
 
     # -- reading --------------------------------------------------------------------------
 
+    def is_unreadable(self, path: str) -> bool:
+        """True for a folder that exists but cannot be listed."""
+        return _canon(path) in self.unreadable
+
     def is_dir(self, path: str) -> bool:
-        return _norm(path) in self._dirs
+        """True for a folder, or a symlink to one (/sdcard): what a listing would follow."""
+        return _canon(path) in self._dirs
 
     def entry(self, path: str) -> RemoteEntry | None:
-        """The entry for `path`; a symlink is reported as itself (lstat)."""
-        path = _norm(path)
+        """The entry for `path`; a symlink (including /sdcard) is reported as itself (lstat)."""
+        shown = _norm(path)
+        path = _canon(shown)
+        if shown == SDCARD:
+            return RemoteEntry(
+                path=shown,
+                size=len(STORAGE_ROOT),
+                mtime=0,
+                is_dir=False,
+                is_symlink=True,
+            )
         file = self.files.get(path)
         if file is not None:
             return RemoteEntry(
-                path=path,
+                path=shown,
                 size=file.size,
                 mtime=file.mtime,
                 is_dir=False,
                 is_symlink=file.is_symlink_to is not None,
             )
         if path in self._dirs:
-            return RemoteEntry(path=path, size=0, mtime=0, is_dir=True, is_symlink=False)
+            return RemoteEntry(path=shown, size=0, mtime=0, is_dir=True, is_symlink=False)
         return None
 
     def children(self, path: str) -> list[RemoteEntry]:
-        """Entries one level below a folder, sorted by path. Ignores `unreadable`."""
-        entries = [self.entry(child) for child in sorted(self._dirs[_norm(path)])]
+        """Entries one level below a folder, sorted by path. Ignores `unreadable`.
+
+        Entries are named under the spelling of `path` that was asked for.
+        """
+        shown = _norm(path)
+        canon = _canon(shown)
+        entries = [
+            self.entry(shown + child[len(canon) :] if canon != shown else child)
+            for child in sorted(self._dirs[canon])
+        ]
         return [e for e in entries if e is not None]
 
     def read_range(self, path: str, offset: int, length: int) -> bytes:
         """Up to `length` bytes of a file from `offset`, clamped to its size."""
-        file = self.files[_norm(path)]
+        path = _canon(path)
+        file = self.files[path]
         if file.data is not None:
             return file.data[offset : offset + length]
-        return lazy_bytes(_norm(path), file.size, offset, length)
+        return lazy_bytes(path, file.size, offset, length)
 
     def sha256_of(self, path: str) -> str:
-        path = _norm(path)
+        path = _canon(path)
         file = self.files[path]
         digest = hashlib.sha256()
         if file.data is not None:

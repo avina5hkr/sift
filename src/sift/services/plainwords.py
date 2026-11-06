@@ -21,6 +21,7 @@ from sift.device.adb_manager import (
     AdbServerError,
     ConsentRequired,
 )
+from sift.device.session import WrongDevice
 from sift.device.transport import (
     DeviceDisconnected,
     DeviceTimeout,
@@ -39,6 +40,7 @@ FILE_PROBLEM = "The phone reported a problem with a file or folder."
 _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (DeviceDisconnected, "The phone disconnected."),
     (DeviceTimeout, "The phone stopped responding."),
+    (WrongDevice, "A different phone is connected, not the one Sift backs up."),
     (FileChanged, "A file changed while it was being copied."),
     (RemoteError, FILE_PROBLEM),  # refined by errno in describe()
     (TransportError, "Sift could not talk to the phone properly."),
