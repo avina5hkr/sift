@@ -69,6 +69,17 @@ def normalize_set_path(value: str, *, allow_root: bool = False) -> str:
     return value
 
 
+def phone_path_key(path: str) -> str:
+    """The form phone paths are compared in: storage spelling as /sdcard, no trailing slash, folded.
+
+    Shared storage on the phone is case-insensitive, so every comparison of phone paths (sets,
+    excludes, skip names, origin) goes through this.
+    """
+    if path == STORAGE_ROOT or path.startswith(STORAGE_PREFIX):
+        path = SDCARD_PREFIX[:-1] + path[len(STORAGE_ROOT) :]
+    return path.rstrip("/").casefold() if path != "/" else path
+
+
 def _is_inside(path: str, root: str) -> bool:
     """True when `path` is below `root` by whole segments (so /sdcard/DCIMX is not inside DCIM).
 
@@ -252,6 +263,39 @@ def _is_absolute_mac_path(value: str) -> bool:
     return os.path.isabs(os.path.expanduser(value))
 
 
+DEFAULT_SKIP_HIDDEN_FOLDERS: tuple[str, ...] = (
+    ".thumbnails",
+    ".trash",
+    ".shared",
+    ".cache",
+    ".Statuses",
+    ".Links",
+    ".wamocache",
+    ".Wamo",
+)
+DEFAULT_SKIP_NAME_PREFIXES: tuple[str, ...] = (".pending-", ".trashed-", ".tmp", ".nomedia")
+DEFAULT_SKIP_NAME_SUFFIXES: tuple[str, ...] = (".tmp", ".crdownload", ".part")
+
+
+def _name_problem(name: str) -> str | None:
+    """Why `name` cannot be a skip name (a folder name, or the start or end of a file name)."""
+    if not name.strip():
+        return "is blank"
+    if "/" in name:
+        return "is a path; give a name without a slash"
+    if "\0" in name:
+        return "has an invalid character"
+    return None
+
+
+def _check_names(values: list[str]) -> list[str]:
+    for item in values:
+        problem = _name_problem(item)
+        if problem:
+            raise ValueError(f"{item!r} {problem}")
+    return values
+
+
 class BackupConfig(_Section):
     mac_root: str = "~/PhoneBackup"
     ssd_volume_uuid: str = ""
@@ -261,6 +305,12 @@ class BackupConfig(_Section):
     max_retries: Count = 3
     include_whatsapp_db: bool = False
     include_whatsapp_statuses: bool = False
+    skip_hidden_folders: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_SKIP_HIDDEN_FOLDERS)
+    )
+    skip_name_prefixes: list[str] = Field(default_factory=lambda: list(DEFAULT_SKIP_NAME_PREFIXES))
+    skip_name_suffixes: list[str] = Field(default_factory=lambda: list(DEFAULT_SKIP_NAME_SUFFIXES))
+    skip_zero_byte: bool = True
     required_destinations: Annotated[list[Literal["mac", "ssd"]], Field(min_length=1)] = Field(
         default_factory=_both_destinations
     )
@@ -276,6 +326,11 @@ class BackupConfig(_Section):
         if not _is_absolute_mac_path(v):
             raise ValueError("must be a full folder path (starting with / or ~)")
         return v
+
+    @field_validator("skip_hidden_folders", "skip_name_prefixes", "skip_name_suffixes")
+    @classmethod
+    def _skip_names(cls, v: list[str]) -> list[str]:
+        return _check_names(v)
 
     @field_validator("sets")
     @classmethod
@@ -581,7 +636,30 @@ def _load_sets(raw: object, warnings: list[str]) -> list[BackupSet]:
     return sets
 
 
+_SKIP_NAME_LISTS = ("skip_hidden_folders", "skip_name_prefixes", "skip_name_suffixes")
+
+
+def _clean_names(raw: object, where: str, warnings: list[str]) -> object:
+    """Drop each unusable entry of a skip-name list with its own warning, keep the rest."""
+    if not isinstance(raw, list):
+        return raw
+    kept: list[Any] = []
+    for item in raw:
+        problem = _name_problem(item) if isinstance(item, str) else None
+        if problem:
+            warnings.append(f'{where}: "{item}" {problem}; dropped')
+        else:
+            kept.append(item)
+    return kept
+
+
 def _load_backup(table: dict[str, Any], warnings: list[str]) -> BackupConfig:
+    for list_key in _SKIP_NAME_LISTS:
+        if list_key in table:
+            table = {
+                **table,
+                list_key: _clean_names(table[list_key], f"backup.{list_key}", warnings),
+            }
     mac_root = table.get("mac_root")
     if isinstance(mac_root, str) and not _is_absolute_mac_path(mac_root):
         warnings.append(
