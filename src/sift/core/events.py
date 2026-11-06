@@ -43,6 +43,10 @@ def _dumps(data: dict[str, Any]) -> str:
     return json.dumps(data, separators=(",", ":"), allow_nan=False)
 
 
+class BusClosed(Exception):
+    """The bus was closed (the app is shutting down); no more events will come."""
+
+
 class Subscription:
     """One consumer's bounded buffer. Drop-oldest on overflow; `dropped` counts the losses.
 
@@ -61,6 +65,18 @@ class Subscription:
         self._wake_pending = False
         self._event = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._closed = False
+
+    def _wake(self) -> None:
+        if self._loop is not None:
+            # RuntimeError: the consumer's loop is closed, nobody is left to wake.
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(self._event.set)
+
+    def _close(self) -> None:
+        with self._lock:
+            self._closed = True
+        self._wake()
 
     def _push(self, event: Event) -> None:
         with self._lock:
@@ -69,16 +85,17 @@ class Subscription:
             self._buffer.append(event)
             wake = not self._wake_pending
             self._wake_pending = True
-        if wake and self._loop is not None:
-            # RuntimeError: the consumer's loop is closed, nobody is left to wake.
-            with contextlib.suppress(RuntimeError):
-                self._loop.call_soon_threadsafe(self._event.set)
+        if wake:
+            self._wake()
 
     async def get(self) -> Event:
+        """The next event; raises `BusClosed` once the bus is closed and the buffer is drained."""
         while True:
             with self._lock:
                 if self._buffer:
                     return self._buffer.popleft()
+                if self._closed:
+                    raise BusClosed
                 self._wake_pending = False
                 self._event.clear()
             await self._event.wait()
@@ -89,6 +106,19 @@ class EventBus:
         self._lock = threading.Lock()
         self._subscriptions: list[Subscription] = []
         self._next_id = 1
+        self._closed = False
+
+    def close(self) -> None:
+        """End every subscription (now and later): their `get` raises `BusClosed` once drained.
+
+        Called at shutdown so open event streams finish on their own instead of being cancelled.
+        Idempotent; callable from any thread.
+        """
+        with self._lock:
+            self._closed = True
+            subs = list(self._subscriptions)
+        for sub in subs:
+            sub._close()
 
     def publish(self, name: str, data: dict[str, Any]) -> None:
         """Deliver to every subscriber. Callable from any thread; never blocks.
@@ -110,6 +140,8 @@ class EventBus:
         sub._loop = asyncio.get_running_loop()
         with self._lock:
             self._subscriptions.append(sub)
+            if self._closed:
+                sub._closed = True
         try:
             yield sub
         finally:

@@ -14,6 +14,7 @@ from sift.core.db import (
     DatabaseTooNewError,
     MigrationError,
 )
+from sift.core.events import BusClosed
 from sift.core.instance import AlreadyRunningError
 from sift.device.adb_manager import (
     AdbDownloadError,
@@ -55,6 +56,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (AdbError, "There is a problem with adb."),
     (AdbPortBusy, "Another program is using adb's port and is not answering."),
     (AlreadyRunningError, "Sift is already running."),
+    (BusClosed, "Sift is closing."),
     (DatabaseCorruptError, "Sift's database is damaged."),
     (DatabaseTooNewError, "Sift's data was written by a newer version of Sift."),
     (DatabaseBusyError, "Sift's database is busy. Try again in a moment."),

@@ -145,3 +145,30 @@ async def test_payload_is_frozen_at_publish(bus: EventBus) -> None:
         ev = await asyncio.wait_for(sub.get(), 1)
     assert ev.text == '{"files":[1,2]}'
     assert ev.data == {"files": [1, 2]}
+
+
+@pytest.mark.anyio
+async def test_close_ends_subscriptions_after_draining(bus: EventBus) -> None:
+    from sift.core.events import BusClosed
+
+    async with bus.subscribe() as sub:
+        bus.publish("a", {})
+        waiter = asyncio.ensure_future(sub.get())
+        first = await waiter
+        assert first.name == "a"
+        pending = asyncio.ensure_future(sub.get())
+        await asyncio.sleep(0)
+        bus.close()
+        with pytest.raises(BusClosed):
+            await asyncio.wait_for(pending, 1)
+    bus.close()  # idempotent
+
+
+@pytest.mark.anyio
+async def test_subscribe_after_close_is_closed(bus: EventBus) -> None:
+    from sift.core.events import BusClosed
+
+    bus.close()
+    async with bus.subscribe() as sub:
+        with pytest.raises(BusClosed):
+            await asyncio.wait_for(sub.get(), 1)

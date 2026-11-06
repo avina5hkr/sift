@@ -60,3 +60,16 @@ def test_events_requires_token(client):
 
 def test_format_sse_sends_the_stored_text():
     assert format_sse(Event(id=3, name="x", text='{"a":1}')) == 'id: 3\nevent: x\ndata: {"a":1}\n\n'
+
+
+@pytest.mark.anyio
+async def test_stream_ends_when_the_bus_closes(bus):
+    async def connected():
+        return False
+
+    agen = sse_stream(bus, connected, version="0.1.0", heartbeat_s=30)
+    await anext(agen)
+    bus.close()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(agen), 1)
+    assert bus.subscriber_count == 0

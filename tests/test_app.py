@@ -474,3 +474,37 @@ def test_main_frees_the_socket_through_shutdown(
         main(["--no-window"])
     assert "socket" in steps
     assert steps.index("socket") < steps.index("db")  # added early, so it runs late
+
+
+def test_stop_with_an_open_event_stream_is_quick_and_logs_no_error(
+    paths: AppPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    import threading as _threading
+
+    sock = bind_socket(0)
+    ctx = build_context(paths, token="t0k", port=sock.getsockname()[1], web_dist=None)
+    handle = start_server(ctx, sock)
+    opened = _threading.Event()
+
+    def listen() -> None:
+        try:
+            with httpx.stream("GET", f"{handle.url}/api/events?token=t0k", timeout=10) as s:
+                for line in s.iter_lines():
+                    if line == "event: hello":
+                        opened.set()
+        except httpx.HTTPError:
+            pass
+
+    client = _threading.Thread(target=listen, daemon=True)
+    client.start()
+    try:
+        assert opened.wait(5)
+        caplog.set_level(logging.WARNING)
+        started = time.monotonic()
+        handle.stop()
+        assert time.monotonic() - started < 1.5  # no 2 s graceful-shutdown timeout
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    finally:
+        handle.stop()
+        ctx.db.close()
+        client.join(5)

@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from sift.core.events import Event, EventBus
+from sift.core.events import BusClosed, Event, EventBus
 
 
 def format_sse(event: Event) -> str:
@@ -20,13 +20,15 @@ async def sse_stream(
 
     Subscribes before the first yield, so nothing published after the client sees `hello` is
     lost. The subscription lives inside this generator, so `aclose()`, cancellation or a
-    detected disconnect always unsubscribes.
+    detected disconnect always unsubscribes. When the bus closes (shutdown), the stream ends.
     """
     async with bus.subscribe() as sub:
         yield format_sse(Event.of(0, "hello", {"version": version}))
         while True:
             try:
                 event = await asyncio.wait_for(sub.get(), heartbeat_s)
+            except BusClosed:
+                return
             except TimeoutError:
                 if await is_disconnected():
                     return

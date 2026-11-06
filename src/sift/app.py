@@ -109,6 +109,7 @@ class ServerHandle:
     thread: threading.Thread
     sock: socket.socket
     _forwarder: logging.Handler
+    _bus: EventBus | None = None
     _stopped: bool = field(default=False, init=False)
 
     def stop(self) -> None:
@@ -120,6 +121,12 @@ class ServerHandle:
         if self._stopped:
             return
         self._stopped = True
+        if self._bus is not None:
+            # End open event streams first, so uvicorn's graceful shutdown has nothing to cancel.
+            try:
+                self._bus.close()
+            except Exception:
+                _log.exception("Could not close the event bus")
         self.server.should_exit = True
         parts: list[tuple[str, Callable[[], object]]] = [
             ("wait for the server thread", lambda: self.thread.join(_STOP_TIMEOUT_S)),
@@ -152,7 +159,7 @@ def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [sock]}, name="sift-server", daemon=True
     )
-    handle = ServerHandle(f"http://{_HOST}:{port}", server, thread, sock, forwarder)
+    handle = ServerHandle(f"http://{_HOST}:{port}", server, thread, sock, forwarder, ctx.bus)
     thread.start()
     deadline = time.monotonic() + _START_TIMEOUT_S
     while not server.started:

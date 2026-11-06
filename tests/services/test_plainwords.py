@@ -16,6 +16,7 @@ from sift.core.db import (
     DatabaseTooNewError,
     MigrationError,
 )
+from sift.core.events import BusClosed
 from sift.core.instance import AlreadyRunningError
 from sift.device.adb_manager import (
     AdbDownloadError,
@@ -56,6 +57,7 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "AdbError": AdbError,
     "AdbPortBusy": AdbPortBusy,
     "AlreadyRunningError": AlreadyRunningError,
+    "BusClosed": BusClosed,
     "DatabaseCorruptError": DatabaseCorruptError,
     "DatabaseTooNewError": DatabaseTooNewError,
     "DatabaseBusyError": DatabaseBusyError,
