@@ -144,6 +144,11 @@ def _hash_uncached(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_of_file(path: Path) -> str:
+    """The SHA-256 (hex) of a file, read with the cache off (`F_NOCACHE`). Never writes."""
+    return _hash_uncached(path)
+
+
 class StagedFile:
     """One copy in progress; a context manager. See the module docstring."""
 
@@ -175,6 +180,16 @@ class StagedFile:
     def sha256(self) -> str:
         """The SHA-256 (hex) of the bytes written so far."""
         return self._digest.hexdigest()
+
+    @property
+    def size(self) -> int:
+        """How many bytes were written so far."""
+        return self._size
+
+    @property
+    def part_path(self) -> Path:
+        """The `.part` file, for reading what was written (an EXIF date, say) before commit."""
+        return self._part
 
     def write(self, chunk: bytes) -> None:
         fd = self._open_fd()

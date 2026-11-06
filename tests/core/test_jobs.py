@@ -1006,3 +1006,59 @@ def test_on_phone_does_not_swallow_other_errors_and_stop_ends_the_wait(ctx: AppC
     jobs2.stop(job_id)
     snap = finished(jobs2, job_id)
     assert snap.stopped and len(calls) == 1
+
+
+# -- waiting for something else (the owner's confirmation) -----------------------------------------
+
+
+def test_wait_until_returns_once_the_condition_holds(ctx: AppContext) -> None:
+    flag = threading.Event()
+    results: list[bool] = []
+
+    def runner(control: JobControl) -> None:
+        control.set_state(JobState.awaiting_confirmation)
+        results.append(control.wait_until(flag.is_set))
+
+    jobs = manager(ctx, runner)
+    job_id = jobs.start_backup(["camera"])
+    wait_until(lambda: state_of(jobs, job_id).state is JobState.awaiting_confirmation)
+    flag.set()
+    assert finished(jobs, job_id).state is JobState.done
+    assert results == [True]
+
+
+def test_wait_until_gives_up_after_its_timeout(ctx: AppContext) -> None:
+    results: list[bool] = []
+    jobs = manager(ctx, lambda c: results.append(c.wait_until(lambda: False, timeout_s=0.05)))
+    assert finished(jobs, jobs.start_backup(["camera"])).state is JobState.done
+    assert results == [False]
+
+
+def test_stop_ends_a_wait_until(ctx: AppContext) -> None:
+    calls: list[int] = []
+
+    def never() -> bool:
+        calls.append(1)
+        return False
+
+    jobs = manager(ctx, lambda c: c.wait_until(never))
+    job_id = jobs.start_backup(["camera"])
+    wait_until(lambda: len(calls) >= 2)
+    jobs.stop(job_id)
+    snap = finished(jobs, job_id)
+    assert snap.state is JobState.done and snap.stopped
+
+
+def test_pause_requested_is_visible_to_the_runner(ctx: AppContext) -> None:
+    driver = Driver()
+    jobs = manager(ctx, driver.runner)
+    job_id = jobs.start_backup(["camera"])
+    seen: list[bool] = []
+    driver.do(lambda c: seen.append(c.pause_requested))
+    jobs.pause(job_id)
+    driver.do(lambda c: seen.append(c.pause_requested))
+    jobs.resume(job_id)
+    driver.do(lambda c: seen.append(c.pause_requested))
+    driver.end()
+    assert finished(jobs, job_id).state is JobState.done
+    assert seen == [False, True, False]

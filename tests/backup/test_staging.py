@@ -515,3 +515,15 @@ def test_sweep_staging_removes_only_parts(staging_dir: Path) -> None:
 
 def test_sweep_of_a_missing_staging_folder_is_zero(tmp_path: Path) -> None:
     assert sweep_staging(tmp_path / "nope") == 0
+
+
+def test_stage_exposes_its_size_and_part_for_reading_before_commit(
+    staging_dir: Path, final_dir: Path
+) -> None:
+    with StagedFile(staging_dir, expected_size=5) as staged:
+        staged.write(b"hello")
+        assert staged.size == 5
+        assert staged.part_path.parent == staging_dir
+        assert staged.part_path.read_bytes() == b"hello"
+        staged.commit(final_dir / "f", mtime=1)
+    assert staging.sha256_of_file(final_dir / "f") == sha256(b"hello").hexdigest()

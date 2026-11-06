@@ -10,7 +10,7 @@ from collections.abc import Iterator
 
 from sift.core.context import AppContext
 from sift.device.fake_phone import build_fake_phone
-from sift.device.fake_transport import FakeTransport
+from sift.device.fake_transport import FakeTransport, FaultPlan
 from sift.device.track_devices import DeviceEventSource, Snapshot
 from sift.device.tracker import DeviceTracker
 
@@ -40,17 +40,21 @@ class FakeDeviceEvents:
 
 
 def fake_tracker(
-    ctx: AppContext, *, announce_after_s: float = FAKE_ANNOUNCE_AFTER_S
+    ctx: AppContext,
+    *,
+    announce_after_s: float = FAKE_ANNOUNCE_AFTER_S,
+    faults: FaultPlan | None = None,
 ) -> DeviceTracker:
     """A tracker wired to `FakeTransport(build_fake_phone())` and the scripted device list.
 
     The first device list announces the phone after `announce_after_s`; a list reopened later
-    (Retry) announces it at once, so the chip does not flicker.
+    (Retry) announces it at once, so the chip does not flicker. `faults` is the transport's
+    fault plan (the quit-path tests slow its reads down).
     """
     phone = build_fake_phone()
     assert phone.serial is not None
     serial = phone.serial
-    transport = FakeTransport(phone)
+    transport = FakeTransport(phone, faults)
     delay = [announce_after_s]
 
     def events() -> DeviceEventSource:

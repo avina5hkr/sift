@@ -13,6 +13,8 @@ its job only through `JobControl`:
 - `retry(fn, retry_on=...)`: 2 s, 5 s, 15 s between attempts, then the error comes back to the
   runner (which marks the file failed). Twenty such failures in a row pause the job at the next
   checkpoint, with the device error in plain words.
+- `wait_until(done)`: a stop-aware wait for something outside the job (the owner confirming a
+  scan the mass-disappearance guard stopped).
 
 Locking: each job has one `cond` that guards its fields. It is held only for in-memory changes,
 never across a database write or a bus publish: a change takes a numbered snapshot under the
@@ -266,6 +268,15 @@ class JobControl:
     def stop_requested(self) -> bool:
         return self._job.stop_requested or self._job.abandoned
 
+    @property
+    def pause_requested(self) -> bool:
+        """True once a pause was asked for (by the owner, or after 20 failures in a row).
+
+        A runner with several files in flight lets them finish before calling `checkpoint()`,
+        so the pause lands on a file boundary for every one of them.
+        """
+        return self._job.pause_requested
+
     def checkpoint(self) -> None:
         """Call between files. Blocks while paused; raises `JobStopped` once stopped."""
         self._guard()
@@ -387,6 +398,30 @@ class JobControl:
                 with job.cond:
                     mgr._raise_if_stopped(job)
                     job.cond.wait(mgr._poll_s)
+
+    def wait_until(self, done: Callable[[], bool], *, timeout_s: float | None = None) -> bool:
+        """Block until `done()` is true, asking it again every phone-poll interval.
+
+        For waits on something outside the job, such as the owner confirming a scan the
+        mass-disappearance guard stopped. Returns True once `done()` is true, or False when
+        `timeout_s` passes first (so it doubles as a sleep that stop cuts short). Raises
+        `JobStopped` as soon as the job is stopped. `done` is called with no lock held; it may
+        read the database but must not write it.
+        """
+        self._guard()
+        mgr, job = self._mgr, self._job
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        while True:
+            with job.cond:
+                mgr._raise_if_stopped(job)
+            if done():
+                return True
+            with job.cond:
+                mgr._raise_if_stopped(job)
+                wait = mgr._poll_s if deadline is None else min(mgr._poll_s, _left(deadline))
+                if wait <= 0:
+                    return False
+                job.cond.wait(wait)
 
     def retry[T](self, fn: Callable[[], T], *, retry_on: tuple[type[BaseException], ...]) -> T:
         """Call `fn`; on an error in `retry_on` wait 2 s, 5 s, then 15 s and try again.

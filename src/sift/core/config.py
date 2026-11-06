@@ -252,6 +252,9 @@ class PhoneConfig(_Section):
     parallel_reads_usb: Parallel = 3
     parallel_reads_wifi: Parallel = 2
     heartbeat_seconds: Positive = 10
+    # What the first-run reader test measured, in bytes per second (0: not measured yet). The
+    # backup's time estimate uses it until the running job has measured its own speed.
+    measured_read_bps: Count = 0
 
 
 def _both_destinations() -> list[Literal["mac", "ssd"]]:

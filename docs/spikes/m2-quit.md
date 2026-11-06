@@ -32,3 +32,12 @@ The first hand-run Cmd-Q logged an ERROR from uvicorn: the window's open event s
 cancelled it with a traceback. Shutdown now closes the event bus first, which ends every open
 stream on its own, so the server stops at once and logs nothing. After the fix, every route
 above ran with no ERROR lines in the log.
+
+## Since Task 12
+
+The automated quit-path tests (`tests/test_quit_paths.py`, SIGTERM and SIGINT) now drive the
+real backup job against the fake phone (`--no-window --fake-phone`, plus the test hooks
+`SIFT_TEST_AUTO_BACKUP=1` and `SIFT_TEST_SLOW_PHONE=1`), and also check that the job ended
+stopped mid-way rather than abandoned, with no file left `pulling`. The window routes above keep
+the slow test job: the window always looks at the real phone, so the real job cannot run there
+against the fake one.
