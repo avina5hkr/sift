@@ -317,6 +317,27 @@ def test_walk_with_on_error_skips_an_unlistable_folder_instead_of_raising(
             list(transport.walk(root))
 
 
+def test_walk_prune_leaves_out_a_folder_and_everything_in_it(transport: Transport) -> None:
+    for root in roots_of(transport):
+        plain = [e.path for e in transport.walk(root, on_error=lambda error: None)]
+        subfolders = [e.path for e in transport.list_dir(root) if e.is_dir and not e.is_symlink]
+        if not subfolders:
+            continue
+        cut = subfolders[0]
+        offered: list[str] = []
+
+        def prune(path: str, cut: str = cut, offered: list[str] = offered) -> bool:
+            offered.append(path)
+            return path == cut
+
+        pruned = [e.path for e in transport.walk(root, on_error=lambda error: None, prune=prune)]
+        assert pruned == [p for p in plain if not p.startswith(cut + "/")]
+        assert cut in offered and root not in offered
+        assert not any(p.startswith(cut + "/") for p in offered)  # nothing inside was listed
+        return
+    pytest.skip("no folder with a subfolder to prune")
+
+
 def test_walk_with_on_error_still_raises_for_a_missing_root(transport: Transport) -> None:
     with pytest.raises(RemoteError) as info:
         list(transport.walk(MISSING, on_error=lambda error: None))

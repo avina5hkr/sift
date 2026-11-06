@@ -19,8 +19,9 @@ How each call reaches the phone:
   apart; `link_health` runs `true`.
 - `open_read(path, offset, entry=...)` trusts a `RemoteEntry` the caller already has and skips
   the extra LST2.
-- `walk(root, on_error)` hands an unlistable subfolder (or an entry the phone cannot look at)
-  to `on_error` and carries on, instead of raising.
+- `walk(root, on_error, prune)` hands an unlistable subfolder (or an entry the phone cannot
+  look at) to `on_error` and carries on, instead of raising; a subfolder `prune` returns True
+  for is not listed at all.
 
 Connections to the adb server come from `adbwire.open_service`, which only ever connects (no
 adb program is run and no server is started or restarted here); the service requests on them
@@ -620,7 +621,10 @@ class AdbTransport:
         return self._list_folder(_norm(path))
 
     def walk(
-        self, root: str, on_error: Callable[[RemoteError], None] | None = None
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None = None,
+        prune: Callable[[str], bool] | None = None,
     ) -> Iterator[RemoteEntry]:
         """Depth-first files and symlinks under `root`; symlinks are never descended into.
 
@@ -633,11 +637,15 @@ class AdbTransport:
 
         With `on_error`, a subfolder that cannot be listed, or an entry the phone cannot look
         at, is passed to it as a `RemoteError` and skipped. `root` must always be listable.
+        With `prune`, a subfolder it returns True for is never checked or listed.
         """
-        return self._walk(_norm(root), on_error)
+        return self._walk(_norm(root), on_error, prune)
 
     def _walk(
-        self, root: str, on_error: Callable[[RemoteError], None] | None
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None,
+        prune: Callable[[str], bool] | None,
     ) -> Iterator[RemoteEntry]:
         _encode_path(root)  # refuse a bad root before connecting
         features = self._phone_features()
@@ -655,6 +663,8 @@ class AdbTransport:
                     if entry is None:
                         stack.pop()
                     elif entry.is_dir:
+                        if prune is not None and prune(entry.path):
+                            continue
                         try:
                             children = self._list_with(sync, entry.path, on_error)
                         except RemoteError as e:

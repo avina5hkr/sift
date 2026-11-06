@@ -5,19 +5,26 @@
 applies the staged result or, when the mass-disappearance guard trips, leaves `phone_file`
 alone and waits for the owner: `confirm_scan` applies the staged result, `discard_scan` drops it.
 
-- **Settle rule:** a file whose mtime is within `settle_s` of the phone's clock is still being
-  written, so it is left for the next scan. New or changed files with an mtime within the last
-  hour are looked at again after one shared wait and left if they changed meanwhile. Older
-  files are not looked at twice: a file being written has a recent mtime.
+- **Settle rule:** a file whose mtime is within `settle_s` of the phone's clock (either side)
+  is still being written, so it is left for the next scan. New or changed files with an mtime
+  within the last hour, or further in the future, are looked at again after one shared wait
+  and left if they changed meanwhile. Older files are not looked at twice: a file being
+  written has a recent mtime.
 - **Unreadable folders:** a folder (or entry) the phone will not list is skipped with a plain
-  warning. Rows under it keep their `present` value, because their state is unknown.
-- **Seen but left out:** a known file that is settling, or now skipped by a rule, is staged with
-  its row's current size and mtime, so applying keeps the row as it was and present.
+  warning. Rows under it keep their `present` value, because their state is unknown. (A
+  refused folder inside a pruned one is never listed, so it does not warn.)
+- **Skip rules:** a folder a rule skips is pruned (never listed). Rows under it, and rows of
+  files a rule now skips, keep their `present` value, as for an unreadable folder, so adding a
+  rule never trips the guard; such a row still `discovered` becomes `skipped`. A `skipped` row
+  seen again and no longer skipped by a rule goes back to `discovered`.
+- **Settling:** a known file that is settling is staged with its row's current size and mtime,
+  so applying keeps the row as it was and present.
 - **Rows are never deleted.** A row not seen gets `present = 0`, and only when it lies in a
-  scanned root, outside any folder the scan could not read.
-- **Guard:** (a) a folder or a scanned set that had files at the last applied scan and now has
-  none, or (b) a scanned set that lost more than a fifth of its files. A set or folder with no
-  history (its first scan) cannot trip it.
+  scanned root, outside any folder the scan could not read or a rule pruned.
+- **Guard:** (a) a folder or a set that had files at the last applied scan and now has none, or
+  (b) a set that lost more than a fifth of its files. A set's loss is the rows going from
+  present to absent, by the set they are tagged with now, so files moving into a new narrower
+  set are not lost. A set or folder with no history (its first scan) cannot trip it.
 """
 
 import json
@@ -92,6 +99,7 @@ class _Listing:
     skipped_by_rule: int = 0
     warnings: list[str] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)  # phone paths whose rows are kept
+    pruned: list[str] = field(default_factory=list)  # folders skipped by a rule, not listed
     _visited: set[str] = field(default_factory=set)
 
     def cannot_read(self, path: str) -> None:
@@ -116,6 +124,12 @@ def _list_roots(transport: Transport, roots: Sequence[ScanRoot], rules: SkipRule
             ) is not None or folder_skipped(_parent(folder))
             skipped_folders[folder] = known
         return known
+
+    def prune(folder: str) -> bool:
+        if is_skipped(folder, is_dir=True, size=0, rules=rules) is None:
+            return False
+        seen.pruned.append(folder)
+        return True
 
     def take(entry: RemoteEntry) -> None:
         if entry.is_dir or entry.is_symlink or entry.path in seen._visited:
@@ -142,7 +156,7 @@ def _list_roots(transport: Transport, roots: Sequence[ScanRoot], rules: SkipRule
             if root.shallow:
                 entries = transport.list_dir(root.path)
             else:
-                entries = transport.walk(root.path, on_error=on_error)
+                entries = transport.walk(root.path, on_error=on_error, prune=prune)
             for entry in entries:
                 take(entry)
         except RemoteError:
@@ -241,11 +255,9 @@ def scan(
         counts.bytes_needed += entry.size
         staged.append((entry.path, entry.size, entry.mtime, set_name))
 
-    for path, set_name in listing.left_out.items():
-        hold(path, set_name)
     recheck: list[tuple[RemoteEntry, str]] = []
     for path, (entry, set_name) in listing.files.items():
-        if entry.mtime >= phone_now - settle_s:
+        if phone_now - settle_s <= entry.mtime <= phone_now + settle_s:
             counts.settling += 1
             hold(path, set_name)
         elif known.get(path) == (entry.size, entry.mtime):
@@ -271,6 +283,8 @@ def scan(
     stats = {
         "roots": [[r.path, r.set_name, r.shallow, list(r.excludes)] for r in roots],
         "unreadable": listing.unreadable,
+        "pruned": listing.pruned,
+        "rule_skipped": [p for p in listing.left_out if p in known],
         "counts": {**counts.__dict__, "skipped_by_rule": listing.skipped_by_rule},
     }
     with db.tx() as conn:
@@ -328,22 +342,28 @@ class _Plan:
 
     scan_id: int
     device_id: int
-    sets: list[str]
     staged: list[tuple[str, int, int, str]]  # (path, size, mtime, set)
     to_absent: list[int]  # phone_file ids that get present = 0
-    sets_before: Counter[str]
-    sets_after: Counter[str]
+    to_skip: list[int]  # 'discovered' rows a skip rule now leaves out: they become 'skipped'
+    sets_before: Counter[str]  # present rows per set, as tagged now
+    sets_lost: Counter[str]  # rows going from present to absent, per set as tagged now
     folders_after: dict[str, Counter[str]]  # folder key -> set -> present files
     folder_names: dict[str, str]  # folder key -> the folder's path as the phone spells it
 
 
+def _under(key: str, folders: Sequence[str]) -> bool:
+    return any(key == f or key.startswith(f + "/") for f in folders)
+
+
 def _plan(conn: Connection, scan_id: int) -> _Plan:
-    device_id, sets_json, stats_json = conn.execute(
-        "SELECT device_id, sets, stats FROM scan WHERE id = ?", (scan_id,)
+    device_id, stats_json = conn.execute(
+        "SELECT device_id, stats FROM scan WHERE id = ?", (scan_id,)
     ).fetchone()
     stats = json.loads(stats_json)
     roots = [ScanRoot(p, s, bool(sh), tuple(ex)) for p, s, sh, ex in stats["roots"]]
     unread = [phone_path_key(u) for u in stats["unreadable"]]
+    pruned = [phone_path_key(f) for f in stats["pruned"]]
+    rule_skipped = set(stats["rule_skipped"])
     staged = [
         (r[0], int(r[1]), int(r[2]), str(r[3]))
         for r in conn.execute(
@@ -352,55 +372,65 @@ def _plan(conn: Connection, scan_id: int) -> _Plan:
     ]
     staged_paths = {s[0] for s in staged}
     sets_before: Counter[str] = Counter()
-    sets_after: Counter[str] = Counter()
+    sets_lost: Counter[str] = Counter()
     folders_after: dict[str, Counter[str]] = {}
     folder_names: dict[str, str] = {}
     to_absent: list[int] = []
+    to_skip: list[int] = []
 
     def count(path: str, set_name: str | None) -> None:
-        folder = _parent(path)
-        key = phone_path_key(folder)
-        folder_names.setdefault(key, folder)
         if set_name is not None:
-            sets_after[set_name] += 1
-            folders_after.setdefault(key, Counter())[set_name] += 1
+            folders_after.setdefault(phone_path_key(_parent(path)), Counter())[set_name] += 1
 
-    for row_id, path, set_name in conn.execute(
-        "SELECT id, remote_path, set_name FROM phone_file WHERE device_id = ? AND present = 1",
+    for row_id, path, set_name, is_present, state in conn.execute(
+        "SELECT id, remote_path, set_name, present, state FROM phone_file WHERE device_id = ?",
         (device_id,),
     ):
-        folder_names.setdefault(phone_path_key(_parent(path)), _parent(path))
-        if set_name is not None:
-            sets_before[set_name] += 1
+        if is_present:
+            folder_names.setdefault(phone_path_key(_parent(path)), _parent(path))
+            if set_name is not None:
+                sets_before[set_name] += 1
         if path in staged_paths:
             continue
         key = phone_path_key(path)
-        kept = any(key == u or key.startswith(u + "/") for u in unread)
-        if not kept and claiming_roots(path, roots):
+        left_out = path in rule_skipped or _under(key, pruned)
+        if left_out and state == "discovered":
+            to_skip.append(row_id)
+        if not is_present:
+            continue
+        if not left_out and not _under(key, unread) and claiming_roots(path, roots):
             to_absent.append(row_id)
+            if set_name is not None:
+                sets_lost[set_name] += 1
         else:
             count(path, set_name)
     for path, _size, _mtime, set_name in staged:
+        folder_names.setdefault(phone_path_key(_parent(path)), _parent(path))
         count(path, set_name)
     return _Plan(
         scan_id,
         device_id,
-        json.loads(sets_json),
         staged,
         to_absent,
+        to_skip,
         sets_before,
-        sets_after,
+        sets_lost,
         folders_after,
         folder_names,
     )
 
 
 def _guard(conn: Connection, plan: _Plan) -> list[Disappearance]:
+    """(a) a set or folder that had files and now has none; (b) a set losing over a fifth.
+
+    A set's loss is the rows that go from present to absent, by the set they are tagged with
+    now, so files moving to another set (a new, narrower set, say) are not a loss.
+    """
     gone: list[Disappearance] = []
-    for set_name in plan.sets:
-        before, now = plan.sets_before[set_name], plan.sets_after[set_name]
-        if before >= 1 and (now == 0 or (before - now) * 5 > before):
-            gone.append(Disappearance("set", set_name, before, now))
+    for set_name in sorted(plan.sets_before):
+        before, lost = plan.sets_before[set_name], plan.sets_lost[set_name]
+        if before >= 1 and (lost == before or lost * 5 > before):
+            gone.append(Disappearance("set", set_name, before, before - lost))
     for folder, before in conn.execute(
         "SELECT folder, present_files FROM folder_count WHERE device_id = ? ORDER BY folder",
         (plan.device_id,),
@@ -425,7 +455,7 @@ def _apply(conn: Connection, plan: _Plan, now: int) -> None:
             "present, last_scan_id, set_name) VALUES (?, ?, ?, ?, ?, 'discovered', 1, ?, ?) "
             "ON CONFLICT (device_id, remote_path) DO UPDATE SET "
             "state = CASE WHEN size != excluded.size OR mtime != excluded.mtime "
-            "  THEN 'discovered' ELSE state END, "
+            "  OR state = 'skipped' THEN 'discovered' ELSE state END, "
             "content_hash = CASE WHEN size != excluded.size OR mtime != excluded.mtime "
             "  THEN NULL ELSE content_hash END, "
             "attempts = CASE WHEN size != excluded.size OR mtime != excluded.mtime "
@@ -441,6 +471,10 @@ def _apply(conn: Connection, plan: _Plan, now: int) -> None:
         )
     for ids in _chunks(plan.to_absent):
         conn.executemany("UPDATE phone_file SET present = 0 WHERE id = ?", [(i,) for i in ids])
+    for ids in _chunks(plan.to_skip):
+        conn.executemany(
+            "UPDATE phone_file SET state = 'skipped' WHERE id = ?", [(i,) for i in ids]
+        )
     hit("scanner.applying")
     counted = set()
     for folder, by_set in plan.folders_after.items():

@@ -198,6 +198,7 @@ class FakeTransport:
         self.sleep = sleep
         self.stall_timeout_s = stall_timeout_s
         self.journal: list[JournalEntry] = []
+        self.listed: list[str] = []  # every folder a walk listed (or tried to), in order
         self.bytes_served = 0
         self.disconnect_spent = False
         self._offline_until: float | None = None
@@ -300,20 +301,32 @@ class FakeTransport:
             )
 
     def walk(
-        self, root: str, on_error: Callable[[RemoteError], None] | None = None
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None = None,
+        prune: Callable[[str], bool] | None = None,
     ) -> Iterator[RemoteEntry]:
         self._begin("walk", root)
-        return self._walk_held(root, on_error)
+        return self._walk_held(root, on_error, prune)
 
     def _walk_held(
-        self, root: str, on_error: Callable[[RemoteError], None] | None
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None,
+        prune: Callable[[str], bool] | None,
     ) -> Iterator[RemoteEntry]:
         with self._slot(self.limits.list_s):
-            yield from self._walk(root, on_error, is_root=True)
+            yield from self._walk(root, on_error, prune, is_root=True)
 
     def _walk(
-        self, root: str, on_error: Callable[[RemoteError], None] | None, *, is_root: bool = False
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None,
+        prune: Callable[[str], bool] | None,
+        *,
+        is_root: bool = False,
     ) -> Iterator[RemoteEntry]:
+        self.listed.append(root)
         try:
             entries = self._list(root, on_error)
         except RemoteError as e:
@@ -323,7 +336,9 @@ class FakeTransport:
             return
         for entry in entries:
             if entry.is_dir:
-                yield from self._walk(entry.path, on_error)
+                if prune is not None and prune(entry.path):
+                    continue
+                yield from self._walk(entry.path, on_error, prune)
             else:
                 yield entry
 

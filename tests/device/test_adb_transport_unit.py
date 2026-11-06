@@ -332,6 +332,25 @@ def test_walk_on_error_skips_an_unlistable_subfolder(
         list(transport.walk("/sdcard"))
 
 
+def test_walk_prune_never_checks_or_lists_a_pruned_folder(
+    transport: AdbTransport, phone: Phone, server: FakeAdbServer
+) -> None:
+    _two_folders_and_a_file(phone)
+    phone.add_dir(b"/sdcard/B/inner")
+    phone.add_file(b"/sdcard/B/inner/4.jpg", b"4")
+    offered: list[str] = []
+
+    def prune(path: str) -> bool:
+        offered.append(path)
+        return path == "/sdcard/B"
+
+    entries = list(transport.walk("/sdcard", prune=prune))
+    assert [e.path for e in entries] == ["/sdcard/A/1.jpg", "/sdcard/C/3.jpg"]
+    assert offered == ["/sdcard/A", "/sdcard/B", "/sdcard/C"]
+    assert server.commands.count(b"LIS2") == 3  # /sdcard, A and C; never B
+    assert server.commands.count(b"LST2") == 3
+
+
 def test_walk_on_error_skips_an_entry_the_phone_cannot_stat(
     transport: AdbTransport, phone: Phone, server: FakeAdbServer
 ) -> None:

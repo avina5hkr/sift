@@ -100,7 +100,10 @@ class Transport(Protocol):
         ...
 
     def walk(
-        self, root: str, on_error: Callable[[RemoteError], None] | None = None
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None = None,
+        prune: Callable[[str], bool] | None = None,
     ) -> Iterator[RemoteEntry]:
         """Depth-first listing of everything under `root`.
 
@@ -111,6 +114,8 @@ class Transport(Protocol):
         With `on_error`, that `RemoteError` is passed to it instead and the folder or entry is
         skipped; the walk goes on. `root` itself must be listable either way, or the walk
         raises. (Some phones list a folder they refuse to read as empty, without any error.)
+        With `prune`, each folder below `root` is offered to it (by path) before it is listed;
+        a folder it returns True for is not listed, and nothing in it is yielded or reported.
         """
         ...
 

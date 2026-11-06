@@ -3,8 +3,9 @@
 import json
 import os
 import shutil
+from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -188,9 +189,9 @@ def test_a_new_scan_starts_running_and_is_staged_before_anything_changes(rig: Ri
 
 
 def test_a_crash_while_applying_changes_nothing(rig: Rig) -> None:
-    rig.add("/sdcard/DCIM/Camera/a.jpg")
+    paths = fill(rig, "/sdcard/DCIM/Camera", 10)
     rig.scan()
-    rig.phone.remove("/sdcard/DCIM/Camera/a.jpg")
+    rig.phone.remove(paths[0])
     rig.add("/sdcard/DCIM/Camera/b.jpg")
     before = rows(rig.db)
 
@@ -269,6 +270,28 @@ def test_settle_rule_uses_the_phones_clock(rig: Rig) -> None:
     assert (result.settling, result.new_or_changed) == (1, 0)
 
 
+def test_a_file_dated_in_the_future_is_backed_up_after_a_stable_double_stat(rig: Rig) -> None:
+    rig.add("/sdcard/DCIM/Camera/future.jpg", 10, NOW + 3 * 86_400)
+
+    result = rig.scan()
+
+    assert (result.new_or_changed, result.settling) == (1, 0)
+    assert rig.sleeps == [2.0]
+    assert rig.ops("stat") == ["/sdcard/DCIM/Camera/future.jpg"]
+    assert present(rig.db) == {"/sdcard/DCIM/Camera/future.jpg"}
+
+
+def test_a_file_dated_in_the_future_that_grows_is_left_for_later(rig: Rig) -> None:
+    path = "/sdcard/DCIM/Camera/future.mp4"
+    rig.add(path, 10, NOW + 3 * 86_400)
+    rig.on_sleep = lambda: rig.phone.modify(path, b"x" * 20, mtime=NOW + 3 * 86_400)
+
+    result = rig.scan()
+
+    assert (result.new_or_changed, result.settling) == (0, 1)
+    assert rows(rig.db) == {}
+
+
 def test_a_known_file_that_is_settling_keeps_its_row_as_it_was(rig: Rig) -> None:
     rig.add("/sdcard/DCIM/Camera/a.jpg", 10, OLD)
     rig.add("/sdcard/DCIM/Camera/b.jpg", 10, OLD)
@@ -290,11 +313,46 @@ def test_skip_rules_leave_out_files_and_whole_folders(rig: Rig) -> None:
     rig.add("/sdcard/DCIM/Camera/upload.part")  # name suffix
     rig.add("/sdcard/DCIM/Camera/empty.jpg", 0)  # zero bytes
     rig.add("/sdcard/DCIM/.trashed-123/deep/inside.jpg")  # a folder whose name is a skip prefix
+    rig.phone.add_dir("/sdcard/DCIM/.thumbnails/refused", readable=False)
 
     result = rig.scan()
 
-    assert (result.new_or_changed, result.skipped_by_rule) == (1, 4)
+    # Skipped folders are pruned: never listed, so their files are not even counted, and a
+    # folder the phone refuses inside one is never asked for (no warning).
+    assert (result.new_or_changed, result.skipped_by_rule) == (1, 2)
+    assert result.warnings == ()
     assert set(rows(rig.db)) == {"/sdcard/DCIM/Camera/keep.jpg"}
+    assert rig.transport.listed == ["/sdcard/DCIM", "/sdcard/DCIM/Camera"]
+
+
+def test_a_new_skip_rule_keeps_known_rows_and_never_trips_the_guard(rig: Rig) -> None:
+    cache = fill(rig, "/sdcard/DCIM/Cache", 50)
+    camera = fill(rig, "/sdcard/DCIM/Camera", 10)
+    rig.add("/sdcard/DCIM/Camera/clip.tmp")
+    lenient = replace(RULES, name_suffixes=(".part",))
+    rig.scan(rules=lenient)
+    with rig.db.tx() as conn:  # the Camera ones were backed up; the Cache ones not yet
+        conn.execute("UPDATE phone_file SET state = 'done' WHERE remote_path LIKE '%/Camera/IMG%'")
+    stricter = replace(RULES, hidden_folders=("Cache",))
+    rig.phone.remove(cache[0])  # unknown to the scan: the folder is not listed any more
+
+    result = rig.scan(rules=stricter)
+
+    assert result.state == "applied" and result.disappearance == ()
+    assert present(rig.db) == {*cache, *camera, "/sdcard/DCIM/Camera/clip.tmp"}
+    states = {p: r[3] for p, r in rows(rig.db).items()}
+    assert {states[p] for p in cache} == {"skipped"}
+    assert states["/sdcard/DCIM/Camera/clip.tmp"] == "skipped"
+    assert {states[p] for p in camera} == {"done"}
+    assert folder_counts(rig.db)["/sdcard/dcim/cache"] == ("Camera", 50)
+
+    result = rig.scan(rules=lenient)  # the rules are back as they were
+
+    assert result.state == "applied"
+    states = {p: r[3] for p, r in rows(rig.db).items()}
+    assert {states[p] for p in cache[1:]} == {"discovered"}
+    assert states["/sdcard/DCIM/Camera/clip.tmp"] == "discovered"
+    assert present(rig.db) == {*cache[1:], *camera, "/sdcard/DCIM/Camera/clip.tmp"}
 
 
 def test_symlinks_are_not_backed_up(rig: Rig) -> None:
@@ -417,7 +475,7 @@ def test_mass_disappearance_stops_until_confirmed_when_a_folder_empties(rig: Rig
     assert rig.scan().state == "applied"  # an emptied folder, once confirmed, is no news
 
 
-@pytest.mark.parametrize(("removed", "guarded"), [(25, True), (15, False)])
+@pytest.mark.parametrize(("removed", "guarded"), [(25, True), (20, False), (15, False)])
 def test_mass_disappearance_stops_when_a_set_drops_more_than_a_fifth(
     rig: Rig, removed: int, guarded: bool
 ) -> None:
@@ -438,6 +496,21 @@ def test_mass_disappearance_stops_when_a_set_drops_more_than_a_fifth(
     else:
         assert result.state == "applied"
         assert present(rig.db) == set(paths[removed:])
+
+
+def test_a_new_narrower_set_is_not_a_disappearance(rig: Rig) -> None:
+    pictures = ScanRoot("/sdcard/Pictures", "Pictures", False, ())
+    shots = ScanRoot("/sdcard/Pictures/Screenshots", "Screenshots", False, ())
+    fill(rig, "/sdcard/Pictures/Saved", 70)
+    fill(rig, "/sdcard/Pictures/Screenshots", 30)
+    rig.scan((pictures,))
+
+    first = rig.scan((pictures, shots))
+    again = rig.scan((pictures, shots))
+
+    assert (first.state, first.disappearance) == ("applied", ())
+    assert (again.state, again.disappearance) == ("applied", ())
+    assert Counter(r[4] for r in rows(rig.db).values()) == {"Pictures": 70, "Screenshots": 30}
 
 
 def test_mass_disappearance_names_a_whole_set_that_empties(rig: Rig) -> None:
