@@ -44,6 +44,17 @@ class NullNotifier:
         return False
 
 
+def _inside_app_bundle() -> bool:
+    """True only when Sift runs as a .app with a bundle identifier (packaged)."""
+    try:
+        from Foundation import NSBundle  # type: ignore[import-not-found,import-untyped,unused-ignore]
+
+        bundle = NSBundle.mainBundle()
+        return bool(bundle.bundleIdentifier()) and str(bundle.bundlePath()).endswith(".app")
+    except Exception:
+        return False
+
+
 class MacNotifier:
     """UserNotifications via pyobjc. Every failure (not installed, not allowed) is a False."""
 
@@ -56,6 +67,10 @@ class MacNotifier:
             return False  # cannot tell: treat Sift as in front, so the toast shows
 
     def post(self, title: str, body: str) -> bool:
+        if not _inside_app_bundle():
+            # UNUserNotificationCenter aborts the whole process (an uncaught NSException, not a
+            # Python error) when Sift runs from source without a .app bundle.
+            return False
         try:
             from UserNotifications import (  # type: ignore[import-not-found,import-untyped,unused-ignore]
                 UNAuthorizationOptionAlert,

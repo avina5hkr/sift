@@ -72,3 +72,16 @@ def test_the_mac_notifier_without_the_bindings_says_it_could_not_post() -> None:
         import UserNotifications  # type: ignore[import-not-found,unused-ignore]  # noqa: F401
     except ImportError:
         assert MacNotifier().post("t", "b") is False
+
+
+def test_the_mac_notifier_outside_an_app_bundle_never_touches_the_center() -> None:
+    """From source (no .app) the notification center would abort the process; post must refuse."""
+    import subprocess
+    import sys
+
+    code = "from sift.services.notify import MacNotifier; print(MacNotifier().post('t', 'b'))"
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "False"

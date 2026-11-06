@@ -626,6 +626,20 @@ wheels = [
 ]
 
 [[package]]
+name = "pyobjc-framework-usernotifications"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cc/b6/7be965213588af173bba5cb9d93554f3c268fa0845057a5d40dcf0d8c957/pyobjc_framework_usernotifications-13.0.tar.gz", hash = "sha256:b2e7574043889c11bff555f2203c4e79bcff9a4de513afb6f1f1f13b0aca35e8", size = 33585, upload-time = "2026-10-30T10:47:50.311Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/e4/897dd1eaf5fddcadd887da7430aeaa5da3b3c190158de5a8ba4425def2d2/pyobjc_framework_usernotifications-13.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:583a3c618e6d175d25185e038a69067de943fabbaae2a2ad045c14f83f518c61", size = 10259, upload-time = "2026-10-30T10:45:03.727Z" },
+    { url = "https://files.pythonhosted.org/packages/41/37/90e23542f1c7ed12fc861db9ba1c86fc1f206f0cd969e39e95eef628d5a8/pyobjc_framework_usernotifications-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:ba516c53a5eadbd88d998b2ea692d2576ae5639776a3fecbf0743782780f9396", size = 10420, upload-time = "2026-10-30T10:45:04.802Z" },
+]
+
+[[package]]
 name = "pyobjc-framework-webkit"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -746,6 +760,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "pillow" },
     { name = "pydantic" },
+    { name = "pyobjc-framework-usernotifications", marker = "sys_platform == 'darwin'" },
     { name = "pywebview" },
     { name = "tomlkit" },
     { name = "uvicorn" },
@@ -767,6 +782,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.162.0" },
     { name = "pillow", specifier = ">=13.0.0" },
     { name = "pydantic", specifier = ">=2.14.3" },
+    { name = "pyobjc-framework-usernotifications", marker = "sys_platform == 'darwin'", specifier = "==13.0" },
     { name = "pywebview", specifier = ">=6.2.1" },
     { name = "tomlkit", specifier = ">=0.15.2" },
     { name = "uvicorn", specifier = ">=0.54.0" },
