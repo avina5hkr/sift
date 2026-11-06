@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from sift.backup.phonepaths import from_db
 from sift.core.config import save_config
 from sift.core.context import AppContext
 from sift.core.db import Database
@@ -40,7 +41,10 @@ def largest_files(db: Database, device_uuid: str, limit: int = LARGEST_FILES) ->
             "ORDER BY p.size DESC, p.remote_path LIMIT ?",
             (device_uuid, limit),
         ).fetchall()
-    return [RemoteEntry(r[0], int(r[1]), int(r[2]), is_dir=False, is_symlink=False) for r in rows]
+    return [
+        RemoteEntry(from_db(r[0]), int(r[1]), int(r[2]), is_dir=False, is_symlink=False)
+        for r in rows
+    ]
 
 
 def _round(

@@ -6,6 +6,7 @@ adb or the operating system, can never reach a screen through it (the detail goe
 The one value it reads is `RemoteError.errno`, to pick between fixed sentences.
 """
 
+from sift.backup.phonepaths import UnstorablePath
 from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.core.db import (
@@ -51,6 +52,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (ChecksumMismatch, "A copied file did not read back correctly, so it was discarded."),
     (TargetExists, "A file with that name already exists, so it was left alone."),
     (ScanNotPending, "That scan is no longer waiting for your confirmation."),
+    (UnstorablePath, "A file name on the phone cannot be saved, so that file was left out."),
     (ConsentRequired, "Sift needs your permission before it downloads adb."),
     (AdbDownloadError, "Sift could not download or install adb."),
     (AdbServerError, "Sift could not reach the adb server."),

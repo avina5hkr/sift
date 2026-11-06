@@ -66,6 +66,7 @@ from sift.backup.layout import (
     rel_key,
     resolve_collision,
 )
+from sift.backup.phonepaths import from_db, shown
 from sift.backup.staging import (
     ChecksumMismatch,
     IncompleteCopy,
@@ -233,7 +234,7 @@ def pending_items(db: Database, device_id: int, set_names: Sequence[str]) -> lis
             (device_id,),
         ).fetchall()
     items = [
-        PullItem(int(r[0]), r[1], int(r[2]), int(r[3]), r[4], r[5], r[6], r[7])
+        PullItem(int(r[0]), from_db(r[1]), int(r[2]), int(r[3]), r[4], r[5], r[6], r[7])
         for r in rows
         if r[4] is not None and str(r[4]).casefold() in wanted
     ]
@@ -310,7 +311,7 @@ class Puller:
                 stats.bytes_done + in_flight,
                 stats.files_total,
                 stats.bytes_total,
-                current=current,
+                current=None if current is None else shown(current),
             )
 
         def collect(timeout: float | None) -> None:
@@ -423,7 +424,7 @@ class Puller:
             return Outcome.disconnected
         except Exception as exc:
             if isinstance(exc, (*RETRYABLE, TargetExists)):
-                log.warning("Could not copy %r: %s", item.path, exc)
+                log.warning("Could not copy %r: %s", item.path, shown(str(exc)))
             else:  # not a failure the puller expects: keep the traceback
                 log.exception("Could not copy %r", item.path)
             self._set_state(item, "failed", error=self._describe(exc))
@@ -555,7 +556,12 @@ class Puller:
         with self._db.tx() as conn:
             conn.execute(
                 "UPDATE phone_file SET state = ?, error = ?, attempts = attempts + ? WHERE id = ?",
-                (state, error, 1 if count_attempt else 0, item.id),
+                (
+                    state,
+                    None if error is None else shown(error),
+                    1 if count_attempt else 0,
+                    item.id,
+                ),
             )
 
     def _save_rel_path(self, item: PullItem, rel_path: str) -> None:

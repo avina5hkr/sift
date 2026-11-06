@@ -15,6 +15,7 @@ import pytest
 
 from sift.backup import puller as puller_module
 from sift.backup.layout import mirror_rel_path
+from sift.backup.phonepaths import from_db, to_db
 from sift.backup.puller import (
     CRASH_POINT,
     Puller,
@@ -288,6 +289,40 @@ def test_a_duplicate_becomes_an_alias(rig: Rig) -> None:
     assert rows[f"{WA.path}/WhatsApp Images/IMG-forwarded.jpg"][:2] == ("done", sha(data))
     assert len(replicas(rig.db)) == 1
     assert_tree_matches_rows(rig)
+
+
+def test_a_name_that_is_not_utf8_is_backed_up_with_its_bytes(rig: Rig) -> None:
+    odd, data = "/sdcard/DCIM/Camera/caf\udce9.jpg", b"one raw byte in the name" * 9
+    lookalike = "/sdcard/DCIM/Camera/caf%E9.jpg"  # valid UTF-8, same name on the Mac
+    rig.add(odd, data, mtime=OLD + 1)  # newest: pulled first
+    rig.add(lookalike, b"another file")
+    stats = rig.pull()
+    assert (stats.copied, stats.failed) == (2, 0)
+    files = tree(rig.root)
+    assert files["Phone/DCIM/Camera/caf%E9.jpg"] == data
+    assert files[f"Phone/DCIM/Camera/caf%E9_{sha(b'another file')[:8]}.jpg"] == b"another file"
+    rows = phone_rows(rig.db)
+    assert {from_db(p) for p in rows} == {odd, lookalike}
+    assert {r[0] for r in rows.values()} == {"done"}
+    assert rows[to_db(odd)][1] == sha(data)
+    assert [e.path for e in rig.transport.journal if e.op == "open_read"] == [odd, lookalike]
+    assert_tree_matches_rows(rig)
+    # Scanned again: the same rows, nothing to copy.
+    rig.transport.journal.clear()
+    assert rig.pull().files_total == 0
+    assert len(phone_rows(rig.db)) == 2
+    assert [e for e in rig.transport.journal if e.op == "open_read"] == []
+
+
+def test_a_name_that_cannot_be_stored_is_left_out_with_a_warning(rig: Rig) -> None:
+    rig.add("/sdcard/DCIM/Camera/bad\x00name.jpg", b"bad")
+    rig.add("/sdcard/DCIM/Camera/fine.jpg", b"fine")
+    result = scan(rig.session, rig.db, ROOTS, RULES, clock=rig.clock, sleep=lambda _s: None)
+    assert result.state == "applied"
+    assert any("bad" in w and "left out" in w for w in result.warnings)
+    stats = rig.pull(scan_first=False)
+    assert (stats.copied, stats.failed) == (1, 0)
+    assert set(phone_rows(rig.db)) == {"/sdcard/DCIM/Camera/fine.jpg"}
 
 
 def test_moved_file_is_linked_without_a_transfer(rig: Rig) -> None:

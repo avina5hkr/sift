@@ -42,6 +42,7 @@ from hypothesis import HealthCheck, event, example, given, settings
 from hypothesis import strategies as st
 
 from sift import __version__
+from sift.backup.phonepaths import from_db
 from sift.backup.puller import CRASH_POINT, STAGING_DIR
 from sift.backup.recovery import recover
 from sift.backup.run import run_backup
@@ -146,7 +147,6 @@ def make_phone(spec: PhoneSpec) -> FakePhone:
     """A sample of `build_fake_phone(10, seed)` with small files, plus `spec.extras`."""
     phone = build_fake_phone(10, seed=spec.seed)
     phone.remove(BIG_VIDEO)
-    phone.remove(NON_UTF8_FILE)  # the scan cannot store such a name yet: see the xfail below
     rng = random.Random(spec.seed)
     for path in sorted(phone.files):
         file = phone.files[path]
@@ -176,7 +176,7 @@ NAME_CHARS = st.sampled_from(
     [
         *"aAzZ09 ._-~():\\*?",
         *("\u00e9", "\u0301", "\u00df", "\u0130", "\u202e", "\U0001f389"),
-        *("\n", "\x7f", "\t"),
+        *("\udce9", "\udc80", "\n", "\x7f", "\t"),
     ]
 )
 names = st.builds(
@@ -505,10 +505,12 @@ def expected_files(world: World) -> dict[str, str]:
 
 
 def rows_of(world: World, where: str = "1") -> list[tuple[str, str, str | None, str | None]]:
+    """(phone path, state, content hash, set) of the phone_file rows `where` selects."""
     with read_db(world) as conn:
-        return conn.execute(
+        rows = conn.execute(
             "SELECT remote_path, state, content_hash, set_name FROM phone_file WHERE " + where
         ).fetchall()
+    return [(from_db(r[0]), r[1], r[2], r[3]) for r in rows]
 
 
 def unrecorded_files(world: World) -> set[str]:
@@ -606,6 +608,7 @@ PINNED_SPEC = PhoneSpec(
         Extra("/sdcard/DCIM/Camera", "IMG_1.jpg", 0),
         Extra("/sdcard/DCIM/Camera", "img_1.JPG.", 1),
         Extra("/sdcard/Documents", "IMG_1.jpg", 0),
+        Extra("/sdcard/DCIM/Camera", "IMG_\udce9\udc80.jpg", None),  # not UTF-8
     ),
 )
 
@@ -763,12 +766,6 @@ def test_a_run_with_one_set_ticked_writes_rows_only_for_that_set(tmp_path: Path)
     one_set()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Known defect: the scan cannot store a phone path that is not valid UTF-8 "
-    "(SQLite text is UTF-8; the transport keeps such bytes as surrogates), so the job fails",
-)
 def test_a_file_name_that_is_not_utf8_is_backed_up(tmp_path: Path) -> None:
     phone = make_phone(PhoneSpec(seed=1, keep_pct=0))
     phone.add_file(NON_UTF8_FILE, b"non-utf8 name", mtime=OLD)
@@ -777,6 +774,7 @@ def test_a_file_name_that_is_not_utf8_is_backed_up(tmp_path: Path) -> None:
             result = life.backup()
         assert result.snapshot.state is JobState.done, result.snapshot.error
         assert_backed_up(world)
+        assert tree(world.root)["Phone/Download/caf%E9.jpg"] == b"non-utf8 name"
 
 
 # -- the same, with a real SIGKILL --------------------------------------------------------------
@@ -789,6 +787,7 @@ KILL_SPEC = PhoneSpec(
         Extra("/sdcard/Documents", "img_1.jpg", 0),
         Extra("/sdcard/DCIM/Camera", "a:b.jpg", 1),
         Extra("/sdcard/DCIM/Camera", "a_b.jpg", None),
+        Extra("/sdcard/DCIM/Camera", "caf\udce9.jpg", 2),
     ),
 )
 KILL_SETS = ("Camera", "Documents", "WhatsApp media", "Loose files")

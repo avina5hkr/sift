@@ -25,6 +25,9 @@ alone and waits for the owner: `confirm_scan` applies the staged result, `discar
   (b) a set that lost more than a fifth of its files. A set's loss is the rows going from
   present to absent, by the set they are tagged with now, so files moving into a new narrower
   set are not lost. A set or folder with no history (its first scan) cannot trip it.
+- **Names:** phone paths (and folder keys) go to and from the database through
+  `sift.backup.phonepaths`, so a name that is not valid UTF-8 is scanned like any other. A name
+  even that cannot store (a NUL in it) leaves that one file out, with a plain warning.
 """
 
 import json
@@ -40,6 +43,7 @@ from pathlib import Path
 from sqlite3 import Connection
 from typing import Literal
 
+from sift.backup.phonepaths import from_db, shown, storable, to_db
 from sift.backup.sets import ScanRoot, claiming_roots, set_for_path
 from sift.backup.skiprules import SkipRules, is_skipped
 from sift.core.clock import Clock, SystemClock
@@ -104,7 +108,7 @@ class _Listing:
 
     def cannot_read(self, path: str) -> None:
         self.unreadable.append(path)
-        warning = f"Could not read {path}; skipped."
+        warning = f"Could not read {shown(path)}; skipped."
         if warning not in self.warnings:
             self.warnings.append(warning)
 
@@ -142,6 +146,9 @@ def _list_roots(transport: Transport, roots: Sequence[ScanRoot], rules: SkipRule
         if rule is not None or folder_skipped(_parent(entry.path)):
             seen.skipped_by_rule += 1
             seen.left_out[entry.path] = set_name
+            return
+        if not storable(entry.path):  # a NUL in its name, say: this one file is left out
+            seen.warnings.append(f"The name of {shown(entry.path)!r} cannot be saved; left out.")
             return
         seen.files[entry.path] = (entry, set_name)
 
@@ -233,7 +240,7 @@ def scan(
         scan_id = int(cursor.lastrowid or 0)
     with db.read() as conn:
         known: dict[str, tuple[int, int]] = {
-            r[0]: (r[1], r[2])
+            from_db(r[0]): (r[1], r[2])
             for r in conn.execute(
                 "SELECT remote_path, size, mtime FROM phone_file WHERE device_id = ?",
                 (device_id,),
@@ -292,7 +299,10 @@ def scan(
             conn.executemany(
                 "INSERT INTO scan_entry (scan_id, path, size, mtime, set_name, folder) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                [(scan_id, p, s, m, n, phone_path_key(_parent(p))) for p, s, m, n in chunk],
+                [
+                    (scan_id, to_db(p), s, m, n, to_db(phone_path_key(_parent(p))))
+                    for p, s, m, n in chunk
+                ],
             )
         conn.execute(
             "UPDATE scan SET stats = ?, warnings = ? WHERE id = ?",
@@ -365,7 +375,7 @@ def _plan(conn: Connection, scan_id: int) -> _Plan:
     pruned = [phone_path_key(f) for f in stats["pruned"]]
     rule_skipped = set(stats["rule_skipped"])
     staged = [
-        (r[0], int(r[1]), int(r[2]), str(r[3]))
+        (from_db(r[0]), int(r[1]), int(r[2]), str(r[3]))
         for r in conn.execute(
             "SELECT path, size, mtime, set_name FROM scan_entry WHERE scan_id = ?", (scan_id,)
         )
@@ -382,10 +392,11 @@ def _plan(conn: Connection, scan_id: int) -> _Plan:
         if set_name is not None:
             folders_after.setdefault(phone_path_key(_parent(path)), Counter())[set_name] += 1
 
-    for row_id, path, set_name, is_present, state in conn.execute(
+    for row_id, stored, set_name, is_present, state in conn.execute(
         "SELECT id, remote_path, set_name, present, state FROM phone_file WHERE device_id = ?",
         (device_id,),
     ):
+        path = from_db(stored)
         if is_present:
             folder_names.setdefault(phone_path_key(_parent(path)), _parent(path))
             if set_name is not None:
@@ -431,13 +442,15 @@ def _guard(conn: Connection, plan: _Plan) -> list[Disappearance]:
         before, lost = plan.sets_before[set_name], plan.sets_lost[set_name]
         if before >= 1 and (lost == before or lost * 5 > before):
             gone.append(Disappearance("set", set_name, before, before - lost))
-    for folder, before in conn.execute(
+    for stored, before in conn.execute(
         "SELECT folder, present_files FROM folder_count WHERE device_id = ? ORDER BY folder",
         (plan.device_id,),
     ):
+        folder = from_db(stored)
         now = sum(plan.folders_after.get(folder, Counter()).values())
         if before >= 1 and now == 0:
-            gone.append(Disappearance("folder", plan.folder_names.get(folder, folder), before, 0))
+            name = shown(plan.folder_names.get(folder, folder))
+            gone.append(Disappearance("folder", name, before, 0))
     return gone
 
 
@@ -465,7 +478,15 @@ def _apply(conn: Connection, plan: _Plan, now: int) -> None:
             "size = excluded.size, mtime = excluded.mtime, origin = excluded.origin, "
             "set_name = excluded.set_name, present = 1, last_scan_id = excluded.last_scan_id",
             [
-                (plan.device_id, path, classify_origin(path), size, mtime, plan.scan_id, name)
+                (
+                    plan.device_id,
+                    to_db(path),
+                    classify_origin(path),
+                    size,
+                    mtime,
+                    plan.scan_id,
+                    name,
+                )
                 for path, size, mtime, name in chunk
             ],
         )
@@ -486,7 +507,7 @@ def _apply(conn: Connection, plan: _Plan, now: int) -> None:
             "scan_id = excluded.scan_id",
             (
                 plan.device_id,
-                folder,
+                to_db(folder),
                 by_set.most_common(1)[0][0],
                 sum(by_set.values()),
                 plan.scan_id,
@@ -498,7 +519,7 @@ def _apply(conn: Connection, plan: _Plan, now: int) -> None:
             "SELECT folder FROM folder_count WHERE device_id = ? AND present_files > 0",
             (plan.device_id,),
         )
-        if r[0] not in counted
+        if from_db(r[0]) not in counted
     ]
     for folder in emptied:
         conn.execute(
