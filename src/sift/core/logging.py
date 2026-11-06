@@ -71,7 +71,11 @@ def setup_logging(paths: AppPaths, bus: EventBus, level: str = "INFO") -> None:
     teardown_logging()  # calling twice must not duplicate lines
     paths.logs.mkdir(parents=True, exist_ok=True)
     file_handler = _SiftFileHandler(
-        paths.logs / LOG_FILE, maxBytes=_MAX_BYTES, backupCount=_BACKUPS, encoding="utf-8"
+        paths.logs / LOG_FILE,
+        maxBytes=_MAX_BYTES,
+        backupCount=_BACKUPS,
+        encoding="utf-8",
+        errors="backslashreplace",  # a phone name that is not UTF-8 is escaped, not an error
     )
     file_handler.setFormatter(_JsonFormatter())
     logger = logging.getLogger(_ROOT)
