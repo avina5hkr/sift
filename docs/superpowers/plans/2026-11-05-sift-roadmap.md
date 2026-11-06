@@ -195,3 +195,41 @@ Carry-over, by milestone (from the final review triage):
 - **M9:** argparse range check for `--port`; uvicorn double-logging; accurate bind-error messages.
 - **M10:** build from a runtime-only environment (PyInstaller via a `build` group); `--specpath build/`; `LSUIElement` via `info_plist`; crash dialog; prove the ML/image stack (onnxruntime, scikit-learn, numpy, pillow-heif, PyObjC Vision) and the bundled binaries.
 - **First push:** CI `trace: 'retain-on-failure'` for Playwright artefacts; `persist-credentials: false` on checkout.
+
+## 8. M1 outcome and carry-over (2026-11-06)
+
+M1 is complete on branch `m1-device-layer`. Ten tasks were each spec- and quality-reviewed, then a whole-branch review and one fix wave. Suites: 637 pytest (warnings are errors), 59 vitest, 4 Playwright e2e, ruff + mypy strict clean. A read-only real-phone run passed the contract suite (15 passed, 4 fake-only skips). Results: `docs/spikes/m1-device.md`.
+
+Decisions later milestones must respect:
+- adbutils is a socket factory only, behind `install_no_spawn_guard()` and pinned at 2.12.0. The device list and the server probe use raw sockets. Sift starts adb only when the port refuses connections, and never kills or restarts a server.
+- Sync v2 only: LST2 for stat (STA2 follows symlinks) and LIS2 for listing. A folder is stat'ed before it is listed, because LIS2 cannot tell missing or unreadable from empty.
+- `FileChanged` (a RemoteError) means a file changed during a read; `DeviceDisconnected` means the phone went away.
+- The first phone is stored only when it is the only non-emulator device. Emulators are ignored. Fake mode needs `SIFT_HOME`, and tests run with `SIFT_TRACKER=off`.
+- `Limits.sha_assumed_bps` is 40 MB/s (measured). The resume allowance is `offset / sha_assumed_bps`.
+
+Carry-over:
+- **M2 (start, must):**
+  - `StallGuardedStream._next_chunk` sets `_ended` before calling the short-end hook. Wrap the hook so any exception falls back to the plain short end, otherwise later reads could silently return nothing.
+  - A dropped stream that failed mid-read sits in a traceback reference cycle until GC; store a traceback-free error.
+  - Handle the concurrent double `close()` race.
+- **M2:**
+  - One `adbwire` module for recv-exact, host requests and hex lengths, replacing three copies. Cap the Sync2 FAIL and name lengths.
+  - Consider dropping adbutils altogether (owner's call).
+  - Fake `/sdcard` as a symlink.
+  - Scanner policy for per-entry lstat errors: skip with a visible warning instead of aborting the root.
+  - Fewer connections per `open_read`: reuse the stat entry, and one slot pool per phone shared with the tracker.
+  - Map exception text to plain words at the UI boundary.
+  - Store both `ro.serialno` and `android_id`, and match on either.
+  - Give `RemoteError` an errno.
+  - Give the fake a slot limit, so walks that hold slots are exercised.
+  - Merge `info()`'s probes into one exec.
+  - Cap or tune the resume allowance.
+  - A per-test e2e server.
+  - Wizard: choose or switch the stored phone, the adb download UI, and the `_sweep_leftovers` and `locate()` locking.
+- **M8:** fake `push`/`delete` validation (parent chain, unreadable folders, symlinks).
+- **M9 (Wi-Fi):**
+  - Stored-phone-first matching for `host:port` serials.
+  - A heartbeat, so a dead but still listed phone goes offline sooner.
+  - Poll `ioreg` every 2 to 3 s instead of every second.
+- **M10:** leave the adb binary bundled in adbutils out of the app.
+- **M12 (accessibility):** a keyboard-reachable USB 2 tooltip; consider making the phone chip a live region.

@@ -189,7 +189,8 @@ def main() -> int:
         ),
     )
 
-    # 4 / 3: >4 GiB RECV with hash, then tail TTFB at offsets 1, ~1 GB, >4 GiB
+    # 4 / 3: RECV of the largest file (> 2**31 bytes) with hash,
+    # then tail time-to-first-byte at offsets 1, ~1 GB and ~3.5 GB
     big = max(regular, key=lambda e: e.size)
     out("largest_file_GiB", round(big.size / 2**30, 2))
     if big.size > 2**31:
