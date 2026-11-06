@@ -17,11 +17,11 @@ How each call reaches the phone:
   `dumpsys battery`, `true`, and `settings get secure android_id` when the phone reports no
   `ro.serialno`). `DeviceInfo.serial` is the phone's identity: `ro.serialno`, else `android_id`.
 
-Connections to the adb server come from adbutils' `AdbClient.make_connection` (after
-`install_no_spawn_guard()`, so adbutils can never start an adb program); the service requests on
-them are written here as raw bytes so that paths that are not valid UTF-8 reach the phone
-unchanged. Sync connections are `Sync2` sockets. A `threading.BoundedSemaphore` caps how many
-connections are open at once; an open stream holds one until it is closed.
+Connections to the adb server come from `adbwire.open_service`, which only ever connects (no
+adb program is run and no server is started or restarted here); the service requests on them
+are written as raw bytes so that paths that are not valid UTF-8 reach the phone unchanged. Sync
+connections are `Sync2` sockets. A `threading.BoundedSemaphore` caps how many connections are
+open at once; an open stream holds one until it is closed.
 
 On a real phone LIS2 cannot tell an unreadable folder from an empty one, and LST2 succeeds on a
 folder whose contents cannot be read, so an unreadable folder (such as another app's folder under
@@ -47,11 +47,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
-import adbutils
-from adbutils.errors import AdbError, AdbTimeout
-
+from sift.device import adbwire
 from sift.device.adb_manager import ADB_SERVER_HOST
-from sift.device.adbutils_guard import install_no_spawn_guard
 from sift.device.shell import (
     build_sha256_script,
     encode_command,
@@ -61,14 +58,7 @@ from sift.device.shell import (
     parse_wm_size,
     tail_command,
 )
-from sift.device.sync2 import (
-    Sync2,
-    SyncStat,
-    _read_host_string,
-    _recv_exact,
-    _send_all,
-    device_features,
-)
+from sift.device.sync2 import Sync2, SyncStat, device_features
 from sift.device.transport import (
     NO_IDENTITY_MESSAGE,
     DeviceDisconnected,
@@ -455,24 +445,6 @@ def _file_changed(path: str) -> FileChanged:
     return FileChanged(f"{path} changed while it was being read.", path)
 
 
-def _host_request(
-    sock: socket.socket, payload: bytes, *, fail: type[TransportError], max_bytes: int
-) -> None:
-    """Send one adb host request and require OKAY; FAIL raises `fail` with adb's message.
-
-    A payload over `max_bytes` raises `RemoteError` before anything is sent.
-    """
-    if len(payload) > max_bytes:
-        raise RemoteError("That command is too long to send to the phone.")
-    _send_all(sock, b"%04x" % len(payload) + payload)
-    status = _recv_exact(sock, 4)
-    if status == b"OKAY":
-        return
-    if status == b"FAIL":
-        raise fail(_read_host_string(sock))
-    raise TransportError(f"Unexpected reply from the adb server: {status!r}")
-
-
 def _raw_chunks(sock: socket.socket) -> Iterator[bytes]:
     """Everything the phone sends until it closes the stream."""
     while True:
@@ -489,7 +461,7 @@ def _raw_chunks(sock: socket.socket) -> Iterator[bytes]:
 
 def _sync_length(sock: socket.socket, what: str) -> int:
     """A sync packet's u32 length, refused above 64 KiB rather than read into memory."""
-    length: int = _U32.unpack(_recv_exact(sock, _U32.size))[0]
+    length: int = _U32.unpack(adbwire.recv_exact(sock, _U32.size))[0]
     if length > _MAX_SYNC_PAYLOAD:
         raise TransportError(f"The phone sent a {what} that is too long ({length} bytes).")
     return length
@@ -500,16 +472,16 @@ def _recv_chunks(sock: socket.socket, path: str, first: bytes) -> Iterator[bytes
     ident = first
     while True:
         if ident == b"DATA":
-            yield _recv_exact(sock, _sync_length(sock, "data packet"))
+            yield adbwire.recv_exact(sock, _sync_length(sock, "data packet"))
         elif ident == b"DONE":
-            _recv_exact(sock, _U32.size)
+            adbwire.recv_exact(sock, _U32.size)
             return
         elif ident == b"FAIL":
-            message = _recv_exact(sock, _sync_length(sock, "error message"))
+            message = adbwire.recv_exact(sock, _sync_length(sock, "error message"))
             raise RemoteError(message.decode("utf-8", "replace"), path)
         else:
             raise TransportError(f"Unexpected sync reply: {ident!r}")
-        ident = _recv_exact(sock, 4)
+        ident = adbwire.recv_exact(sock, 4)
 
 
 class AdbTransport:
@@ -523,12 +495,10 @@ class AdbTransport:
         limits: Limits = DEFAULT_LIMITS,
         host: str = ADB_SERVER_HOST,
     ) -> None:
-        install_no_spawn_guard()
         self.serial = serial
         self.limits = limits
         self._host = host
         self._port = port
-        self._client = adbutils.AdbClient(host=host, port=port)
         self._slots = threading.BoundedSemaphore(limits.max_connections)
         self._features: frozenset[str] | None = None
         self._features_lock = threading.Lock()
@@ -567,27 +537,19 @@ class AdbTransport:
         ):
             yield s
 
-    def _open_service(self, service: bytes, timeout_s: float) -> adbutils.AdbConnection:
-        """A connection to the phone running `service` (e.g. b"sync:", b"exec:...").
+    def _open_service(self, service: bytes, timeout_s: float) -> socket.socket:
+        """A socket connected to `service` (e.g. b"sync:", b"exec:...") on the phone.
 
-        The caller holds a connection slot and must close the returned connection.
+        The caller holds a connection slot and must close the returned socket.
         """
-        try:
-            conn = self._client.make_connection(timeout=timeout_s)
-        except AdbTimeout as e:
-            raise DeviceTimeout("The adb server did not answer in time.") from e
-        except (AdbError, OSError) as e:
-            raise DeviceDisconnected(f"Cannot reach the adb server: {e}") from e
-        try:
-            sock = conn.conn
-            transport = b"host:transport:" + self.serial.encode()
-            max_bytes = self.limits.max_request_bytes
-            _host_request(sock, transport, fail=DeviceDisconnected, max_bytes=max_bytes)
-            _host_request(sock, service, fail=RemoteError, max_bytes=max_bytes)
-        except BaseException:
-            conn.close()
-            raise
-        return conn
+        return adbwire.open_service(
+            self._host,
+            self._port,
+            self.serial,
+            service,
+            timeout_s=timeout_s,
+            max_bytes=self.limits.max_request_bytes,
+        )
 
     def _exec(self, command: str, timeout_s: float) -> bytes:
         """Run `command` on the phone (adbd runs it with `sh -c`) and return its output.
@@ -597,9 +559,8 @@ class AdbTransport:
         """
         deadline = time.monotonic() + timeout_s
         with self._slot(timeout_s):
-            conn = self._open_service(b"exec:" + encode_command(command), timeout_s)
+            sock = self._open_service(b"exec:" + encode_command(command), timeout_s)
             try:
-                sock: socket.socket = conn.conn
                 parts: list[bytes] = []
                 for chunk in _raw_chunks(sock):
                     parts.append(chunk)
@@ -609,7 +570,7 @@ class AdbTransport:
                     sock.settimeout(remaining)
                 return b"".join(parts)
             finally:
-                conn.close()
+                sock.close()
 
     # -- Transport: reads -----------------------------------------------------------------
 
@@ -651,7 +612,9 @@ class AdbTransport:
         if st.error in (_ENOENT, _ENOTDIR):
             return None
         if st.error:
-            raise RemoteError(f"The phone cannot look at {path}: {_describe(st.error)}.", path)
+            raise RemoteError(
+                f"The phone cannot look at {path}: {_describe(st.error)}.", path, errno=st.error
+            )
         return _entry(path, st)
 
     def list_dir(self, path: str) -> list[RemoteEntry]:
@@ -697,7 +660,9 @@ class AdbTransport:
         if st.error == 0 and stat_mode.S_ISLNK(st.mode):
             st = sync.stat(raw + b"/")  # a trailing slash makes lstat follow the link
         if st.error:
-            raise RemoteError(f"Cannot list {folder}: {_describe(st.error)}.", folder)
+            raise RemoteError(
+                f"Cannot list {folder}: {_describe(st.error)}.", folder, errno=st.error
+            )
         if not stat_mode.S_ISDIR(st.mode):
             raise RemoteError(f"Cannot list {folder}: it is not a folder.", folder)
         listed = sorted(sync.list(raw))
@@ -706,7 +671,7 @@ class AdbTransport:
             child = _join(folder, name.decode("utf-8", "surrogateescape"))
             if child_stat.error:
                 message = f"The phone cannot look at {child}: {_describe(child_stat.error)}."
-                raise RemoteError(message, child)
+                raise RemoteError(message, child, errno=child_stat.error)
             entries.append(_entry(child, child_stat))
         return entries
 
@@ -729,16 +694,15 @@ class AdbTransport:
             service = b"exec:" + encode_command(f"{tail_command(path, offset)} 2>/dev/null")
         self._acquire(timeout)
         try:
-            conn = self._open_service(service, timeout)
+            sock = self._open_service(service, timeout)
         except BaseException:
             self._slots.release()
             raise
-        sock: socket.socket = conn.conn
         short_end: Callable[[int, int], TransportError]
         try:
             if offset == 0:
-                _send_all(sock, b"RECV" + _U32.pack(len(raw)) + raw)
-                first = _recv_exact(sock, 4)
+                adbwire.send_all(sock, b"RECV" + _U32.pack(len(raw)) + raw)
+                first = adbwire.recv_exact(sock, 4)
                 chunks = _recv_chunks(sock, path, first)
                 if first == b"FAIL":
                     next(chunks)  # raises RemoteError naming the path, now rather than later
@@ -765,7 +729,7 @@ class AdbTransport:
             sock.settimeout(first_chunk_s * 2)
         except BaseException:
             try:
-                conn.close()
+                sock.close()
             finally:
                 self._slots.release()
             raise
@@ -776,7 +740,7 @@ class AdbTransport:
 
         def release() -> None:
             try:
-                conn.close()
+                sock.close()
             finally:
                 self._slots.release()
 

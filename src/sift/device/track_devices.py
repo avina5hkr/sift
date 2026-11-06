@@ -4,24 +4,23 @@ Wire format: the client sends `0012host:track-devices`; the server answers `OKAY
 at once and after every change, a message of 4 hex digits of length followed by that many bytes
 of `serial<TAB>state<LF>` lines. An empty message means no devices.
 
-This speaks the protocol directly instead of using adbutils, so no connection failure can ever
-lead to an adb program being started, and `close()` (from any thread) ends a blocked reader at
+This speaks the protocol directly (through `adbwire`), so no connection failure can ever lead
+to an adb program being started, and `close()` (from any thread) ends a blocked reader at
 once: it shuts the socket down, which wakes the `recv` (the reader then closes the descriptor).
 """
 
 import contextlib
-import re
 import socket
 import threading
 from collections.abc import Iterator
 from types import TracebackType
 from typing import Protocol
 
-from sift.device.transport import DeviceDisconnected
+from sift.device import adbwire
+from sift.device.transport import DeviceDisconnected, TransportError
 
 _REQUEST = b"host:track-devices"
 _RECV_CHUNK = 4096
-_LENGTH = re.compile(rb"[0-9a-fA-F]{4}")
 
 # serial -> adb state ("device", "unauthorized", "offline", "authorizing", ...)
 Snapshot = dict[str, str]
@@ -67,33 +66,17 @@ class TrackDevices:
         self._reading = False  # a reader is inside `__iter__`: it closes the socket, not close()
         self._idle_s = idle_s
         try:
-            self._sock = socket.create_connection((host, port), timeout=timeout_s)
-        except OSError as e:
-            raise DeviceDisconnected(f"Cannot reach the adb server: {e}") from e
+            self._sock = adbwire.connect(host, port, timeout_s)
+        except TransportError as e:
+            raise DeviceDisconnected(str(e)) from e
         try:
-            self._sock.sendall(b"%04x" % len(_REQUEST) + _REQUEST)
-            status = self._recv_exact(4)
-            if status == b"FAIL":
-                length = int(self._recv_exact(4), 16)
-                message = self._recv_exact(length).decode("utf-8", "replace")
-                raise DeviceDisconnected(f"The adb server refused the device list: {message}")
-            if status != b"OKAY":
-                raise DeviceDisconnected(f"Unexpected reply from the adb server: {status!r}")
+            adbwire.host_request(self._sock, _REQUEST)
             self._sock.settimeout(idle_s)
         except BaseException as e:
             self._sock.close()
-            if isinstance(e, (OSError, ValueError)):
+            if isinstance(e, TransportError):
                 raise DeviceDisconnected(f"The adb server did not send the device list: {e}") from e
             raise
-
-    def _recv_exact(self, n: int) -> bytes:
-        data = b""
-        while len(data) < n:
-            chunk = self._sock.recv(n - len(data))
-            if not chunk:
-                raise OSError("the adb server closed the connection")
-            data += chunk
-        return data
 
     def __iter__(self) -> Iterator[Snapshot | None]:
         with self._lock:
@@ -136,9 +119,10 @@ class TrackDevices:
         if len(buf) < 4:
             return None
         head = bytes(buf[:4])
-        if _LENGTH.fullmatch(head) is None:  # int() would also take "-001", " 01a" or "0_1a"
-            raise DeviceDisconnected(f"The adb server sent a garbled length: {head!r}")
-        length = int(head, 16)
+        try:
+            length = adbwire.parse_hex_length(head)  # strict: not what int() would also take
+        except TransportError as e:
+            raise DeviceDisconnected(f"The adb server sent a garbled length: {head!r}") from e
         if len(buf) < 4 + length:
             return None
         payload = bytes(buf[4 : 4 + length])

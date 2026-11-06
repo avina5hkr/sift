@@ -14,11 +14,11 @@ import time
 import weakref
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
-from adbutils import _adb
 
-from sift.device import adb_transport
+from sift.device import adb_transport, adbwire
 from sift.device.adb_transport import (
     AdbTransport,
     Limits,
@@ -189,6 +189,7 @@ def test_stat_of_an_inaccessible_path_raises(
     with pytest.raises(RemoteError) as info:
         transport.stat("/data/x")
     assert info.value.path == "/data/x"
+    assert info.value.errno == 13
 
 
 def test_features_are_fetched_once_per_transport(
@@ -295,6 +296,28 @@ def test_walk_fails_loudly_on_an_entry_the_phone_cannot_stat(
     with pytest.raises(RemoteError) as info:
         list(transport.walk("/sdcard"))
     assert info.value.path == "/sdcard/bad"
+    assert info.value.errno == 13
+
+
+def test_remote_errors_carry_the_phones_errno(
+    transport: AdbTransport, server: FakeAdbServer
+) -> None:
+    """ENOENT (2) and EACCES (13) are Linux values, whatever this Mac's errno numbers say."""
+    server.stats[b"/sdcard/locked"] = FakeStat.missing(error=13)
+    server.stats[b"/sdcard/gone"] = FakeStat.missing(error=2)
+    with pytest.raises(RemoteError) as denied:
+        transport.list_dir("/sdcard/locked")
+    with pytest.raises(RemoteError) as missing:
+        transport.list_dir("/sdcard/gone")
+    assert (denied.value.errno, missing.value.errno) == (13, 2)
+    assert denied.value.path == "/sdcard/locked"
+    assert transport.stat("/sdcard/gone") is None  # a missing path is not an error for stat
+
+
+def test_a_remote_error_without_an_errno_says_none(transport: AdbTransport) -> None:
+    with pytest.raises(RemoteError) as info:
+        transport.sha256(["relative"])
+    assert info.value.errno is None
 
 
 # -- open_read ----------------------------------------------------------------------------------
@@ -854,7 +877,7 @@ def test_adb_transport_cannot_write_in_m1(monkeypatch: pytest.MonkeyPatch, tmp_p
     def unreachable(*args: object, **kwargs: object) -> None:
         raise AssertionError("a write reached adb")
 
-    monkeypatch.setattr(adb_transport.adbutils.AdbClient, "make_connection", unreachable)
+    monkeypatch.setattr(adbwire, "open_service", unreachable)
     monkeypatch.setattr(adb_transport, "Sync2", unreachable)
     monkeypatch.setattr(adb_transport, "device_features", unreachable)
     monkeypatch.setattr(socket, "create_connection", unreachable)
@@ -984,14 +1007,14 @@ def test_an_abandoned_stream_is_collected_and_frees_everything(
     transport = AdbTransport(server.serial, server.port, limits=limits, host="127.0.0.1")
     phone.add_file(b"/sdcard/a.bin", b"x" * 200_000)
     sockets: list[socket.socket] = []
-    create = _adb.AdbConnection._create_socket
+    create = socket.create_connection
 
-    def tracking(self: object) -> socket.socket:
-        s: socket.socket = create(self)
+    def tracking(*args: Any, **kwargs: Any) -> socket.socket:
+        s: socket.socket = create(*args, **kwargs)
         sockets.append(s)
         return s
 
-    monkeypatch.setattr(_adb.AdbConnection, "_create_socket", tracking)
+    monkeypatch.setattr(socket, "create_connection", tracking)
     stream = transport.open_read("/sdcard/a.bin")
     assert stream.read(10) == b"x" * 10
     del stream

@@ -55,12 +55,14 @@ class DeviceTimeout(TransportError):
 class RemoteError(TransportError):
     """The phone answered with an error (e.g. ENOENT, EACCES).
 
-    `path` names the remote path the error is about, when there is one.
+    `path` names the remote path the error is about, when there is one. `errno` is the phone's
+    Linux errno for it (ENOENT is 2, EACCES is 13) when the phone reported one, else None.
     """
 
-    def __init__(self, message: str, path: str | None = None) -> None:
+    def __init__(self, message: str, path: str | None = None, *, errno: int | None = None) -> None:
         super().__init__(message)
         self.path = path
+        self.errno = errno
 
 
 class FileChanged(RemoteError):

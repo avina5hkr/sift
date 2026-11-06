@@ -29,7 +29,8 @@ from urllib.request import urlopen
 from sift.core.config import PhoneConfig
 from sift.core.paths import AppPaths
 from sift.core.proc import Runner, subprocess_runner
-from sift.device.adbutils_guard import install_no_spawn_guard
+from sift.device import adbwire
+from sift.device.transport import TransportError
 
 logger = logging.getLogger("sift.device")
 
@@ -109,8 +110,7 @@ def adb_server_version(
       trickles, sends something else, or hangs up mid-reply. Starting a server then could
       disturb another program's server, so callers must not run any adb program.
 
-    Speaks the adb host protocol directly over a socket and never starts anything: adbutils
-    would run an adb command line program when the connection fails.
+    Speaks the adb host protocol directly over a socket (`adbwire`) and never starts anything.
     """
     deadline = time.monotonic() + deadline_s
     try:
@@ -121,36 +121,13 @@ def adb_server_version(
         raise AdbPortBusy(f"connecting to {host}:{port} failed: {e!r}") from e
     with s:
         try:
-            _left(s, deadline)
-            s.sendall(b"000chost:version")
-            status = _recv_exact(s, 4, deadline)
-            if status != b"OKAY":
-                raise AdbPortBusy(f"answered {status!r} instead of OKAY")
-            size = int(_recv_exact(s, 4, deadline), 16)
-            if not 0 < size <= 16:
-                raise AdbPortBusy(f"announced a {size}-byte version")
-            return str(int(_recv_exact(s, size, deadline), 16))
-        except (OSError, ValueError) as e:
+            adbwire.host_request(s, b"host:version", deadline=deadline)
+            size = adbwire.read_hex_length(s, max_bytes=16, deadline=deadline)
+            if size == 0:
+                raise AdbPortBusy("announced a 0-byte version")
+            return str(int(adbwire.recv_exact(s, size, deadline=deadline), 16))
+        except (TransportError, ValueError) as e:
             raise AdbPortBusy(f"did not answer like adb: {e!r}") from e
-
-
-def _left(s: socket.socket, deadline: float) -> None:
-    """Let the next socket call wait only for what is left of the probe's deadline."""
-    left = deadline - time.monotonic()
-    if left <= 0:
-        raise TimeoutError("the adb server did not answer in time")
-    s.settimeout(left)
-
-
-def _recv_exact(s: socket.socket, n: int, deadline: float) -> bytes:
-    data = b""
-    while len(data) < n:
-        _left(s, deadline)
-        chunk = s.recv(n - len(data))
-        if not chunk:
-            raise OSError("adb server closed the connection")
-        data += chunk
-    return data
 
 
 def _default_opener(url: str) -> IO[bytes]:
@@ -177,7 +154,6 @@ class AdbManager:
     ) -> None:
         """`server_probe` behaves like `adb_server_version`: a version, None when nothing
         listens, or `AdbPortBusy` when something listens but does not answer like adb."""
-        install_no_spawn_guard()
         self._paths = paths
         self._config = config
         self._runner = runner

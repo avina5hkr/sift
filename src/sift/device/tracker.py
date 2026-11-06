@@ -52,7 +52,6 @@ from typing import Any, Literal
 from sift.core.context import AppContext
 from sift.device.adb_manager import ADB_SERVER_HOST, AdbError, AdbManager, AdbServerError
 from sift.device.adb_transport import AdbTransport, is_wifi_serial
-from sift.device.adbutils_guard import install_no_spawn_guard
 from sift.device.track_devices import DeviceEventSource, Snapshot, TrackDevices
 from sift.device.transport import (
     NO_IDENTITY_MESSAGE,
@@ -581,7 +580,6 @@ def adb_tracker(
     `ensure_server()` attaches to a server that answers (no adb program is run), or starts one
     when nothing listens on the port; it is called each time the device list is (re)opened.
     """
-    install_no_spawn_guard()
     adb = manager if manager is not None else AdbManager(ctx.paths, ctx.config.phone)
     port = ctx.config.phone.adb_server_port
 
