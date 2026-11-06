@@ -12,9 +12,8 @@ identity it was opened with; `check_identity()` reads the phone again and raises
 if another phone has taken its place (a different phone plugged in under the same adb serial,
 or the cable moved between phones while a job ran).
 
-Where the stored identity lives: the `device` table has only the `serial` column for now (the
-tracker keeps the Android ID in memory next to it, in its stored-phone record); the migration
-that adds `android_id` to the table, and writes it, is a later step.
+Where the stored identity lives: the `device` table's `serial` column (the key the phone was
+first stored under) and its `android_id` column; the tracker reads and writes both.
 """
 
 from dataclasses import dataclass

@@ -915,9 +915,9 @@ def test_the_same_phone_with_a_new_serial_is_still_that_phone(ctx: AppContext) -
     assert r.bus.states() == ["connected_usb"]  # never wrong_device
     (session,) = sessions
     assert session is not None
-    assert session.identity.serial == "RENUMBERED-9"  # learned, in memory
+    assert session.identity.serial == "RENUMBERED-9"  # learned
     assert session.identity.android_id == phone.android_id
-    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]  # the table is not written yet
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]  # the stored key is unchanged
 
 
 def test_the_same_phone_with_a_new_android_id_is_still_that_phone(ctx: AppContext) -> None:
@@ -930,7 +930,7 @@ def test_the_same_phone_with_a_new_android_id_is_still_that_phone(ctx: AppContex
     assert r.bus.states() == ["connected_usb"]
 
 
-def test_an_android_id_learned_in_memory_survives_a_retry(ctx: AppContext) -> None:
+def test_an_android_id_learned_survives_a_retry(ctx: AppContext) -> None:
     r, _, phone = _flaky_rig(ctx)
     learned = phone.android_id
     seen: list[PhoneIdentity] = []
@@ -943,10 +943,89 @@ def test_an_android_id_learned_in_memory_survives_a_retry(ctx: AppContext) -> No
         assert session is not None
         seen.append(session.identity)
 
-    # After the Retry the table is read again, and it only knows the old serial.
+    # After the Retry the table is read again, and it knows the Android ID.
     r.run([{USB: "device"}, swap_serial, RETRY], [{USB: "device"}, grab, STOP])
     assert r.bus.states() == ["connected_usb"]
     assert seen[0].android_id == learned
+
+
+def android_ids(ctx: AppContext) -> list[Any]:
+    with ctx.db.read() as conn:
+        return [row[0] for row in conn.execute("SELECT android_id FROM device ORDER BY id")]
+
+
+def test_the_first_phone_is_stored_with_both_identifiers(ctx: AppContext) -> None:
+    r, _, phone = _flaky_rig(ctx)
+    r.run([{USB: "device"}, STOP])
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]
+    assert android_ids(ctx) == [phone.android_id]
+
+
+def test_a_phone_with_no_serial_is_stored_by_its_android_id(ctx: AppContext) -> None:
+    r = rig(ctx)
+    r.phones[USB] = FakeTransport(FakePhone(serial="", android_id="0000fake000000aa"))
+    r.run([{USB: "device"}, STOP])
+    assert android_ids(ctx) == ["0000fake000000aa"]
+    # A new tracker reads that back as an Android ID with no serial, so a phone that now
+    # reports a serial (and the same Android ID) is still that phone.
+    again = rig(ctx)
+    again.phones[USB] = FakeTransport(
+        FakePhone(serial="NOW-HAS-ONE", android_id="0000fake000000aa")
+    )
+    again.run([{USB: "device"}, STOP])
+    assert again.tracker.status().state is S.connected_usb
+
+
+def test_a_stored_android_id_survives_a_tracker_restart(ctx: AppContext) -> None:
+    first, _, phone = _flaky_rig(ctx)
+    first.run([{USB: "device"}, STOP])
+    stored_uuid = device_rows(ctx)[0][1]
+
+    # A new tracker (a restart) over the same database: the phone comes back with another serial.
+    phone.serial = "RENUMBERED-9"
+    restarted = rig(ctx)
+    restarted.phones[USB] = FakeTransport(phone)
+    sessions: list[DeviceSession | None] = []
+    restarted.run([{USB: "device"}, lambda: sessions.append(restarted.tracker.session()), STOP])
+
+    assert restarted.tracker.status().state is S.connected_usb  # matched on android_id alone
+    assert restarted.tracker.status().device_uuid == stored_uuid
+    (session,) = sessions
+    assert session is not None
+    assert session.identity.android_id == phone.android_id
+    assert session.identity.serial == "RENUMBERED-9"
+    assert len(device_rows(ctx)) == 1
+
+
+def test_a_stored_android_id_does_not_match_another_phone(ctx: AppContext) -> None:
+    first, _, _ = _flaky_rig(ctx)
+    first.run([{USB: "device"}, STOP])
+    other = rig(ctx)
+    other.phones[USB] = FakeTransport(FakePhone(serial="OTHER-0002", android_id="0000fake000000dd"))
+    other.run([{USB: "device"}, STOP])
+    assert other.tracker.status().state is S.wrong_device
+    assert android_ids(ctx) == [first.phones[USB].inner.phone.android_id]  # type: ignore[attr-defined]
+
+
+def test_an_older_row_without_an_android_id_learns_it(ctx: AppContext) -> None:
+    with ctx.db.tx() as conn:
+        conn.execute("INSERT INTO device (uuid, serial) VALUES ('old-uuid', 'FAKE-0001')")
+    r, _, phone = _flaky_rig(ctx)
+    r.run([{USB: "device"}, STOP])
+    assert r.tracker.status().device_uuid == "old-uuid"
+    assert android_ids(ctx) == [phone.android_id]
+
+
+def test_a_changed_android_id_is_saved_at_once(ctx: AppContext) -> None:
+    r, _, phone = _flaky_rig(ctx)
+
+    def reset() -> None:
+        phone.android_id = "0000fake000000cc"  # e.g. after a factory reset
+
+    r.run([{USB: "device"}, reset, *_ticks(r, 60), STOP])
+    assert r.bus.states() == ["connected_usb"]
+    assert android_ids(ctx) == ["0000fake000000cc"]
+    assert [row[2] for row in device_rows(ctx)] == ["FAKE-0001"]  # the serial is still the key
 
 
 # -- stop -------------------------------------------------------------------------------------

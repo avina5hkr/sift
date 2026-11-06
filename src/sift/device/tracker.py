@@ -159,15 +159,15 @@ class _Connection:
 class _StoredPhone:
     """The stored phone: its `device.uuid` and identity.
 
-    Only `serial` is in the `device` table today (it holds `ro.serialno`, else the Android ID),
-    so a phone loaded from the table starts with that one key offered as both identifiers. The
-    Android ID the phone reports is learned in memory (`identity.updated_with`); persisting it
-    is for the migration that adds `device.android_id`: load it where `_stored_phone` reads the
-    row, and write it in `_remember`.
+    The `device` table holds the identity in two columns: `serial` (the key the phone was first
+    stored under: `ro.serialno`, else the Android ID) and `android_id`. A row from before the
+    `android_id` column existed has no Android ID, so its one key is offered as both identifiers
+    until the phone is seen again and its Android ID is learned and saved.
     """
 
     uuid: str
     identity: PhoneIdentity
+    saved_android_id: str | None = None  # what `device.android_id` holds right now
 
 
 class Backoff:
@@ -532,20 +532,27 @@ class DeviceTracker:
         """The stored phone, read once (and again after a Retry)."""
         if not self._stored_loaded:
             with self._ctx.db.read() as conn:
-                row = conn.execute("SELECT uuid, serial FROM device ORDER BY id LIMIT 1").fetchone()
+                row = conn.execute(
+                    "SELECT uuid, serial, android_id FROM device ORDER BY id LIMIT 1"
+                ).fetchone()
             self._stored = self._stored_from_row(row)
             self._stored_loaded = True
         return self._stored
 
-    def _stored_from_row(self, row: Any) -> _StoredPhone | None:
-        """A stored phone from a `(uuid, serial)` row, keeping an Android ID already learned."""
+    @staticmethod
+    def _stored_from_row(row: Any) -> _StoredPhone | None:
+        """A stored phone from a `(uuid, serial, android_id)` row."""
         if row is None:
             return None
-        identity = PhoneIdentity.from_stored_key(str(row[1]))
-        known = self._stored
-        if known is not None and known.uuid == str(row[0]) and known.identity.android_id:
-            identity = PhoneIdentity(identity.serial, known.identity.android_id)
-        return _StoredPhone(str(row[0]), identity)
+        key = str(row[1])
+        android_id = str(row[2]) if row[2] else None
+        if android_id is None:
+            identity = PhoneIdentity.from_stored_key(key)  # an older row: the key is both
+        elif key == android_id:
+            identity = PhoneIdentity(None, android_id)  # stored by Android ID: it had no serial
+        else:
+            identity = PhoneIdentity(key or None, android_id)
+        return _StoredPhone(str(row[0]), identity, android_id)
 
     def _remember(self, info: DeviceInfo, now: float, *, touch: bool) -> _StoredPhone | None:
         """Store or refresh the phone; the stored phone, or None if another phone is stored.
@@ -561,27 +568,54 @@ class DeviceTracker:
         if stored is not None:
             if not stored.identity.matches(seen):
                 return None
-            stored.identity = stored.identity.updated_with(seen)  # in memory only, for now
+            stored.identity = stored.identity.updated_with(seen)
+            new_android_id = stored.identity.android_id
+            android_changed = (
+                new_android_id is not None and new_android_id != stored.saved_android_id
+            )
             due = self._seen_written_at is None or now - self._seen_written_at >= LAST_SEEN_EVERY_S
-            if touch or due:
+            if touch or due or android_changed:
                 with self._ctx.db.tx() as conn:
-                    conn.execute(
-                        "UPDATE device SET model = ?, android_version = ?, last_seen_at = ? "
-                        "WHERE uuid = ?",
-                        (info.model, info.android_version, int(self._wall_clock()), stored.uuid),
-                    )
-                self._seen_written_at = now
+                    if touch or due:
+                        conn.execute(
+                            "UPDATE device SET model = ?, android_version = ?, last_seen_at = ? "
+                            "WHERE uuid = ?",
+                            (
+                                info.model,
+                                info.android_version,
+                                int(self._wall_clock()),
+                                stored.uuid,
+                            ),
+                        )
+                        self._seen_written_at = now
+                    if android_changed:
+                        # A new or changed Android ID is saved at once, not on the slow schedule.
+                        conn.execute(
+                            "UPDATE device SET android_id = ? WHERE uuid = ?",
+                            (new_android_id, stored.uuid),
+                        )
+                        stored.saved_android_id = new_android_id
             return stored
         with self._ctx.db.tx() as conn:
-            row = conn.execute("SELECT uuid, serial FROM device ORDER BY id LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT uuid, serial, android_id FROM device ORDER BY id LIMIT 1"
+            ).fetchone()
             if row is None:
-                row = (str(uuid.uuid4()), seen.key())
+                new_uuid = str(uuid.uuid4())
                 conn.execute(
-                    "INSERT INTO device (uuid, serial, model, android_version, last_seen_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (*row, info.model, info.android_version, int(self._wall_clock())),
+                    "INSERT INTO device "
+                    "(uuid, serial, android_id, model, android_version, last_seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        new_uuid,
+                        seen.key(),
+                        seen.android_id,
+                        info.model,
+                        info.android_version,
+                        int(self._wall_clock()),
+                    ),
                 )
-                stored = _StoredPhone(str(row[0]), seen)
+                stored = _StoredPhone(new_uuid, seen, seen.android_id)
             else:
                 # Another process stored a phone first: it is the stored one.
                 stored = self._stored_from_row(row)
