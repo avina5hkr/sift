@@ -70,6 +70,7 @@ class Control:
         self.stop_requested = False
         self.pause_requested = False
         self.reports: list[tuple[int, int, int | None, int | None]] = []
+        self.transferred: list[int] = []
         self.on_report: Callable[[Control], None] | None = None
         self.waits = 0
 
@@ -85,8 +86,12 @@ class Control:
         bytes_total: int | None = None,
         *,
         current: str | None = None,
+        duplicates_skipped: int = 0,
+        failed: int = 0,
+        transferred_bytes: int | None = None,
     ) -> None:
         self.reports.append((files_done, bytes_done, files_total, bytes_total))
+        self.transferred.append(bytes_done if transferred_bytes is None else transferred_bytes)
         if self.on_report is not None:
             self.on_report(self)
 
@@ -342,6 +347,27 @@ def test_moved_file_is_linked_without_a_transfer(rig: Rig) -> None:
     assert not any(op == "open_read" for op, _ in ops)
     assert phone_rows(rig.db)["/sdcard/DCIM/Camera/Moved/IMG_1.jpg"][:2] == ("done", sha(data))
     assert len(tree(rig.root)) == 6
+    # Speed and ETA count what crossed the cable: a linked file is done but not transferred.
+    assert rig.control.reports[-1][1] == len(data)
+    assert rig.control.transferred[-1] == 0
+    assert (stats.bytes_copied, stats.bytes_not_transferred) == (0, len(data))
+
+
+def test_the_callers_stats_object_is_filled_in_and_survives_a_stop(rig: Rig) -> None:
+    for i in range(4):
+        rig.add(f"/sdcard/DCIM/Camera/s_{i}.jpg", bytes([i]) * 100)
+    rig.scan()
+    mine = PullStats()
+
+    def stop_after_the_first(control: Control) -> None:
+        if control.reports[-1][0] >= 1:
+            control.stop_requested = True
+
+    rig.control.on_report = stop_after_the_first
+    with pytest.raises(JobStopped):
+        rig.puller().run(rig.control, pending_items(rig.db, 1, SETS), mine)
+    assert 1 <= mine.copied < 4
+    assert mine.bytes_copied == 100 * mine.copied
 
 
 def test_same_size_and_mtime_but_other_bytes_is_copied(rig: Rig) -> None:

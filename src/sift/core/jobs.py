@@ -149,8 +149,10 @@ class JobSnapshot:
     bytes_done: int
     files_total: int | None
     bytes_total: int | None
+    duplicates_skipped: int
+    failed: int
     current: str | None
-    speed_bps: float | None  # the measured 5 s average, or None until there is one
+    speed_bps: float | None  # the measured 5 s average of bytes transferred, else None
     eta_s: float | None
     eta_basis: str  # "measured", "stored" (first-run reader test) or "reference" (37.5 MB/s)
     pause_requested: bool
@@ -188,6 +190,8 @@ class _Job:
         self.error: str | None = None
         self.files_done = 0
         self.bytes_done = 0
+        self.duplicates_skipped = 0
+        self.failed = 0
         self.files_total: int | None = None
         self.bytes_total: int | None = None
         self.current: str | None = None
@@ -218,6 +222,8 @@ class _Capture:
     bytes_done: int
     files_total: int | None
     bytes_total: int | None
+    duplicates_skipped: int
+    failed: int
     current: str | None
     measured_speed: float | None
     pause_requested: bool
@@ -306,8 +312,18 @@ class JobControl:
         bytes_total: int | None = None,
         *,
         current: str | None = None,
+        duplicates_skipped: int = 0,
+        failed: int = 0,
+        transferred_bytes: int | None = None,
     ) -> None:
-        """Record progress. At most one `progress` event per 500 ms goes out."""
+        """Record progress. At most one `progress` event per 500 ms goes out.
+
+        `bytes_done` counts every byte of the files dealt with, so it reaches `bytes_total` at
+        the end. `transferred_bytes` (default: `bytes_done`) counts only what really crossed the
+        cable, leaving out files that were matched on the phone and not copied: the speed and
+        so the ETA are measured on it, so such files do not make the backup look faster than
+        it is.
+        """
         self._guard()
         mgr, job = self._mgr, self._job
         capture = None
@@ -316,9 +332,12 @@ class JobControl:
                 return
             job.files_done, job.bytes_done = files_done, bytes_done
             job.files_total, job.bytes_total = files_total, bytes_total
+            job.duplicates_skipped, job.failed = duplicates_skipped, failed
             job.current = current
             now = mgr._clock.monotonic()
-            job.samples.append((now, bytes_done))
+            job.samples.append(
+                (now, bytes_done if transferred_bytes is None else transferred_bytes)
+            )
             while len(job.samples) > 2 and job.samples[1][0] <= now - SPEED_WINDOW_S:
                 job.samples.popleft()
             if job.last_published is None or now - job.last_published >= PROGRESS_INTERVAL_S:
@@ -481,13 +500,16 @@ class JobManager:
         describe: Callable[[BaseException], str] | None = None,
         stored_speed: Callable[[], float | None] | None = None,
         poll_s: float = POLL_PHONE_S,
+        on_finished: Callable[[JobSnapshot], None] | None = None,
     ) -> None:
         """`sleep` replaces the retry waits (tests); the default waits on the job's stop flag.
 
         `describe` turns an exception into plain words for the job's `error` (pass
         `sift.services.plainwords.describe`; core cannot import it). `stored_speed` returns the
-        first-run reader-test speed in bytes per second, if one was measured. Any job left
-        unfinished by an earlier run is marked failed here.
+        first-run reader-test speed in bytes per second, if one was measured. `on_finished` is
+        called on the job's thread with the final snapshot, once the job has ended and been
+        recorded (not for an abandoned job); an error in it is logged and goes no further. Any
+        job left unfinished by an earlier run is marked failed here.
         """
         self._ctx = ctx
         self._db = ctx.db
@@ -497,6 +519,7 @@ class JobManager:
         self._describe = describe
         self._stored_speed = stored_speed
         self._poll_s = poll_s
+        self._on_finished = on_finished
         self._lock = threading.Lock()
         self._jobs: dict[int, _Job] = {}
         self._closing = False
@@ -677,8 +700,20 @@ class JobManager:
             self._finish(job, outcome, error)
         except Exception:
             _log.exception("Job %d: could not record how it ended", job.id)
+        else:
+            self._notify_finished(job)
         finally:
             self._db.release_thread()
+
+    def _notify_finished(self, job: _Job) -> None:
+        if self._on_finished is None or job.abandoned:
+            return
+        with job.cond:
+            capture = self._capture(job, number=False)
+        try:
+            self._on_finished(self._to_snapshot(capture))
+        except Exception:
+            _log.exception("Job %d: the after-run step failed", job.id)
 
     def _finish(self, job: _Job, outcome: JobState, error: str | None) -> None:
         with job.cond:
@@ -760,6 +795,8 @@ class JobManager:
             bytes_done=job.bytes_done,
             files_total=job.files_total,
             bytes_total=job.bytes_total,
+            duplicates_skipped=job.duplicates_skipped,
+            failed=job.failed,
             current=job.current,
             measured_speed=self._measured_speed(job),
             pause_requested=job.pause_requested,
@@ -809,6 +846,8 @@ class JobManager:
             "bytes_done": capture.bytes_done,
             "files_total": capture.files_total,
             "bytes_total": capture.bytes_total,
+            "duplicates_skipped": capture.duplicates_skipped,
+            "failed": capture.failed,
             "stopped": capture.stopped,
         }
         sql = "UPDATE job SET state = ?, progress = ?, error = ?, finished_at = ? WHERE id = ?" + (
@@ -859,6 +898,8 @@ class JobManager:
             bytes_done=c.bytes_done,
             files_total=c.files_total,
             bytes_total=c.bytes_total,
+            duplicates_skipped=c.duplicates_skipped,
+            failed=c.failed,
             current=c.current,
             speed_bps=speed,
             eta_s=eta,

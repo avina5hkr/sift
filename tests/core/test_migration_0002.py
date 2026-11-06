@@ -24,8 +24,8 @@ def test_0002_is_bundled_after_init():
     assert found[1].name == "backup"
 
 
-def test_fresh_db_reaches_version_2(db):
-    assert schema_version(db) == 2
+def test_fresh_db_reaches_the_latest_version(db):
+    assert schema_version(db) == bundled_migrations()[-1].version
 
 
 def test_copy_is_taken_before_0002_and_existing_m1_data_survives(paths):
@@ -41,7 +41,7 @@ def test_copy_is_taken_before_0002_and_existing_m1_data_survives(paths):
             )
             c.execute("INSERT INTO scan (id, device_id, started_at, stats) VALUES (5, 1, 7, '{}')")
 
-        assert apply_migrations(db, paths.db_backups) == 2
+        assert apply_migrations(db, paths.db_backups) == bundled_migrations()[-1].version
 
         copies = list(paths.db_backups.iterdir())
         assert [p.name.startswith("state-v1-") for p in copies] == [True]

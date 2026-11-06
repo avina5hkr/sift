@@ -45,6 +45,8 @@ from sift.device.fake_tracker import FAKE_ANNOUNCE_AFTER_S, fake_tracker
 from sift.device.fake_transport import FaultPlan
 from sift.device.tracker import DeviceTracker, adb_tracker
 from sift.server.app import create_app
+from sift.services.afterrun import after_run
+from sift.services.notify import MacNotifier, Notifier, NullNotifier
 from sift.services.plainwords import describe
 from sift.window_quit import WindowQuit
 
@@ -240,11 +242,16 @@ def recover_at_startup(ctx: AppContext) -> None:
         _log.exception("Recovery at startup failed")
 
 
-def build_jobs(ctx: AppContext) -> JobManager:
-    """The backup job manager: each job runs `run_backup` on the connected phone."""
+def build_jobs(ctx: AppContext, notifier: Notifier | None = None) -> JobManager:
+    """The backup job manager: each job runs `run_backup` on the connected phone.
+
+    When a job ends (`after_run`): the owner is told through `notifier` (a system notification,
+    or a toast), and the daily copy of the database is made.
+    """
+    notify = notifier if notifier is not None else NullNotifier()
 
     def runner(control: JobControl) -> None:
-        run_backup(ctx, control, control.sets, control.dry_run)
+        run_backup(ctx, control, control.sets, control.dry_run)  # leaves its run_summary row
 
     return JobManager(
         ctx,
@@ -252,6 +259,7 @@ def build_jobs(ctx: AppContext) -> JobManager:
         runner=runner,
         describe=describe,
         stored_speed=lambda: stored_read_speed(ctx),
+        on_finished=lambda snap: after_run(ctx, snap, notify),
     )
 
 
@@ -437,7 +445,8 @@ def main(argv: list[str] | None = None) -> int:
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
         recover_at_startup(ctx)  # before any job can start
-        jobs = build_jobs(ctx)
+        # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
+        jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())
         ctx.jobs = jobs
         handle = start_server(ctx, sock)
         shutdown.add("server", handle.stop, timeout_s=_SERVER_STEP_S)

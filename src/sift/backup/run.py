@@ -15,17 +15,19 @@ import json
 import logging
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
 from sift.backup.scanner import scan, space_check
 from sift.backup.sets import resolve_roots
 from sift.backup.skiprules import SkipRules
+from sift.backup.summary import record_summary
 from sift.core.clock import Clock, SystemClock
 from sift.core.config import Config
 from sift.core.context import AppContext
 from sift.core.db import Database
-from sift.core.jobs import JobControl, JobRefused, JobState
+from sift.core.jobs import JobControl, JobRefused, JobState, JobStopped
 from sift.device.session import DeviceSession
 from sift.device.transport import DeviceDisconnected
 from sift.services.plainwords import describe
@@ -76,6 +78,15 @@ def _device_id(db: Database, device_uuid: str) -> int:
     return int(row[0])
 
 
+@dataclass
+class _Progress:
+    """What a run knows so far, for the summary row it leaves however it ends."""
+
+    stats: PullStats = field(default_factory=PullStats)
+    device_id: int | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
 def run_backup(
     ctx: AppContext,
     ctl: JobControl,
@@ -88,10 +99,48 @@ def run_backup(
 ) -> PullStats | None:
     """Back up `sets` from the job's phone. Returns the pull's counts (None if nothing was pulled).
 
+    Whatever ends the run (done, stopped, failed), a real run leaves one `run_summary` row with
+    its counts and scan warnings; a dry run copies nothing and leaves none.
+
     `sleep` is the scanner's wait before looking at recent files again, and
     `reconnect_pause_s` the puller's pause after a disconnect (tests shorten both).
     """
     clock = clock or SystemClock()
+    started = clock.now()
+    progress = _Progress()
+    outcome = "failed"
+    try:
+        result = _run(ctx, ctl, sets, dry_run, clock, sleep, reconnect_pause_s, progress)
+        outcome = "done"
+        return result
+    except JobStopped:
+        outcome = "stopped"
+        raise
+    finally:
+        if not dry_run:
+            record_summary(
+                ctx.db,
+                job_id=ctl.job_id,
+                device_id=progress.device_id,
+                sets=list(sets),
+                outcome=outcome,
+                started_at=started,
+                finished_at=clock.now(),
+                stats=progress.stats,
+                warnings=progress.warnings,
+            )
+
+
+def _run(
+    ctx: AppContext,
+    ctl: JobControl,
+    sets: Sequence[str],
+    dry_run: bool,
+    clock: Clock,
+    sleep: Callable[[float], None],
+    reconnect_pause_s: float,
+    progress: _Progress,
+) -> PullStats | None:
     config, db = ctx.config, ctx.db
     try:
         roots = resolve_roots(config.backup.sets, sets)
@@ -115,6 +164,7 @@ def run_backup(
     )
     for warning in result.warnings:
         log.warning("Scan: %s", warning)
+    progress.warnings.extend(result.warnings)
     if dry_run:
         ctl.report(0, 0, result.new_or_changed, result.bytes_needed)
         return None
@@ -127,6 +177,7 @@ def run_backup(
 
     session = ctl.wait_for_phone()
     device_id = _device_id(db, session.device_uuid)
+    progress.device_id = device_id
     items = pending_items(db, device_id, names)
     target = mac_target(db, config)
     problem = space_check(
@@ -145,7 +196,7 @@ def run_backup(
         readers=reader_count(config, session),
         reconnect_pause_s=reconnect_pause_s,
     )
-    stats = puller.run(ctl, items)
+    stats = puller.run(ctl, items, progress.stats)
     log.info(
         "Backup: %s",
         json.dumps({k: v for k, v in stats.__dict__.items() if k != "warnings"}),

@@ -470,6 +470,52 @@ def test_speed_is_a_five_second_moving_average_and_eta_uses_it(ctx: AppContext) 
     finished(jobs, job_id)
 
 
+def test_files_matched_without_a_transfer_do_not_speed_up_the_eta(ctx: AppContext) -> None:
+    clock = ManualClock()
+    driver = Driver()
+    jobs = manager(ctx, driver.runner, clock=clock)
+    job_id = jobs.start_backup(["camera"])
+    mb = 1_000_000
+
+    driver.do(lambda c: c.report(0, 0, 10, 100 * mb))
+    clock.advance(1)
+    # 50 MB of files were done at once (moved files, nothing crossed), 10 MB really transferred.
+    driver.do(
+        lambda c: c.report(
+            5, 60 * mb, 10, 100 * mb, duplicates_skipped=2, failed=1, transferred_bytes=10 * mb
+        )
+    )
+    snap = state_of(jobs, job_id)
+    assert snap.speed_bps == pytest.approx(10 * mb)
+    assert snap.eta_s == pytest.approx(4.0)  # 40 MB left at the measured 10 MB/s
+    assert (snap.duplicates_skipped, snap.failed) == (2, 1)
+    assert json.loads(row(ctx, job_id)["progress"])["duplicates_skipped"] == 2
+    assert json.loads(row(ctx, job_id)["progress"])["failed"] == 1
+    driver.end()
+    finished(jobs, job_id)
+
+
+def test_on_finished_gets_the_final_snapshot_once(ctx: AppContext) -> None:
+    seen: list[JobSnapshot] = []
+
+    def runner(control: JobControl) -> None:
+        control.report(1, 10, 1, 10, duplicates_skipped=1)
+
+    jobs = manager(ctx, runner, on_finished=seen.append)
+    job_id = jobs.start_backup(["camera"])
+    assert jobs.wait_finished(job_id, 5)
+    assert [(s.id, s.state, s.duplicates_skipped) for s in seen] == [(job_id, JobState.done, 1)]
+
+
+def test_an_error_in_on_finished_does_not_break_the_job(ctx: AppContext) -> None:
+    def broken(_snap: JobSnapshot) -> None:
+        raise RuntimeError("boom")
+
+    jobs = manager(ctx, lambda c: None, on_finished=broken)
+    job_id = jobs.start_backup(["camera"])
+    assert finished(jobs, job_id).state is JobState.done
+
+
 def test_time_spent_waiting_does_not_drag_the_speed_down(ctx: AppContext) -> None:
     clock = ManualClock()
     driver = Driver()

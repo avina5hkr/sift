@@ -181,6 +181,8 @@ class PullStats:
     linked: int = 0
     changed: int = 0
     failed: int = 0
+    bytes_copied: int = 0  # bytes of the files stored as new copies
+    bytes_not_transferred: int = 0  # bytes of files counted in bytes_done that never crossed
     warnings: list[str] = field(default_factory=list)
 
 
@@ -207,6 +209,9 @@ class PullControl(Protocol):
         bytes_total: int | None = None,
         *,
         current: str | None = None,
+        duplicates_skipped: int = 0,
+        failed: int = 0,
+        transferred_bytes: int | None = None,
     ) -> None: ...
 
     def wait_for_phone(self) -> DeviceSession: ...
@@ -277,12 +282,17 @@ class Puller:
 
     # -- the coordinator (the job's own thread) -----------------------------------------------
 
-    def run(self, ctl: PullControl, items: Sequence[PullItem]) -> PullStats:
+    def run(
+        self, ctl: PullControl, items: Sequence[PullItem], stats: PullStats | None = None
+    ) -> PullStats:
         """Copy `items`; returns the counts. Raises `JobStopped` when the job is stopped.
 
-        Files in flight always finish first, whatever ends the run.
+        Files in flight always finish first, whatever ends the run. A caller that passes
+        `stats` still holds the counts when the run ends by an exception (a stop, say).
         """
-        stats = PullStats(files_total=len(items), bytes_total=sum(i.size for i in items))
+        stats = stats if stats is not None else PullStats()
+        stats.files_total = len(items)
+        stats.bytes_total = sum(i.size for i in items)
         self._target.staging.mkdir(parents=True, exist_ok=True)
         self._load_copied_by_stamp()
         self._load_unrecorded()
@@ -312,6 +322,9 @@ class Puller:
                 stats.files_total,
                 stats.bytes_total,
                 current=None if current is None else shown(current),
+                duplicates_skipped=stats.duplicates_skipped,
+                failed=stats.failed,
+                transferred_bytes=stats.bytes_done - stats.bytes_not_transferred + in_flight,
             )
 
         def collect(timeout: float | None) -> None:
@@ -336,17 +349,21 @@ class Puller:
             stats.bytes_done += item.size
             if outcome is Outcome.copied:
                 stats.copied += 1
+                stats.bytes_copied += item.size
             elif outcome is Outcome.duplicate:
-                stats.duplicates_skipped += 1
+                stats.duplicates_skipped += 1  # its bytes were read, then dropped
             elif outcome is Outcome.linked:
                 stats.linked += 1
+                stats.bytes_not_transferred += item.size
             elif outcome is Outcome.changed:
                 stats.changed += 1
+                stats.bytes_not_transferred += item.size
                 stats.warnings.append(
                     f"{item.path} changed while it was being copied; it will be copied next time."
                 )
             elif outcome is Outcome.failed:
                 stats.failed += 1
+                stats.bytes_not_transferred += item.size
 
         try:
             report()

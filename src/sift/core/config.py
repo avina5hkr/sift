@@ -514,6 +514,11 @@ def _plain(e: Any) -> str:
     return "must be " + msg.removeprefix("Input should be ") if kind == "literal_error" else msg
 
 
+def plain_error_message(error: Any) -> str:
+    """One entry of `ValidationError.errors()` in plain words (for the settings API)."""
+    return _plain(error)
+
+
 def _describe(err: ValidationError) -> str:
     return "; ".join(
         f"{'.'.join(str(p) for p in e['loc'])}: {_plain(e)}" if e["loc"] else _plain(e)

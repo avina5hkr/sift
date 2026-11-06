@@ -1,6 +1,7 @@
 """A backup run as the app runs it: JobManager, then scan, the guard, the space check and pull."""
 
 import hashlib
+import json
 import os
 import time
 from collections.abc import Iterator
@@ -236,3 +237,80 @@ def test_a_manual_clock_runs_too(rig: Rig) -> None:
         describe=describe,
     )
     assert finished(jobs, jobs.start_backup(["Documents"])).state is JobState.done
+
+
+def summary_rows(rig: Rig) -> list[tuple[int, str, int, int, int, int]]:
+    """(job_id, outcome, new_files, failed, bytes, warnings count) of every run_summary row."""
+    with rig.ctx.db.read() as conn:
+        return [
+            (r[0], r[1], r[2], r[3], r[4], len(json.loads(r[5])))
+            for r in conn.execute(
+                "SELECT job_id, outcome, new_files, failed, bytes, warnings FROM run_summary "
+                "ORDER BY id"
+            )
+        ]
+
+
+def test_a_finished_run_leaves_one_summary_row_with_its_counts(rig: Rig) -> None:
+    jobs = rig.jobs()
+    job_id = jobs.start_backup(ENABLED_SMALL)
+    snap = finished(jobs, job_id)
+    ((row_job, outcome, new, failed, size, _w),) = summary_rows(rig)
+    assert (row_job, outcome, failed) == (job_id, "done", 0)
+    assert new == snap.files_done - snap.duplicates_skipped
+    assert size == sum(len(d) for d in tree(rig.root).values())
+    assert snap.failed == 0
+
+
+def test_a_dry_run_leaves_no_summary_row(rig: Rig) -> None:
+    jobs = rig.jobs()
+    finished(jobs, jobs.start_backup(["Screenshots"], dry_run=True))
+    assert summary_rows(rig) == []
+
+
+def test_a_stopped_run_still_records_what_it_copied(rig: Rig) -> None:
+    jobs = rig.jobs()
+    job_id = jobs.start_backup(ENABLED_SMALL)
+    deadline = time.monotonic() + 20
+    while True:
+        snap = next(s for s in jobs.snapshot() if s.id == job_id)
+        if snap.state is JobState.pulling and snap.files_done >= 1:
+            break
+        assert snap.state not in (JobState.done, JobState.failed) and time.monotonic() < deadline
+        time.sleep(0.005)
+    jobs.stop(job_id)
+    assert finished(jobs, job_id).stopped
+    ((_, outcome, new, _failed, _size, _w),) = summary_rows(rig)
+    assert outcome == "stopped" and new >= 1
+
+
+def test_a_refused_run_records_failed_and_the_job_has_the_reason(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run_module, "space_check", lambda *_a: "The Mac needs more free space.")
+    jobs = rig.jobs()
+    job_id = jobs.start_backup(["Screenshots"])
+    finished(jobs, job_id)
+    ((row_job, outcome, new, *_rest),) = summary_rows(rig)
+    assert (row_job, outcome, new) == (job_id, "failed", 0)
+
+
+def test_scan_warnings_are_kept_in_the_summary(rig: Rig) -> None:
+    jobs = rig.jobs()
+    finished(jobs, jobs.start_backup(["Screenshots"]))
+    for path in [p for p in rig.transport.phone.files if "/Screenshots/" in p]:
+        rig.transport.phone.remove(path)
+    job_id = jobs.start_backup(["Screenshots"])
+    deadline = time.monotonic() + 10
+    while next(s for s in jobs.snapshot() if s.id == job_id).state is not (
+        JobState.awaiting_confirmation
+    ):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    with rig.ctx.db.read() as conn:
+        (scan_id,) = conn.execute(
+            "SELECT id FROM scan WHERE state = 'awaiting_confirmation'"
+        ).fetchone()
+    discard_scan(rig.ctx.db, scan_id)
+    finished(jobs, job_id)
+    assert summary_rows(rig)[-1][5] >= 1  # the guard's warning
