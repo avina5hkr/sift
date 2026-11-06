@@ -285,10 +285,14 @@ class StallGuardedStream(io.RawIOBase):
       between reads never counts as a stall.
     - Early end: if the chunks end before `expected_size` bytes, the read raises what
       `short_end(received, expected)` returns, `DeviceDisconnected` by default (again on every
-      later read; `short_end` is asked once). More bytes than expected is fine (the file grew).
+      later read; `short_end` is asked once, and if it raises, the default is used). A short
+      stream never reads as a clean end. More bytes than expected is fine (the file grew).
+    - A failure is kept without its traceback (each read raises a fresh copy), so a failed
+      stream holds no reference cycle and is freed as soon as the caller drops it.
     - `close()` first calls `abort` (so a read blocked on another thread wakes up), then stops
-      the watchdog, closes the chunk iterator and calls `release` exactly once. A stream that
-      is dropped without `close()` is closed when it is collected.
+      the watchdog, closes the chunk iterator and calls `release` exactly once, even when two
+      threads close at the same time (the second returns at once). A stream that is dropped
+      without `close()` is closed when it is collected.
     """
 
     def __init__(
@@ -306,6 +310,8 @@ class StallGuardedStream(io.RawIOBase):
         poll_s: float | None = None,
     ) -> None:
         super().__init__()
+        self._close_lock = threading.Lock()
+        self._closing = False
         self._chunks = chunks
         self._path = path
         self._expected = expected_size
@@ -356,8 +362,10 @@ class StallGuardedStream(io.RawIOBase):
         return b"".join(parts)
 
     def close(self) -> None:
-        if self.closed:
-            return
+        with self._close_lock:
+            if self._closing or self.closed:
+                return
+            self._closing = True
         try:
             try:
                 self._abort()  # wakes a read blocked on another thread
@@ -381,7 +389,7 @@ class StallGuardedStream(io.RawIOBase):
             raise copy.copy(self._failure)  # a fresh instance (with `path`), no old traceback
 
     def _fail(self, error: TransportError) -> None:
-        self._failure = error
+        self._failure = _detached(error)
         self._raise_failure()
 
     def _timeout(self) -> DeviceTimeout:
@@ -403,7 +411,7 @@ class StallGuardedStream(io.RawIOBase):
                 if self._watchdog.stalled:
                     self._fail(self._timeout())
                 if isinstance(e, TransportError):
-                    self._failure = e
+                    self._failure = _detached(e)  # `e` holds this frame (and self) in its traceback
                     raise
                 self._fail(DeviceDisconnected(f"Lost the connection while reading {self._path}."))
             finally:
@@ -416,12 +424,25 @@ class StallGuardedStream(io.RawIOBase):
                 self._got_first = True
                 self._received += len(chunk)
                 return chunk
-        self._ended = True
         if self._expected is not None and self._received < self._expected:
-            if self._short_end is not None:
-                self._fail(self._short_end(self._received, self._expected))
-            self._fail(_ended_short(self._path, self._received, self._expected))
+            # The failure is stored before `_ended`, so no later read can mistake it for a
+            # clean end.
+            self._fail(self._short_end_error(self._received, self._expected))
+        self._ended = True
         return None
+
+    def _short_end_error(self, received: int, expected: int) -> TransportError:
+        if self._short_end is not None:
+            try:
+                return self._short_end(received, expected)
+            except Exception:
+                log.exception("Could not tell why the read of %s ended short", self._path)
+        return _ended_short(self._path, received, expected)
+
+
+def _detached(error: TransportError) -> TransportError:
+    """A copy of `error` with no traceback, cause or context to hold frames alive."""
+    return copy.copy(error).with_traceback(None)
 
 
 def _ended_short(path: str, received: int, expected: int) -> DeviceDisconnected:

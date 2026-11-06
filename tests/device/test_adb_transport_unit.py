@@ -3,6 +3,7 @@
 Nothing here may start a process: `subprocess.run` and `subprocess.Popen` fail if called.
 """
 
+import contextlib
 import gc
 import hashlib
 import shlex
@@ -10,7 +11,8 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Iterable, Iterator
+import weakref
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -1086,3 +1088,124 @@ def test_an_abandoned_walk_frees_its_connection(server: FakeAdbServer, phone: Ph
     del walking
     gc.collect()
     assert transport.stat("/sdcard/A/2.jpg") is not None
+
+
+# -- M1 carry-over: stream fixes ----------------------------------------------------------------
+
+
+def test_short_end_hook_failure_still_raises_on_every_read() -> None:
+    asked: list[int] = []
+
+    def short_end(received: int, expected: int) -> TransportError:
+        asked.append(received)
+        raise RuntimeError("the hook itself broke")
+
+    stream = StallGuardedStream(
+        iter([b"ab"]),
+        path="/p",
+        expected_size=4,
+        stall_s=5,
+        abort=lambda: None,
+        short_end=short_end,
+    )
+    assert stream.read(2) == b"ab"
+    for _ in range(3):  # never b"": a short stream must not look like a clean end
+        with pytest.raises(DeviceDisconnected, match="2 of 4 bytes"):
+            stream.read(2)
+    with pytest.raises(DeviceDisconnected):
+        stream.readall()
+    assert asked == [2]
+    stream.close()
+
+
+def _fails_with_transport_error() -> Iterator[bytes]:
+    yield b"a"
+    raise DeviceDisconnected("connection closed")
+
+
+def _fails_with_os_error() -> Iterator[bytes]:
+    yield b"a"
+    raise ConnectionResetError("reset by peer")
+
+
+def _ends_short() -> Iterator[bytes]:
+    yield b"a"
+
+
+@pytest.mark.parametrize("chunks", [_fails_with_transport_error, _fails_with_os_error, _ends_short])
+def test_failed_stream_has_no_reference_cycle(chunks: Callable[[], Iterator[bytes]]) -> None:
+    released: list[int] = []
+    stream = StallGuardedStream(
+        chunks(),
+        path="/p",
+        expected_size=4,
+        stall_s=5,
+        abort=lambda: None,
+        short_end=lambda received, expected: FileChanged("/p changed.", "/p"),
+        release=lambda: released.append(1),
+    )
+    ref = weakref.ref(stream)
+    gc.disable()
+    try:
+        assert stream.read(1) == b"a"
+        for _ in range(2):
+            try:
+                stream.read(1)
+            except TransportError:
+                pass
+            else:  # pragma: no cover
+                pytest.fail("the failed stream read without an error")
+        del stream
+        assert ref() is None  # freed by reference counting alone: no cycle through a traceback
+        assert released == [1]
+    finally:
+        gc.enable()
+
+
+class _RacyReleaseStream(StallGuardedStream):
+    """Holds every closer at the point where it takes the release callback.
+
+    Two closers that both get there before either clears it would both release; a correct
+    close lets only one through, so the other side of the barrier never arrives (and the
+    barrier's timeout lets the one closer carry on).
+    """
+
+    barrier = threading.Barrier(2, timeout=0.5)
+
+    @property
+    def _release(self) -> Callable[[], None] | None:
+        value = self.__dict__.get("_release_value")
+        with contextlib.suppress(threading.BrokenBarrierError):
+            self.barrier.wait()
+        return value
+
+    @_release.setter
+    def _release(self, value: Callable[[], None] | None) -> None:
+        self.__dict__["_release_value"] = value
+
+
+def test_concurrent_close_releases_once() -> None:
+    released: list[int] = []
+    _RacyReleaseStream.barrier = threading.Barrier(2, timeout=0.5)
+    stream = _RacyReleaseStream(
+        iter([b"a"]),
+        path="/p",
+        expected_size=1,
+        stall_s=5,
+        abort=lambda: None,
+        release=lambda: released.append(1),
+    )
+    start = threading.Barrier(2)
+
+    def closer() -> None:
+        start.wait()
+        stream.close()
+
+    threads = [threading.Thread(target=closer) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert not any(thread.is_alive() for thread in threads)
+    assert released == [1]
+    assert stream.closed
