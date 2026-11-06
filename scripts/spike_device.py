@@ -192,15 +192,17 @@ def main() -> int:
     # 4 / 3: >4 GiB RECV with hash, then tail TTFB at offsets 1, ~1 GB, >4 GiB
     big = max(regular, key=lambda e: e.size)
     out("largest_file_GiB", round(big.size / 2**30, 2))
-    if big.size > 2**32:
-        slice_at = 2**32 + 12345
+    if big.size > 2**31:
+        slice_at = min(3_500_000_000, big.size - 2 * MB)
         (sha_full, n, _, kept), secs = timed(
             lambda: stream_hash(t, big.path, keep=(slice_at, slice_at + MB))
         )
         out("big_recv_complete", n == big.size)
         out("big_recv_seconds/MBps", (round(secs, 1), round(n / MB / secs, 1)))
-        out("big_hash_matches_phone", sha_full == t.sha256([big.path]).get(big.path))
-        for off in (1, 10**9, slice_at):
+        phone_big, hsecs = timed(lambda: t.sha256([big.path]))
+        out("big_hash_matches_phone", sha_full == phone_big.get(big.path))
+        out("big_phone_hash_MBps", round(big.size / MB / hsecs) if hsecs else None)
+        for off in (1, 10**9, slice_at):  # 3.5 GB or near the end
             s = t.open_read(big.path, off)
             try:
                 t1 = time.perf_counter()
