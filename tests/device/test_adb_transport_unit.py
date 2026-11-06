@@ -150,7 +150,8 @@ def test_limits_defaults() -> None:
     limits = Limits()
     assert (limits.stat_s, limits.list_s, limits.read_stall_s, limits.delete_s) == (10, 60, 30, 15)
     assert (limits.sha_batch_files, limits.sha_batch_bytes) == (40, 8 * 10**9)
-    assert (limits.sha_min_s, limits.sha_assumed_bps, limits.max_connections) == (120, 10**8, 6)
+    assert limits.sha_min_s == 120
+    assert (limits.sha_assumed_bps, limits.max_connections) == (40 * 10**6, 6)
     assert limits.max_request_bytes == 0xFFFF  # an adb host request's length is 4 hex digits
 
 
@@ -679,9 +680,11 @@ def test_sha_batches_respect_count_and_bytes() -> None:
 
 def test_sha_batch_timeout_grows_with_bytes() -> None:
     limits = Limits()
-    assert adb_transport.sha_batch_timeout(1000, limits) == 120
-    assert adb_transport.sha_batch_timeout(8 * 10**9, limits) == 120
-    assert adb_transport.sha_batch_timeout(9 * 10**10, limits) == 900
+    bps = limits.sha_assumed_bps
+    floor, timeout = limits.sha_min_s, adb_transport.sha_batch_timeout
+    assert timeout(1000, limits) == floor
+    assert timeout(int(floor * bps / 2), limits) == floor
+    assert timeout(int(floor * bps * 5), limits) == floor * 5
 
 
 def test_a_batch_too_long_for_one_command_is_split(
@@ -887,9 +890,10 @@ def test_a_remote_error_mid_stream_keeps_its_path_on_every_read() -> None:
 
 def test_resume_allowance_covers_the_bytes_tail_must_skip() -> None:
     limits = Limits()
-    assert resume_allowance_s(0, limits) == 30
-    assert resume_allowance_s(3 * 10**9, limits) == 30
-    assert resume_allowance_s(6 * 10**9, limits) == 60
+    bps = limits.sha_assumed_bps
+    assert resume_allowance_s(0, limits) == limits.read_stall_s
+    assert resume_allowance_s(int(limits.read_stall_s * bps / 2), limits) == limits.read_stall_s
+    assert resume_allowance_s(int(limits.read_stall_s * bps * 2), limits) == limits.read_stall_s * 2
 
 
 def _clocked_stream(chunks: Iterator[bytes], now: list[float], aborted: threading.Event):

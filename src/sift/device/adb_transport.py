@@ -109,7 +109,8 @@ class Limits:
     sha_batch_files: int = 40
     sha_batch_bytes: int = 8 * 10**9
     sha_min_s: float = 120
-    sha_assumed_bps: int = 100 * 10**6
+    # ~half the ~86 MB/s cold rate measured on a reference phone; also drives tail resume allowance
+    sha_assumed_bps: int = 40 * 10**6
     max_connections: int = 6
     max_request_bytes: int = 0xFFFF  # an adb host request's length is 4 hex digits
 
