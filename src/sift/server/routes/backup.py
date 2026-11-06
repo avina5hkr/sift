@@ -9,12 +9,15 @@ shows a path in its display form only.
 
 import json
 import logging
+import subprocess
 import threading
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field, StrictBool, StrictStr, ValidationError
 
+from sift.backup.phonepaths import from_db, shown
 from sift.backup.scanner import ScanNotPending, confirm_scan, discard_scan
 from sift.backup.sets import resolve_roots
 from sift.backup.summary import (
@@ -278,6 +281,105 @@ def confirm(ctx: Ctx, scan_id: int) -> ScanOut:
 def discard(ctx: Ctx, scan_id: int) -> ScanOut:
     """Drop a held scan. Nothing changes, and the backup ends without copying."""
     return _answer_scan(ctx, scan_id, "discard")
+
+
+# -- what the Backup screen shows besides the running job ------------------------------------------
+
+
+class SetStatus(BaseModel):
+    name: str
+    enabled: bool
+    on_phone: int
+    backed_up: int
+    pending: int
+
+
+class RecentFile(BaseModel):
+    path: str
+    size: int
+    at: int
+
+
+class OverviewOut(BaseModel):
+    sets: list[SetStatus]
+    recent: list[RecentFile]
+    pending_scan: ScanOut | None
+    job: dict[str, Any] | None  # the backup running now, as in a `progress` event, else null
+
+
+RECENT_FILES = 8
+
+
+@router.get("/overview")
+def overview(ctx: Ctx) -> OverviewOut:
+    """Files per set (on the phone, backed up, still to copy), the last few files copied and
+    the scan the guard is holding for an answer, if any, and the backup running now (so a window
+    opened mid-run knows where it is before the next `progress` event)."""
+    with ctx.db.read() as conn:
+        counts = {
+            str(r[0]).casefold(): (int(r[1]), int(r[2]), int(r[3]))
+            for r in conn.execute(
+                "SELECT set_name, COUNT(*), SUM(state = 'done'), "
+                "SUM(state IN ('discovered', 'pulling', 'failed')) FROM phone_file "
+                "WHERE present = 1 AND state != 'skipped' AND set_name IS NOT NULL "
+                "GROUP BY set_name"
+            )
+        }
+        recent = conn.execute(
+            "SELECT f.remote_path, f.size, MAX(r.verified_at) AS at FROM phone_file f "
+            "JOIN replica r ON r.content_hash = f.content_hash WHERE f.state = 'done' "
+            "GROUP BY f.id ORDER BY at DESC, f.id DESC LIMIT ?",
+            (RECENT_FILES,),
+        ).fetchall()
+        held = conn.execute(
+            "SELECT id FROM scan WHERE state = 'awaiting_confirmation' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    sets = []
+    for s in ctx.config.backup.sets:
+        on_phone, backed_up, pending = counts.get(s.name.casefold(), (0, 0, 0))
+        sets.append(
+            SetStatus(
+                name=s.name,
+                enabled=s.enabled,
+                on_phone=on_phone,
+                backed_up=backed_up,
+                pending=pending,
+            )
+        )
+    running = (
+        [s for s in ctx.jobs.snapshot() if s.state not in TERMINAL and s.type == "backup"]
+        if ctx.jobs is not None
+        else []
+    )
+    return OverviewOut(
+        job=running[-1].as_event() if running else None,
+        sets=sets,
+        recent=[
+            RecentFile(path=shown(from_db(r[0])), size=int(r[1]), at=int(r[2])) for r in recent
+        ],
+        pending_scan=_load_scan(ctx, int(held[0])) if held else None,
+    )
+
+
+# -- opening the backup folder ---------------------------------------------------------------------
+
+
+@router.post("/open-folder")
+def open_folder(ctx: Ctx) -> dict[str, bool]:
+    """Show the configured Mac backup folder in Finder. It opens that folder and nothing else."""
+    root = Path(ctx.config.backup.mac_root).expanduser()
+    if not root.is_dir():
+        raise ApiError(
+            409, "no_backup_folder", "The backup folder does not exist yet. Run a backup first."
+        )
+    try:
+        subprocess.run(["open", "--", str(root)], check=True, timeout=10, capture_output=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        _log.warning("Could not open the backup folder: %s", e)
+        raise ApiError(
+            500, "open_failed", "Sift could not open the backup folder. Open it from Finder."
+        ) from e
+    return {"opened": True}
 
 
 # -- backup sets ---------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { QueryClient } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { startEventStream, useEventStore } from './events'
+import { dismissToast, startEventStream, useEventStore } from './events'
 import { initToken } from './token'
 
 class FakeEventSource {
@@ -29,7 +29,7 @@ class FakeEventSource {
 beforeEach(() => {
   FakeEventSource.instances = []
   vi.stubGlobal('EventSource', FakeEventSource)
-  useEventStore.setState({ connected: false, last: undefined })
+  useEventStore.setState({ connected: false, last: undefined, job: null, toasts: [] })
   initToken(
     new URL('http://127.0.0.1:1/backup?t=abc') as unknown as Location,
     { getItem: () => null, setItem: () => undefined } as unknown as Storage,
@@ -67,13 +67,52 @@ test('device and job events invalidate the status query', () => {
   expect(spy).toHaveBeenCalledTimes(2)
 })
 
-test('hello invalidates the status query, so a reconnect heals at once', () => {
+test('hello invalidates the status and backup queries, so a reconnect heals at once', () => {
   const qc = new QueryClient()
   const spy = vi.spyOn(qc, 'invalidateQueries')
   startEventStream(qc)
   FakeEventSource.instances[0].emit('hello', { version: '0.1.0' })
-  expect(spy).toHaveBeenCalledTimes(1)
+  expect(spy).toHaveBeenCalledTimes(2)
   expect(spy).toHaveBeenCalledWith({ queryKey: ['status'] })
+  expect(spy).toHaveBeenCalledWith({ queryKey: ['backup'] })
+})
+
+const JOB = { job_id: 4, type: 'backup', state: 'pulling', files_done: 1, bytes_done: 10 }
+
+test('progress events keep the newest backup job and refetch only when the state changes', () => {
+  const qc = new QueryClient()
+  const spy = vi.spyOn(qc, 'invalidateQueries')
+  startEventStream(qc)
+  const es = FakeEventSource.instances[0]
+  es.emit('progress', JOB)
+  expect(useEventStore.getState().job).toMatchObject({ job_id: 4, state: 'pulling' })
+  expect(spy).toHaveBeenCalledWith({ queryKey: ['backup'] })
+  spy.mockClear()
+  es.emit('progress', { ...JOB, files_done: 2 })
+  expect(spy).not.toHaveBeenCalled()
+  es.emit('progress', { ...JOB, state: 'done' })
+  expect(spy).toHaveBeenCalledWith({ queryKey: ['backup'] })
+})
+
+test('progress events of other kinds of job or without a job id are ignored', () => {
+  startEventStream(new QueryClient())
+  const es = FakeEventSource.instances[0]
+  es.emit('progress', { ...JOB, type: 'cleanup' })
+  es.emit('progress', { state: 'pulling', type: 'backup' })
+  expect(useEventStore.getState().job).toBeNull()
+})
+
+test('toast events queue up, at most four, and can be dismissed', () => {
+  startEventStream(new QueryClient())
+  const es = FakeEventSource.instances[0]
+  for (let i = 0; i < 5; i += 1) es.emit('toast', { level: 'warning', title: `T${i}`, message: 'm' })
+  es.emit('toast', { level: 'nonsense', title: 'Odd', message: 'm' })
+  es.emit('toast', { title: 3 })
+  const toasts = useEventStore.getState().toasts
+  expect(toasts).toHaveLength(4)
+  expect(toasts.at(-1)).toMatchObject({ title: 'Odd', level: 'info' })
+  dismissToast(toasts[0].id)
+  expect(useEventStore.getState().toasts).toHaveLength(3)
 })
 
 test('an error marks the stream disconnected', () => {

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
+import { useEventStore } from './lib/events'
 import { initToken } from './lib/token'
 
 const STATUS = {
@@ -197,4 +198,12 @@ test('the Settings page says when Settings arrive', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(STATUS), { status: 200 })))
   renderApp('/settings')
   expect(await screen.findByText('The Settings screens arrive in milestone M9.')).toBeInTheDocument()
+})
+
+test('shows messages from the engine as toasts', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(STATUS), { status: 200 })))
+  renderApp('/logs')
+  useEventStore.setState({ toasts: [{ id: 99, level: 'info', title: 'Backup finished', message: 'All done.' }] })
+  expect(await screen.findByText('Backup finished')).toBeInTheDocument()
+  useEventStore.setState({ toasts: [] })
 })

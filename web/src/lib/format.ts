@@ -11,3 +11,42 @@ export function formatBytes(n: number): string {
   }
   return unit === 0 ? `${Math.round(value)} B` : `${value.toFixed(1)} ${UNITS[unit]}`
 }
+
+// 37_800_000 -> "37.8 MB/s"
+export function formatSpeed(bps: number): string {
+  return `${formatBytes(bps)}/s`
+}
+
+// Rounded the way a person says it: "under a minute", "about 41 min", "about 2 h 5 min".
+export function formatEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return ''
+  if (seconds < 60) return 'under a minute'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `about ${minutes} min`
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  return m === 0 ? `about ${h} h` : `about ${h} h ${m} min`
+}
+
+// 12430 -> "12,430"
+export function formatCount(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
+// Seconds since the epoch -> "4 Nov 22:10" (local time).
+export function formatWhen(epochSeconds: number): string {
+  const d = new Date(epochSeconds * 1000)
+  const month = d.toLocaleString('en-GB', { month: 'short' })
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${d.getDate()} ${month} ${hh}:${mm}`
+}
+
+// 125 -> "2 min 5 s"
+export function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds))
+  if (s < 60) return `${s} s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} min ${s % 60} s`
+  return `${Math.floor(m / 60)} h ${m % 60} min`
+}

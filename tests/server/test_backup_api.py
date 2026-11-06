@@ -144,6 +144,8 @@ ROUTES = [
     ("POST", "/api/backup/scan/1/discard"),
     ("GET", "/api/backup/sets"),
     ("PUT", "/api/backup/sets"),
+    ("GET", "/api/backup/overview"),
+    ("POST", "/api/backup/open-folder"),
 ]
 
 
@@ -626,3 +628,81 @@ def test_concurrent_retries_start_exactly_one_backup(rig: Rig) -> None:
     finally:
         release.set()
         jobs.stop_all(5)
+
+
+# -- overview and open folder --------------------------------------------------------------------
+
+
+def test_overview_before_any_backup_lists_the_sets_with_no_files(rig: Rig) -> None:
+    body = rig.get("overview").json()
+    assert [s["name"] for s in body["sets"]] == [s.name for s in rig.ctx.config.backup.sets]
+    assert all(s["on_phone"] == s["backed_up"] == s["pending"] == 0 for s in body["sets"])
+    assert body["recent"] == [] and body["pending_scan"] is None and body["job"] is None
+
+
+def test_overview_counts_files_and_lists_the_last_eight(rig: Rig) -> None:
+    rig.run(["Screenshots"])
+    body = rig.get("overview").json()
+    shots = next(s for s in body["sets"] if s["name"] == "Screenshots")
+    assert shots["on_phone"] > 0 and shots["backed_up"] == shots["on_phone"]
+    assert shots["pending"] == 0
+    assert 0 < len(body["recent"]) <= 8
+    assert all(f["path"].startswith("/") and f["size"] >= 0 for f in body["recent"])
+
+
+def test_overview_shows_the_scan_the_guard_holds(rig: Rig) -> None:
+    _job_id, scan_id = _guarded(rig)
+    held = rig.get("overview").json()["pending_scan"]
+    assert held["id"] == scan_id and held["state"] == "awaiting_confirmation"
+    assert held["disappearance"]
+    rig.post(f"scan/{scan_id}/discard")
+
+
+def test_open_folder_opens_the_configured_folder_only(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "sift.server.routes.backup.subprocess.run",
+        lambda cmd, **_kw: calls.append(cmd),
+    )
+    rig.root.mkdir(parents=True, exist_ok=True)
+    resp = rig.post("open-folder", {"path": "/etc"})  # a body is ignored
+    assert resp.status_code == 200
+    assert calls == [["open", "--", str(rig.root)]]
+
+
+def test_open_folder_before_the_folder_exists_is_a_plain_409(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "sift.server.routes.backup.subprocess.run",
+        lambda cmd, **_kw: calls.append(cmd),
+    )
+    resp = rig.post("open-folder")
+    assert resp.status_code == 409 and resp.json()["code"] == "no_backup_folder"
+    assert calls == []
+
+
+def test_open_folder_failure_is_plain_words(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(cmd: list[str], **_kw: Any) -> None:
+        raise OSError("no open")
+
+    monkeypatch.setattr("sift.server.routes.backup.subprocess.run", boom)
+    rig.root.mkdir(parents=True, exist_ok=True)
+    resp = rig.post("open-folder")
+    assert resp.status_code == 500 and resp.json()["code"] == "open_failed"
+
+
+def test_overview_names_the_running_backup(rig: Rig) -> None:
+    jobs, release = blocking_jobs(rig.ctx)
+    rig.ctx.jobs = jobs
+    try:
+        job_id = rig.post("start", {"sets": ["Screenshots"]}).json()["job_id"]
+        job = rig.get("overview").json()["job"]
+        assert job["job_id"] == job_id and job["state"] in ("queued", "pulling")
+    finally:
+        release.set()
+        rig.wait_job(job_id)
+    assert rig.get("overview").json()["job"] is None

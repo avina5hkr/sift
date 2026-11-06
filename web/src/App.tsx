@@ -1,12 +1,13 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { Navigate, Route, Routes, useNavigate } from 'react-router'
 import { ConfigWarnings } from './components/ConfigWarnings'
 import { DeviceBanner } from './components/DeviceBanner'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
+import { Toasts } from './components/Toasts'
 import { ApiError, apiFetch } from './lib/api'
-import type { StatusResponse } from './lib/types'
+import { useStatus } from './lib/useStatus'
 import BackupPage from './pages/BackupPage'
 import CleanupPage from './pages/CleanupPage'
 import LogsPage from './pages/LogsPage'
@@ -15,11 +16,7 @@ import SettingsPage from './pages/SettingsPage'
 
 export default function App() {
   const navigate = useNavigate()
-  const status = useQuery({
-    queryKey: ['status'],
-    queryFn: () => apiFetch<StatusResponse>('/api/status'),
-    refetchInterval: 30_000,
-  })
+  const status = useStatus()
 
   const qc = useQueryClient()
   const retry = useMutation({
@@ -72,6 +69,7 @@ export default function App() {
           </Routes>
         </main>
       </div>
+      <Toasts />
     </div>
   )
 }
