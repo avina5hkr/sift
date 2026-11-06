@@ -625,6 +625,80 @@ def test_crash_between_rename_and_rows_recovers_without_duplicate(rig: Rig) -> N
     assert {row[0] for row in phone_rows(rig.db).values()} == {"done"}
 
 
+def _crash_at_rename(rig: Rig) -> None:
+    """Pull until the first crash between a rename and its rows, then recover."""
+    hits: list[str] = []
+
+    def crash_once(name: str) -> None:
+        if name == CRASH_POINT and not hits:
+            hits.append(name)
+            raise SimulatedCrash
+
+    crashpoints.install(crash_once)
+    with pytest.raises(SimulatedCrash):
+        rig.pull()
+    crashpoints.install(None)
+    recover(rig.db)
+
+
+def _fill_camera(rig: Rig, count: int = 6) -> None:
+    """Older files beside the one under test, so one file renamed never trips the guard."""
+    for i in range(count):
+        rig.add(f"/sdcard/DCIM/Camera/old_{i}.jpg", f"old {i}".encode(), mtime=OLD - 1000 - i)
+
+
+def test_a_file_renamed_after_a_crash_at_the_rename_is_not_stored_twice(rig: Rig) -> None:
+    path, data = "/sdcard/DCIM/Camera/IMG_1.jpg", b"crash me" * 100
+    _fill_camera(rig)
+    rig.add(path, data)  # the newest: pulled first
+    _crash_at_rename(rig)
+    rig.phone.remove(path)
+    rig.add("/sdcard/DCIM/Camera/IMG_1 renamed.jpg", data)
+    stats = rig.pull()
+    assert stats.failed == 0
+    assert tree(rig.root)[_target_of(path, data)] == data  # the file the crash left is used
+    assert_tree_matches_rows(rig)
+
+
+def test_a_newer_copy_found_after_a_crash_at_the_rename_is_not_stored_twice(rig: Rig) -> None:
+    path, data = "/sdcard/DCIM/Camera/IMG_1.jpg", b"crash me" * 100
+    _fill_camera(rig)
+    rig.add(path, data)
+    _crash_at_rename(rig)
+    rig.add("/sdcard/DCIM/Camera/IMG_1 copy.jpg", data, mtime=OLD + 1)  # newer: pulled first
+    stats = rig.pull()
+    assert stats.failed == 0
+    assert_tree_matches_rows(rig)
+    assert {row[0] for row in phone_rows(rig.db).values()} == {"done"}
+
+
+def test_a_crash_at_a_hash8_rename_then_a_rename_on_the_phone_stores_once(rig: Rig) -> None:
+    first, data = "/sdcard/DCIM/Camera/IMG_1.jpg", b"crash me" * 100
+    _fill_camera(rig)
+    rig.add("/sdcard/DCIM/Camera/img_1.JPG", b"same name, other bytes", mtime=OLD + 1)
+    rig.add(first, data)  # takes IMG_1_HASH8.jpg: the other one owns the name
+    hits: list[str] = []
+
+    def crash_second(name: str) -> None:
+        if name == CRASH_POINT:
+            hits.append(name)
+            if len(hits) == 2:
+                raise SimulatedCrash
+
+    crashpoints.install(crash_second)
+    with pytest.raises(SimulatedCrash):
+        rig.pull()
+    crashpoints.install(None)
+    recover(rig.db)
+    tagged = f"Phone/DCIM/Camera/IMG_1_{sha(data)[:8]}.jpg"
+    assert tree(rig.root)[tagged] == data
+    rig.phone.remove(first)
+    rig.add("/sdcard/DCIM/Camera/IMG_1 renamed.jpg", data)
+    assert rig.pull().failed == 0
+    assert tree(rig.root)[tagged] == data
+    assert_tree_matches_rows(rig)
+
+
 def test_recovery_sweeps_parts_and_resets_pulling(rig: Rig) -> None:
     rig.add("/sdcard/DCIM/Camera/a.jpg", b"a")
     rig.scan()

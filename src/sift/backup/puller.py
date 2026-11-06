@@ -17,11 +17,12 @@ Copying one file:
 3. **Duplicate:** content that already has a copy in the backup folder is not stored again:
    the `.part` is dropped and the row is aliased to that content (`duplicates_skipped`).
 4. The destination path is chosen once (layout, then collision against the paths already
-   recorded) and stored on the row; `StagedFile.commit` flushes, renames without replacing
-   anything, and reads the file back. Only then are the `content` and `replica` rows written,
-   in one transaction (crash point `puller.after_rename_before_rows` sits just before it; a
-   test's simulated crash there must raise a `BaseException` that is not an `Exception`, or it
-   counts as a failed file instead of ending the run).
+   recorded) and stored on the row before the rename (the `_HASH8` form too, when the
+   collision gives one); `StagedFile.commit` flushes, renames without replacing anything, and
+   reads the file back. Only then are the `content` and `replica` rows written, in one
+   transaction (crash point `puller.after_rename_before_rows` sits just before it; a test's
+   simulated crash there must raise a `BaseException` that is not an `Exception`, or it counts
+   as a failed file instead of ending the run).
 5. **`TargetExists`:** a file is already at that path with no row (a crash at that crash
    point, say). Its SHA-256 is read: the same bytes means it is the copy: it is flushed to the
    disk with its folder (it may never have been), the `.part` is dropped and the rows are
@@ -29,8 +30,14 @@ Copying one file:
    symlink, a FIFO, a folder: never opened or followed), send the copy to the `_HASH8` path;
    if that is taken too by anything else, the file is `failed`. An existing file is never
    modified (I1).
+6. **A copy a crash left with no rows:** before committing, a file at a path stored on a
+   row, that no replica row owns and that holds exactly these bytes (verified by SHA-256), is
+   used instead of storing the bytes again; it is flushed to the disk first, as in step 5.
+   This is what keeps one content stored once when, after such a crash, the phone file was
+   renamed or a newer copy of it is pulled first. Such paths are listed once per run: only a
+   crash makes one, and a crash ends the run.
 
-Deciding on a copy (steps 3 to 5) is serialised, so two readers can never both store the same
+Deciding on a copy (steps 3 to 6) is serialised, so two readers can never both store the same
 content or claim the same path; the transfers themselves run in parallel.
 
 Row states: `discovered → pulling → done | failed | discovered`. Pause and Stop let the files in
@@ -40,7 +47,9 @@ phone and goes on; it is never a failed file.
 
 import logging
 import mimetypes
+import os
 import queue
+import stat
 import threading
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -263,6 +272,7 @@ class Puller:
         # never both store one content or claim one path.
         self._decide = threading.Lock()
         self._copied_by_stamp: dict[tuple[int, int], str] = {}
+        self._unrecorded: dict[int, list[str]] = {}  # file size -> paths with no replica row
 
     # -- the coordinator (the job's own thread) -----------------------------------------------
 
@@ -274,6 +284,7 @@ class Puller:
         stats = PullStats(files_total=len(items), bytes_total=sum(i.size for i in items))
         self._target.staging.mkdir(parents=True, exist_ok=True)
         self._load_copied_by_stamp()
+        self._load_unrecorded()
         pending = deque(items)
         inflight: dict[int, PullItem] = {}
         results: queue.Queue[tuple[PullItem, Outcome, BaseException | None]] = queue.Queue()
@@ -453,7 +464,9 @@ class Puller:
                 if self._has_copy(digest):
                     self._record_alias(item, digest)
                     return Outcome.duplicate  # leaving the `with` drops the .part
-                rel_path = self._commit(staged, item, digest)
+                rel_path = self._unrecorded_copy(digest, staged.size) or self._commit(
+                    staged, item, digest
+                )
                 hit(CRASH_POINT)
                 self._record_copy(item, digest, rel_path)
         return Outcome.copied
@@ -518,6 +531,8 @@ class Puller:
             )
             final = self._target.root / rel_path
             final.parent.mkdir(parents=True, exist_ok=True)
+            if rel_path != base:  # stored too, so a crash after the rename leaves it findable
+                self._save_rel_path(item, rel_path)
             try:
                 staged.commit(final, mtime=item.mtime)
                 return rel_path
@@ -559,6 +574,49 @@ class Puller:
                 (self._target.dest_id, self._device_id),
             ).fetchall()
         self._copied_by_stamp = {(int(r[0]), int(r[1])): str(r[2]) for r in rows}
+
+    def _load_unrecorded(self) -> None:
+        """The paths stored on rows that no replica row here owns, by the size of their file.
+
+        After a crash between a rename and its rows, the copy's path is one of them. Built once
+        per run (one query each for rows and replicas; a stat for each such path).
+        """
+        with self._db.read() as conn:
+            owned = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT rel_key FROM replica WHERE dest_id = ?", (self._target.dest_id,)
+                )
+            }
+            stored = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT DISTINCT rel_path FROM phone_file WHERE rel_path IS NOT NULL"
+                )
+            ]
+        self._unrecorded = {}
+        for rel_path in stored:
+            if rel_key(rel_path) in owned:
+                continue
+            try:
+                st = os.lstat(self._target.root / rel_path)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                self._unrecorded.setdefault(st.st_size, []).append(rel_path)
+
+    def _unrecorded_copy(self, digest: str, size: int) -> str | None:
+        """The path of a file with no replica row holding exactly `digest`, made durable."""
+        for rel_path in self._unrecorded.get(size, []):
+            if self._owner_of(rel_key(rel_path)) is not None:
+                continue  # recorded since the run began
+            final = self._target.root / rel_path
+            if regular_file_sha256(final) == digest:  # None: gone, or not a regular file
+                log.info("Using the copy a crash left at %r", rel_path)
+                make_durable(final)
+                self._unrecorded[size].remove(rel_path)
+                return rel_path
+        return None
 
     def _known_content(self, item: PullItem) -> str | None:
         """Content this file probably is, already copied here: worth asking the phone's hash."""
