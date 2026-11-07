@@ -27,7 +27,7 @@ from sift.backup.summary import (
     undo_reset,
 )
 from sift.core.config import BackupSet, plain_error_message, save_config
-from sift.core.jobs import TERMINAL, JobError, JobManager, JobNotFound
+from sift.core.jobs import NO_PHONE_MESSAGE, TERMINAL, JobError, JobManager, JobNotFound, NoPhone
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.services.plainwords import describe
@@ -164,8 +164,10 @@ class SummaryOut(BaseModel):
 
 @router.get("/summary")
 def summary(ctx: Ctx) -> SummaryOut | None:
-    """What the last finished backup did, or null before the first one."""
-    found = latest_summary(ctx.db)
+    """What the connected phone's last finished backup did; null before its first one, or with
+    no phone connected."""
+    device_id = _connected_device_id(ctx)
+    found = None if device_id is None else latest_summary(ctx.db, device_id=device_id)
     return None if found is None else SummaryOut(**found)
 
 
@@ -185,8 +187,11 @@ class FailuresOut(BaseModel):
 
 @router.get("/failures")
 def failures(ctx: Ctx) -> FailuresOut:
-    """Files still on the phone that could not be copied, each with a plain-words reason."""
-    files = [FailedOut(**f.__dict__) for f in failed_files(ctx.db)]
+    """Files still on the connected phone that could not be copied, each with a plain-words
+    reason. Empty with no phone connected."""
+    device_id = _connected_device_id(ctx)
+    found = [] if device_id is None else failed_files(ctx.db, device_id)
+    files = [FailedOut(**f.__dict__) for f in found]
     return FailuresOut(count=len(files), files=files)
 
 
@@ -199,18 +204,22 @@ class RetryOut(BaseModel):
 def retry_failed(ctx: Ctx) -> RetryOut:
     """Put the failed files back in the queue and start a backup (409 if one is running).
 
-    A normal backup never retries them by itself. Only files of sets that are still in the
-    settings are queued; the rest stay listed as failed. The whole sequence (is one running,
+    A normal backup never retries them by itself. Only the connected phone's files of sets that
+    are still in the settings are queued; the rest stay listed as failed. With no phone
+    connected it is a plain 409 and nothing changes. The whole sequence (is one running,
     reset, start) runs under one lock, shared with Start, so two requests cannot interleave.
     """
     jobs = _jobs(ctx)
     with _run_lock:
         if any(s.state not in TERMINAL for s in jobs.snapshot()):
             raise ApiError(409, "job_conflict", "A backup is already running.")
+        device_id = _connected_device_id(ctx)
+        if device_id is None:
+            raise ApiError(409, NoPhone.code, NO_PHONE_MESSAGE)
         configured = {s.name.casefold(): s.name for s in ctx.config.backup.sets}
-        reset = reset_failed(ctx.db, configured)
+        reset = reset_failed(ctx.db, device_id, configured)
         if not reset:
-            if failed_files(ctx.db):
+            if failed_files(ctx.db, device_id):
                 raise ApiError(
                     422,
                     "unknown_set",
@@ -265,7 +274,7 @@ def _load_scan(ctx: Ctx, scan_id: int) -> ScanOut:
         sets=json.loads(r[2]) if r[2] else [],
         started_at=r[3],
         finished_at=r[4],
-        warnings=json.loads(r[5]) if r[5] else [],
+        warnings=[shown(str(w)) for w in json.loads(r[5])] if r[5] else [],
         disappearance=stats.get("disappearance", []) if isinstance(stats, dict) else [],
     )
 

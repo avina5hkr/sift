@@ -365,7 +365,8 @@ class Puller:
                 stats.changed += 1
                 stats.bytes_not_transferred += item.size
                 stats.warnings.append(
-                    f"{item.path} changed while it was being copied; it will be copied next time."
+                    f"{shown(item.path)} changed while it was being copied; "
+                    "it will be copied next time."
                 )
             elif outcome is Outcome.failed:
                 stats.failed += 1
@@ -448,13 +449,15 @@ class Puller:
             return Outcome.disconnected
         except Exception as exc:
             if isinstance(exc, (*RETRYABLE, TargetExists)):
-                log.warning("Could not copy %r: %s", item.path, shown(str(exc)))
+                log.warning("Could not copy %r: %s", shown(item.path), shown(str(exc)))
             else:  # not a failure the puller expects: keep the traceback
-                log.exception("Could not copy %r", item.path)
+                log.exception("Could not copy %r", shown(item.path))
             self._set_state(item, "failed", error=self._describe(exc))
             return Outcome.failed
         if outcome is Outcome.changed:
-            log.warning("%r changed while it was being copied; it is left for later", item.path)
+            log.warning(
+                "%r changed while it was being copied; it is left for later", shown(item.path)
+            )
             self._set_state(item, "discovered", error=self._describe(FileChanged("", item.path)))
         return outcome
 

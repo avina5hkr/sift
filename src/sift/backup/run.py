@@ -2,7 +2,8 @@
 
 `run_backup` is what the app's `JobManager` runs for each backup job:
 
-1. **Scan** the ticked sets (redone from the start if the phone disconnects meanwhile).
+1. **Scan** the ticked sets (redone from the start if the phone disconnects or stops
+   responding meanwhile).
 2. **Guard:** when the mass-disappearance guard stops the scan, the job shows
    `awaiting_confirmation` and waits (stop ends the wait) until the owner confirms the scan,
    which applies it, or discards it, which ends the run with nothing copied.
@@ -19,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
-from sift.backup.scanner import scan, space_check
+from sift.backup.scanner import ScanResult, scan, space_check
 from sift.backup.sets import resolve_roots
 from sift.backup.skiprules import SkipRules
 from sift.backup.summary import record_summary
@@ -29,7 +30,7 @@ from sift.core.context import AppContext
 from sift.core.db import Database
 from sift.core.jobs import JobControl, JobRefused, JobState, JobStopped
 from sift.device.session import DeviceSession
-from sift.device.transport import DeviceDisconnected
+from sift.device.transport import DeviceDisconnected, DeviceTimeout
 from sift.services.plainwords import describe
 
 log = logging.getLogger(__name__)
@@ -86,12 +87,17 @@ def _scan_state(db: Database, scan_id: int) -> str:
     return str(row[0]) if row is not None else "discarded"
 
 
-def _device_id(db: Database, device_uuid: str) -> int:
+def _stored_device_id(db: Database, device_uuid: str) -> int | None:
     with db.read() as conn:
         row = conn.execute("SELECT id FROM device WHERE uuid = ?", (device_uuid,)).fetchone()
-    if row is None:
+    return None if row is None else int(row[0])
+
+
+def _device_id(db: Database, device_uuid: str) -> int:
+    found = _stored_device_id(db, device_uuid)
+    if found is None:
         raise ValueError("the phone being backed up is not stored")
-    return int(row[0])
+    return found
 
 
 @dataclass
@@ -168,19 +174,26 @@ def _run(
     names = list(dict.fromkeys(r.set_name for r in roots))
     rules = SkipRules.from_config(config)
 
+    def scan_once(session: DeviceSession) -> ScanResult:
+        if progress.device_id is None:  # the summary belongs to this phone however the run ends
+            progress.device_id = _stored_device_id(db, session.device_uuid)
+        try:
+            return scan(
+                session,
+                db,
+                roots,
+                rules,
+                clock=clock,
+                settle_s=config.backup.settle_seconds,
+                sleep=sleep,
+            )
+        except DeviceTimeout:
+            # A stall is treated like a disconnect: wait for the phone, then scan again.
+            log.warning("The phone stopped responding during the scan; it is scanned again")
+            raise
+
     ctl.set_state(JobState.scanning)
-    result = ctl.on_phone(
-        lambda session: scan(
-            session,
-            db,
-            roots,
-            rules,
-            clock=clock,
-            settle_s=config.backup.settle_seconds,
-            sleep=sleep,
-        ),
-        disconnect_on=(DeviceDisconnected,),
-    )
+    result = ctl.on_phone(scan_once, disconnect_on=(DeviceDisconnected, DeviceTimeout))
     for warning in result.warnings:
         log.warning("Scan: %s", warning)
     progress.warnings.extend(result.warnings)

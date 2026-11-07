@@ -1,8 +1,8 @@
 """What a backup run did, and which files failed (the run summary row and the failures list).
 
 `record_summary` writes one `run_summary` row when a run ends. The failures list and Retry work
-on `phone_file` rows in state `failed`; both show a phone path only in its display form (`%XX`
-for a byte that is not UTF-8), never the stored NUL-escaped text.
+on `phone_file` rows in state `failed` of one phone (the one connected); both show a phone path
+only in its display form (`%XX` for a byte that is not UTF-8), never the stored NUL-escaped text.
 """
 
 import json
@@ -80,9 +80,34 @@ _SUMMARY_COLUMNS = (
 )
 
 
-def latest_summary(db: Database, job_id: int | None = None) -> dict[str, Any] | None:
-    """The newest run's summary (or that of `job_id`), or None when there is none."""
-    where, args = ("WHERE s.job_id = ? ", (job_id,)) if job_id is not None else ("", ())
+def _json_list(text: str | None, *, display: bool) -> list[str]:
+    """A stored JSON list of strings; anything else reads as empty. With `display`, each item in
+    its display form, so a raw phone path stored before every path went through `shown` (a lone
+    surrogate that no response can encode) still reads."""
+    try:
+        value = json.loads(text or "[]")
+    except ValueError:
+        return []
+    if not isinstance(value, list):
+        return []
+    items = [str(v) for v in value if isinstance(v, (str, int, float))]
+    return [shown(v) for v in items] if display else items
+
+
+def latest_summary(
+    db: Database, job_id: int | None = None, *, device_id: int | None = None
+) -> dict[str, Any] | None:
+    """The newest run's summary (or that of `job_id`, or the newest of the phone `device_id`),
+    or None when there is none."""
+    clauses: list[str] = []
+    args: list[int] = []
+    if job_id is not None:
+        clauses.append("s.job_id = ?")
+        args.append(job_id)
+    if device_id is not None:
+        clauses.append("s.device_id = ?")
+        args.append(device_id)
+    where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
     with db.read() as conn:
         r = conn.execute(
             f"SELECT {_SUMMARY_COLUMNS} FROM run_summary s LEFT JOIN job j ON j.id = s.job_id "
@@ -93,7 +118,7 @@ def latest_summary(db: Database, job_id: int | None = None) -> dict[str, Any] | 
         return None
     return {
         "job_id": r[0],
-        "sets": json.loads(r[1] or "[]"),
+        "sets": _json_list(r[1], display=False),
         "outcome": "discarded" if r[13] else r[2],
         "started_at": r[3],
         "finished_at": r[4],
@@ -104,17 +129,19 @@ def latest_summary(db: Database, job_id: int | None = None) -> dict[str, Any] | 
         "moved_links": r[8],
         "changed_files": r[9],
         "bytes": r[10],
-        "warnings": json.loads(r[11] or "[]"),
-        "error": r[12],
+        "warnings": _json_list(r[11], display=True),
+        "error": shown(r[12]) if r[12] else r[12],
     }
 
 
-def failed_files(db: Database) -> list[FailedFile]:
-    """Files still on the phone whose last copy failed, with the reason in plain words."""
+def failed_files(db: Database, device_id: int) -> list[FailedFile]:
+    """Files still on the phone `device_id` whose last copy failed, with the reason in plain
+    words."""
     with db.read() as conn:
         rows = conn.execute(
             "SELECT id, remote_path, size, set_name, attempts, error FROM phone_file "
-            "WHERE state = 'failed' AND present = 1 ORDER BY id"
+            "WHERE device_id = ? AND state = 'failed' AND present = 1 ORDER BY id",
+            (device_id,),
         ).fetchall()
     return [
         FailedFile(
@@ -130,9 +157,10 @@ def failed_files(db: Database) -> list[FailedFile]:
 
 
 def reset_failed(
-    db: Database, only_sets: Collection[str]
+    db: Database, device_id: int, only_sets: Collection[str]
 ) -> list[tuple[int, str | None, int, str | None]]:
-    """Put failed files of the sets named (ignoring case) back to `discovered`.
+    """Put failed files of the phone `device_id` in the sets named (ignoring case) back to
+    `discovered`. Another phone's failed files are never touched.
 
     A failed file of any other set (one no longer in the settings) is left as it is, still
     listed as failed: a run would never copy it. Returns (id, error, attempts, set_name) of
@@ -144,7 +172,8 @@ def reset_failed(
             r
             for r in conn.execute(
                 "SELECT id, error, attempts, set_name FROM phone_file "
-                "WHERE state = 'failed' AND present = 1"
+                "WHERE device_id = ? AND state = 'failed' AND present = 1",
+                (device_id,),
             )
             if r[3] is not None and r[3].casefold() in wanted
         ]

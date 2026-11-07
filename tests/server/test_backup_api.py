@@ -371,9 +371,13 @@ def test_retry_while_a_backup_runs_is_409_and_changes_nothing(rig: Rig) -> None:
 def test_retry_with_no_phone_puts_the_failures_back_as_they_were(rig: Rig) -> None:
     rig.run(["Screenshots", "Documents"])
     _fail_rows(rig, 2)
+    session = rig.ctx.tracker.current  # type: ignore[union-attr]
     rig.ctx.tracker.current = None  # type: ignore[union-attr]
     resp = rig.post("retry")
     assert resp.status_code == 409 and resp.json()["code"] == "no_phone"
+    assert resp.json()["message"] == "Connect your phone to start a backup."
+    assert rig.get("failures").json() == {"count": 0, "files": []}  # no phone, nothing listed
+    rig.ctx.tracker.current = session  # type: ignore[union-attr]
     failures = rig.get("failures").json()
     assert failures["count"] == 2
     assert {f["reason"] for f in failures["files"]} == {"The phone disconnected."}
@@ -786,3 +790,112 @@ def test_open_folder_refuses_an_app(
         resp = rig.post("open-folder")
         assert resp.status_code == 409 and resp.json()["code"] == "no_backup_folder"
     assert calls == []
+
+
+# -- final review fixes --------------------------------------------------------------------------
+
+
+def test_a_changed_file_with_a_name_that_is_not_utf8_leaves_a_summary_that_reads(
+    rig: Rig,
+) -> None:
+    odd = "/sdcard/Pictures/Screenshots/caf\udce9.png"
+    rig.transport.phone.add_file(odd, b"y" * 5000, mtime=1_700_000_000)
+    rig.transport.faults.size_change_mid_read.add(odd)
+    job_id = rig.run(["Screenshots"])
+    resp = rig.get("summary")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["job_id"] == job_id and body["changed_files"] == 1
+    assert any("/sdcard/Pictures/Screenshots/caf%E9.png" in w for w in body["warnings"])
+
+
+def test_a_summary_stored_with_a_raw_phone_path_still_reads(rig: Rig) -> None:
+    record_summary(
+        rig.ctx.db,
+        job_id=1,
+        device_id=1,
+        sets=["Screenshots"],
+        outcome="done",
+        started_at=1,
+        finished_at=2,
+        stats=PullStats(warnings=["/sdcard/caf\udce9.jpg changed", "odd \ud800 one"]),
+        warnings=[],
+    )
+    resp = rig.get("summary")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["warnings"] == ["/sdcard/caf%E9.jpg changed", "odd \ufffd one"]
+
+
+def test_a_summary_with_unreadable_warnings_still_reads(rig: Rig) -> None:
+    record_summary(
+        rig.ctx.db,
+        job_id=1,
+        device_id=1,
+        sets=["Screenshots"],
+        outcome="done",
+        started_at=1,
+        finished_at=2,
+        stats=PullStats(),
+        warnings=[],
+    )
+    with rig.ctx.db.tx() as conn:
+        conn.execute("UPDATE run_summary SET warnings = '{not json', sets = '7'")
+    resp = rig.get("summary")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["warnings"] == [] and resp.json()["sets"] == []
+
+
+def test_failures_retry_and_summary_belong_to_the_connected_phone(rig: Rig) -> None:
+    rig.run(["Screenshots", "Documents"])
+    ours = _fail_rows(rig, 2)
+    other = _other_phone(rig)  # dev-2 has one failed Screenshots file
+    assert other > 0
+    with rig.ctx.db.read() as conn:
+        (theirs,) = conn.execute(
+            "SELECT id FROM phone_file WHERE state = 'failed' AND device_id != 1"
+        ).fetchone()
+        dev2 = int(conn.execute("SELECT id FROM device WHERE uuid = 'dev-2'").fetchone()[0])
+    record_summary(
+        rig.ctx.db,
+        job_id=9999,
+        device_id=dev2,
+        sets=["Camera"],
+        outcome="failed",
+        started_at=1,
+        finished_at=2,
+        stats=PullStats(),
+        warnings=[],
+    )
+    # Phone 1 is connected: only its failures, its summary.
+    failures = rig.get("failures").json()
+    assert sorted(f["id"] for f in failures["files"]) == sorted(ours)
+    assert rig.get("summary").json()["job_id"] != 9999
+    resp = rig.post("retry")
+    assert resp.status_code == 200 and resp.json()["retried"] == 2
+    rig.wait_job(resp.json()["job_id"])
+    with rig.ctx.db.read() as conn:
+        (state,) = conn.execute("SELECT state FROM phone_file WHERE id = ?", (theirs,)).fetchone()
+    assert state == "failed"  # the other phone's row is untouched
+    # The other phone connected: its failure and its summary.
+    transport = FakeTransport(build_fake_phone(5))
+    rig.ctx.tracker.current = DeviceSession(  # type: ignore[union-attr]
+        transport, PhoneIdentity.from_info(transport.info()), "dev-2"
+    )
+    assert [f["id"] for f in rig.get("failures").json()["files"]] == [theirs]
+    assert rig.get("summary").json()["job_id"] == 9999
+    # No phone: nothing listed, no summary, Retry is a plain 409.
+    rig.ctx.tracker.current = None  # type: ignore[union-attr]
+    assert rig.get("failures").json() == {"count": 0, "files": []}
+    assert rig.get("summary").json() is None
+    resp = rig.post("retry")
+    assert resp.status_code == 409 and resp.json()["code"] == "no_phone"
+
+
+def test_a_run_that_fails_in_the_scan_still_belongs_to_its_phone(rig: Rig) -> None:
+    def broken(*_a: object, **_k: object) -> list[object]:
+        raise RuntimeError("the walk broke")
+
+    rig.transport.walk = broken  # type: ignore[method-assign,assignment]
+    job_id = rig.run(["Screenshots"])
+    summary = rig.get("summary").json()
+    assert summary is not None and summary["job_id"] == job_id and summary["outcome"] == "failed"

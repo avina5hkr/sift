@@ -21,6 +21,7 @@ from sift.core.paths import AppPaths
 from sift.device.fake_phone import BIG_VIDEO, build_fake_phone
 from sift.device.fake_transport import FakeTransport
 from sift.device.session import DeviceSession, PhoneIdentity
+from sift.device.transport import DeviceTimeout
 from sift.services.plainwords import describe
 from tests.helpers import make_ctx
 
@@ -358,3 +359,22 @@ def test_a_stop_asked_for_as_the_run_ends_is_still_a_stop(
     finished(jobs, job_id)
     ((_, outcome, *_rest),) = summary_rows(rig)
     assert outcome == "stopped"
+
+
+def test_a_stall_during_the_scan_scans_again_instead_of_failing(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_walk = rig.transport.walk
+    stalls = [1]
+
+    def stalling_walk(*args: object, **kwargs: object) -> object:
+        if stalls:
+            stalls.pop()
+            raise DeviceTimeout("no data from the phone")
+        return real_walk(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(rig.transport, "walk", stalling_walk)
+    jobs = rig.jobs()
+    snap = finished(jobs, jobs.start_backup(["Screenshots"]))
+    assert snap.state is JobState.done and snap.error is None
+    assert snap.files_done > 0 and stalls == []

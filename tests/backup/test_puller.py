@@ -408,6 +408,17 @@ def test_file_changed_mid_read_goes_back_to_discovered(rig: Rig) -> None:
     assert tree(rig.root) == {} and staging_files(rig.root) == []
 
 
+def test_a_changed_file_with_a_name_that_is_not_utf8_is_warned_in_display_form(rig: Rig) -> None:
+    odd = "/sdcard/DCIM/Camera/caf\udce9.mp4"
+    rig.add(odd, b"x" * 5000)
+    rig.transport.faults.size_change_mid_read.add(odd)
+    stats = rig.pull()
+    assert stats.changed == 1
+    (warning,) = stats.warnings
+    assert "/sdcard/DCIM/Camera/caf%E9.mp4" in warning
+    warning.encode("utf-8")  # no lone surrogate left to break a response
+
+
 class ShortStreams(FakeTransport):
     """Every read stream ends early while the file on the phone stays as it was."""
 

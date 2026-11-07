@@ -267,7 +267,7 @@ class _Watchdog:
         try:
             self._abort()
         except Exception:
-            log.exception("Could not abort a stalled read of %s", self._path)
+            log.exception("Could not abort a stalled read of %r", self._path)
 
 
 class StallGuardedStream(io.RawIOBase):
@@ -369,7 +369,7 @@ class StallGuardedStream(io.RawIOBase):
             try:
                 self._abort()  # wakes a read blocked on another thread
             except Exception:
-                log.exception("Could not abort the read of %s", self._path)
+                log.exception("Could not abort the read of %r", self._path)
             self._watchdog.stop()
             close_chunks = getattr(self._chunks, "close", None)
             if close_chunks is not None:
@@ -435,7 +435,7 @@ class StallGuardedStream(io.RawIOBase):
             try:
                 return self._short_end(received, expected)
             except Exception:
-                log.exception("Could not tell why the read of %s ended short", self._path)
+                log.exception("Could not tell why the read of %r ended short", self._path)
         return _ended_short(self._path, received, expected)
 
 
@@ -824,7 +824,7 @@ class AdbTransport:
         except RemoteError:
             return True  # the phone answered, with an error
         except (TransportError, OSError) as e:
-            log.info("The phone did not answer a stat of %s: %s", path, e)
+            log.info("The phone did not answer a stat of %r: %s", path, e)
             return False
         return True
 
