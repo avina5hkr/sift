@@ -38,6 +38,19 @@ _sets_lock = threading.Lock()
 _run_lock = threading.Lock()  # Start and Retry: check, change and start as one step
 
 
+def _connected_device_id(ctx: Ctx) -> int | None:
+    """The stored id of the phone that is connected now, or None (no phone, no tracker)."""
+    tracker = ctx.tracker
+    session = tracker.session() if tracker is not None else None
+    if session is None:
+        return None
+    with ctx.db.read() as conn:
+        row = conn.execute(
+            "SELECT id FROM device WHERE uuid = ?", (session.device_uuid,)
+        ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
 def _jobs(ctx: Ctx) -> JobManager:
     if ctx.jobs is None:
         raise ApiError(409, "no_jobs", "Backups are not available right now.")
@@ -223,6 +236,7 @@ def retry_failed(ctx: Ctx) -> RetryOut:
 
 class ScanOut(BaseModel):
     id: int
+    device_id: int | None
     state: str
     sets: list[str]
     started_at: int | None
@@ -234,8 +248,8 @@ class ScanOut(BaseModel):
 def _load_scan(ctx: Ctx, scan_id: int) -> ScanOut:
     with ctx.db.read() as conn:
         r = conn.execute(
-            "SELECT id, state, sets, started_at, finished_at, warnings, stats FROM scan "
-            "WHERE id = ?",
+            "SELECT id, state, sets, started_at, finished_at, warnings, stats, device_id "
+            "FROM scan WHERE id = ?",
             (scan_id,),
         ).fetchone()
     if r is None:
@@ -246,6 +260,7 @@ def _load_scan(ctx: Ctx, scan_id: int) -> ScanOut:
         stats = {}
     return ScanOut(
         id=r[0],
+        device_id=r[7],
         state=r[1],
         sets=json.loads(r[2]) if r[2] else [],
         started_at=r[3],
@@ -262,7 +277,15 @@ def get_scan(ctx: Ctx, scan_id: int) -> ScanOut:
 
 
 def _answer_scan(ctx: Ctx, scan_id: int, action: str) -> ScanOut:
-    _load_scan(ctx, scan_id)  # 404 for a scan that does not exist
+    scan = _load_scan(ctx, scan_id)  # 404 for a scan that does not exist
+    connected = _connected_device_id(ctx)
+    if scan.device_id is not None and scan.device_id != connected:
+        raise ApiError(
+            409,
+            "wrong_phone",
+            "That scan belongs to a different phone. "
+            "Connect the phone it was made on to answer it.",
+        )
     try:
         (confirm_scan if action == "confirm" else discard_scan)(ctx.db, scan_id)
     except ScanNotPending as e:
@@ -301,6 +324,7 @@ class RecentFile(BaseModel):
 
 
 class OverviewOut(BaseModel):
+    phone_connected: bool
     sets: list[SetStatus]
     recent: list[RecentFile]
     pending_scan: ScanOut | None
@@ -312,28 +336,39 @@ RECENT_FILES = 8
 
 @router.get("/overview")
 def overview(ctx: Ctx) -> OverviewOut:
-    """Files per set (on the phone, backed up, still to copy), the last few files copied and
-    the scan the guard is holding for an answer, if any, and the backup running now (so a window
-    opened mid-run knows where it is before the next `progress` event)."""
-    with ctx.db.read() as conn:
-        counts = {
-            str(r[0]).casefold(): (int(r[1]), int(r[2]), int(r[3]))
-            for r in conn.execute(
-                "SELECT set_name, COUNT(*), SUM(state = 'done'), "
-                "SUM(state IN ('discovered', 'pulling', 'failed')) FROM phone_file "
-                "WHERE present = 1 AND state != 'skipped' AND set_name IS NOT NULL "
-                "GROUP BY set_name"
-            )
-        }
-        recent = conn.execute(
-            "SELECT f.remote_path, f.size, MAX(r.verified_at) AS at FROM phone_file f "
-            "JOIN replica r ON r.content_hash = f.content_hash WHERE f.state = 'done' "
-            "GROUP BY f.id ORDER BY at DESC, f.id DESC LIMIT ?",
-            (RECENT_FILES,),
-        ).fetchall()
-        held = conn.execute(
-            "SELECT id FROM scan WHERE state = 'awaiting_confirmation' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+    """What the screen shows besides the running job, for the phone that is connected now:
+    files per set (on the phone, backed up, still to copy), the last few files copied and the
+    scan the guard is holding for an answer. With no phone connected the counts are empty and
+    `phone_connected` is false. Also the backup running now (so a window opened mid-run knows
+    where it is before the next `progress` event)."""
+    device_id = _connected_device_id(ctx)
+    counts: dict[str, tuple[int, int, int]] = {}
+    recent: list[Any] = []
+    held = None
+    if device_id is not None:
+        with ctx.db.read() as conn:
+            counts = {
+                str(r[0]).casefold(): (int(r[1]), int(r[2]), int(r[3]))
+                for r in conn.execute(
+                    "SELECT set_name, COUNT(*), SUM(state = 'done'), "
+                    "SUM(state IN ('discovered', 'pulling', 'failed')) FROM phone_file "
+                    "WHERE device_id = ? AND present = 1 AND state NOT IN ('skipped', 'deleted') "
+                    "AND set_name IS NOT NULL GROUP BY set_name",
+                    (device_id,),
+                )
+            }
+            recent = conn.execute(
+                "SELECT f.remote_path, f.size, MAX(r.verified_at) AS at FROM phone_file f "
+                "JOIN replica r ON r.content_hash = f.content_hash "
+                "WHERE f.device_id = ? AND f.state = 'done' "
+                "GROUP BY f.id ORDER BY at DESC, f.id DESC LIMIT ?",
+                (device_id, RECENT_FILES),
+            ).fetchall()
+            held = conn.execute(
+                "SELECT id FROM scan WHERE state = 'awaiting_confirmation' AND device_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (device_id,),
+            ).fetchone()
     sets = []
     for s in ctx.config.backup.sets:
         on_phone, backed_up, pending = counts.get(s.name.casefold(), (0, 0, 0))
@@ -352,6 +387,7 @@ def overview(ctx: Ctx) -> OverviewOut:
         else []
     )
     return OverviewOut(
+        phone_connected=device_id is not None,
         job=running[-1].as_event() if running else None,
         sets=sets,
         recent=[
@@ -368,6 +404,15 @@ def overview(ctx: Ctx) -> OverviewOut:
 def open_folder(ctx: Ctx) -> dict[str, bool]:
     """Show the configured Mac backup folder in Finder. It opens that folder and nothing else."""
     root = Path(ctx.config.backup.mac_root).expanduser()
+    if not root.is_absolute():
+        raise ApiError(
+            409, "no_backup_folder", "The backup folder is not a full path. Check it in Settings."
+        )
+    if root.suffix.casefold() == ".app":
+        # `open` would start an app rather than show a folder.
+        raise ApiError(
+            409, "no_backup_folder", "Sift will not open this folder because its name ends in .app."
+        )
     if not root.is_dir():
         raise ApiError(
             409, "no_backup_folder", "The backup folder does not exist yet. Run a backup first."

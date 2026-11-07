@@ -5,7 +5,7 @@ import io
 import os
 import stat
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +32,7 @@ from sift.backup.staging import IncompleteCopy, TargetExists
 from sift.core import crashpoints
 from sift.core.clock import ManualClock
 from sift.core.db import Database
-from sift.core.jobs import JobStopped
+from sift.core.jobs import CurrentFile, JobStopped
 from sift.core.origin import WHATSAPP_MEDIA_ROOTS
 from sift.device.fake_phone import FakePhone
 from sift.device.fake_transport import FakeTransport
@@ -71,6 +71,7 @@ class Control:
         self.pause_requested = False
         self.reports: list[tuple[int, int, int | None, int | None]] = []
         self.transferred: list[int] = []
+        self.current_files: list[list[CurrentFile]] = []
         self.on_report: Callable[[Control], None] | None = None
         self.waits = 0
 
@@ -89,7 +90,9 @@ class Control:
         duplicates_skipped: int = 0,
         failed: int = 0,
         transferred_bytes: int | None = None,
+        current_files: Sequence[CurrentFile] = (),
     ) -> None:
+        self.current_files.append(list(current_files))
         self.reports.append((files_done, bytes_done, files_total, bytes_total))
         self.transferred.append(bytes_done if transferred_bytes is None else transferred_bytes)
         if self.on_report is not None:
@@ -351,6 +354,19 @@ def test_moved_file_is_linked_without_a_transfer(rig: Rig) -> None:
     assert rig.control.reports[-1][1] == len(data)
     assert rig.control.transferred[-1] == 0
     assert (stats.bytes_copied, stats.bytes_not_transferred) == (0, len(data))
+
+
+def test_reports_name_the_files_in_flight_in_display_form(rig: Rig) -> None:
+    for i in range(6):
+        rig.add(f"/sdcard/DCIM/Camera/f_{i}.jpg", bytes([i]) * 3000)
+    rig.scan()
+    rig.pull(scan_first=False)
+    seen = [f for report in rig.control.current_files for f in report]
+    assert seen, "no report named a file in flight"
+    assert all(len(report) <= 3 for report in rig.control.current_files)
+    assert all(f.path.startswith("/sdcard/DCIM/Camera/f_") for f in seen)
+    assert all(f.size == 3000 and 0 <= f.done <= 3000 for f in seen)
+    assert rig.control.current_files[-1] == []  # nothing in flight at the end
 
 
 def test_the_callers_stats_object_is_filled_in_and_survives_a_stop(rig: Rig) -> None:

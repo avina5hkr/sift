@@ -12,6 +12,7 @@ from sift.core.clock import ManualClock
 from sift.core.context import AppContext
 from sift.core.jobs import (
     REFERENCE_SPEED_BPS,
+    CurrentFile,
     JobConflict,
     JobControl,
     JobManager,
@@ -491,6 +492,24 @@ def test_files_matched_without_a_transfer_do_not_speed_up_the_eta(ctx: AppContex
     assert (snap.duplicates_skipped, snap.failed) == (2, 1)
     assert json.loads(row(ctx, job_id)["progress"])["duplicates_skipped"] == 2
     assert json.loads(row(ctx, job_id)["progress"])["failed"] == 1
+    driver.end()
+    finished(jobs, job_id)
+
+
+def test_progress_carries_at_most_three_files_in_flight(ctx: AppContext) -> None:
+    driver = Driver()
+    jobs = manager(ctx, driver.runner)
+    job_id = jobs.start_backup(["camera"])
+    files = [CurrentFile(f"/sdcard/f{i}.mp4", 1000 + i, i * 10) for i in range(5)]
+    driver.do(lambda c: c.report(0, 0, 5, 5000, current_files=files))
+    event = state_of(jobs, job_id).as_event()
+    assert event["current_files"] == [
+        {"path": "/sdcard/f0.mp4", "size": 1000, "done": 0},
+        {"path": "/sdcard/f1.mp4", "size": 1001, "done": 10},
+        {"path": "/sdcard/f2.mp4", "size": 1002, "done": 20},
+    ]
+    driver.do(lambda c: c.report(1, 1000, 5, 5000))
+    assert state_of(jobs, job_id).as_event()["current_files"] == []
     driver.end()
     finished(jobs, job_id)
 

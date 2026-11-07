@@ -706,3 +706,83 @@ def test_overview_names_the_running_backup(rig: Rig) -> None:
         release.set()
         rig.wait_job(job_id)
     assert rig.get("overview").json()["job"] is None
+
+
+# -- one phone at a time -------------------------------------------------------------------------
+
+
+def _other_phone(rig: Rig) -> int:
+    """A second stored phone with files in a set of the same name, and a scan held for it."""
+    with rig.ctx.db.tx() as conn:
+        cur = conn.execute("INSERT INTO device (uuid, serial) VALUES ('dev-2', 'FAKE-0002')")
+        other = int(cur.lastrowid or 0)
+        for i, state in enumerate(("done", "done", "discovered", "failed", "deleted")):
+            conn.execute(
+                "INSERT INTO phone_file (device_id, remote_path, origin, size, mtime, state, "
+                "set_name) VALUES (?, ?, 'camera', 10, 1, ?, 'Screenshots')",
+                (other, f"/sdcard/other_{i}.jpg", state),
+            )
+        cur = conn.execute(
+            "INSERT INTO scan (device_id, started_at, sets, state) "
+            "VALUES (?, 1, '[\"Screenshots\"]', 'awaiting_confirmation')",
+            (other,),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def test_overview_counts_only_the_connected_phone(rig: Rig) -> None:
+    scan_id = _other_phone(rig)
+    body = rig.get("overview").json()
+    shots = next(s for s in body["sets"] if s["name"] == "Screenshots")
+    assert body["phone_connected"] is True
+    assert (shots["on_phone"], shots["backed_up"], shots["pending"]) == (0, 0, 0)
+    assert body["pending_scan"] is None  # the held scan is the other phone's
+    assert scan_id > 0
+
+
+def test_overview_with_no_phone_has_no_counts_and_says_so(rig: Rig) -> None:
+    _other_phone(rig)
+    rig.ctx.tracker = None
+    body = rig.get("overview").json()
+    assert body["phone_connected"] is False
+    assert all(s["on_phone"] == s["backed_up"] == s["pending"] == 0 for s in body["sets"])
+    assert body["recent"] == [] and body["pending_scan"] is None
+
+
+def test_deleted_rows_are_not_on_the_phone(rig: Rig) -> None:
+    rig.run(["Screenshots"])
+    with rig.ctx.db.tx() as conn:
+        conn.execute(
+            "UPDATE phone_file SET state = 'deleted' WHERE id = "
+            "(SELECT MIN(id) FROM phone_file WHERE set_name = 'Screenshots' AND present = 1)"
+        )
+    shots = next(s for s in rig.get("overview").json()["sets"] if s["name"] == "Screenshots")
+    assert shots["on_phone"] == shots["backed_up"] + shots["pending"]
+
+
+def test_a_scan_of_another_phone_cannot_be_confirmed_or_discarded(rig: Rig) -> None:
+    scan_id = _other_phone(rig)
+    for action in ("confirm", "discard"):
+        resp = rig.post(f"scan/{scan_id}/{action}")
+        assert resp.status_code == 409 and resp.json()["code"] == "wrong_phone"
+        assert "different phone" in resp.json()["message"]
+    with rig.ctx.db.read() as conn:
+        (state,) = conn.execute("SELECT state FROM scan WHERE id = ?", (scan_id,)).fetchone()
+    assert state == "awaiting_confirmation"
+
+
+def test_open_folder_refuses_an_app(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "sift.server.routes.backup.subprocess.run", lambda cmd, **_kw: calls.append(cmd)
+    )
+    app = tmp_path / "Thing.app"
+    app.mkdir()
+    for root in (str(app), str(tmp_path / "X.APP")):
+        rig.ctx.config.backup.mac_root = root
+        (tmp_path / "X.APP").mkdir(exist_ok=True)
+        resp = rig.post("open-folder")
+        assert resp.status_code == 409 and resp.json()["code"] == "no_backup_folder"
+    assert calls == []

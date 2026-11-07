@@ -10,10 +10,12 @@ type EventState = {
   last?: { name: string; data: unknown }
   /** The newest backup job seen in a `progress` event (also after it ends), else null. */
   job: JobEvent | null
+  /** When `job` arrived (Date.now()), so a later answer from the server can outrank it. */
+  jobAt: number
   toasts: Toast[]
 }
 
-export const useEventStore = create<EventState>()(() => ({ connected: false, job: null, toasts: [] }))
+export const useEventStore = create<EventState>()(() => ({ connected: false, job: null, jobAt: 0, toasts: [] }))
 
 export function dismissToast(id: number) {
   useEventStore.setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
@@ -52,7 +54,11 @@ export function startEventStream(qc: QueryClient): () => void {
         // keep going with null data; one bad frame should not stop the stream
       }
       useEventStore.setState(
-        name === 'hello' ? { connected: true, last: { name, data } } : { last: { name, data } },
+        // After "hello" (first connect or a reconnect) the job the stream last told us about may
+        // be out of date: forget it, and the server's answer (fetched below) takes its place.
+        name === 'hello'
+          ? { connected: true, last: { name, data }, job: null, jobAt: 0 }
+          : { last: { name, data } },
       )
       // "hello" also arrives after a reconnect, so a missed device event heals at once.
       if (name === 'hello' || name === 'device' || name === 'job') {
@@ -66,7 +72,7 @@ export function startEventStream(qc: QueryClient): () => void {
         const job = asJob(data)
         if (job) {
           const before = useEventStore.getState().job
-          useEventStore.setState({ job })
+          useEventStore.setState({ job, jobAt: Date.now() })
           // The numbers arrive here; what else the screen shows is fetched again when the job
           // starts, changes state or ends.
           if (!before || before.job_id !== job.job_id || before.state !== job.state) {

@@ -138,6 +138,18 @@ class JobRefused(Exception):
         self.message = message
 
 
+MAX_CURRENT_FILES = 3
+
+
+@dataclass(frozen=True)
+class CurrentFile:
+    """A file being copied right now: its path as shown to the person, its size, bytes so far."""
+
+    path: str
+    size: int
+    done: int
+
+
 @dataclass(frozen=True)
 class JobSnapshot:
     id: int
@@ -160,12 +172,14 @@ class JobSnapshot:
     error: str | None
     started_at: int | None
     finished_at: int | None
+    current_files: tuple[CurrentFile, ...] = ()  # up to MAX_CURRENT_FILES files in flight
 
     def as_event(self) -> dict[str, Any]:
         data = asdict(self)
         data["job_id"] = data.pop("id")
         data["state"] = self.state.value
         data["sets"] = list(self.sets)
+        data["current_files"] = [dict(f) for f in data["current_files"]]
         return data
 
 
@@ -195,6 +209,7 @@ class _Job:
         self.files_total: int | None = None
         self.bytes_total: int | None = None
         self.current: str | None = None
+        self.current_files: tuple[CurrentFile, ...] = ()
         self.consecutive_failures = 0
         self.samples: deque[tuple[float, int]] = deque()
         self.last_published: float | None = None
@@ -231,6 +246,7 @@ class _Capture:
     error: str | None
     started_at: int | None
     finished_at: int | None
+    current_files: tuple[CurrentFile, ...] = ()
 
 
 class JobControl:
@@ -315,6 +331,7 @@ class JobControl:
         duplicates_skipped: int = 0,
         failed: int = 0,
         transferred_bytes: int | None = None,
+        current_files: Sequence[CurrentFile] = (),
     ) -> None:
         """Record progress. At most one `progress` event per 500 ms goes out.
 
@@ -323,6 +340,9 @@ class JobControl:
         cable, leaving out files that were matched on the phone and not copied: the speed and
         so the ETA are measured on it, so such files do not make the backup look faster than
         it is.
+
+        `current_files` are the files being copied now (the first three are kept), with the
+        path already in its display form.
         """
         self._guard()
         mgr, job = self._mgr, self._job
@@ -334,6 +354,7 @@ class JobControl:
             job.files_total, job.bytes_total = files_total, bytes_total
             job.duplicates_skipped, job.failed = duplicates_skipped, failed
             job.current = current
+            job.current_files = tuple(current_files[:MAX_CURRENT_FILES])
             now = mgr._clock.monotonic()
             job.samples.append(
                 (now, bytes_done if transferred_bytes is None else transferred_bytes)
@@ -803,6 +824,7 @@ class JobManager:
             duplicates_skipped=job.duplicates_skipped,
             failed=job.failed,
             current=job.current,
+            current_files=job.current_files,
             measured_speed=self._measured_speed(job),
             pause_requested=job.pause_requested,
             stopped=job.stopped,
@@ -906,6 +928,7 @@ class JobManager:
             duplicates_skipped=c.duplicates_skipped,
             failed=c.failed,
             current=c.current,
+            current_files=c.current_files,
             speed_bps=speed,
             eta_s=eta,
             eta_basis=basis,

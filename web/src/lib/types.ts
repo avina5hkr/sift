@@ -47,6 +47,8 @@ export type JobStateName =
   | 'done'
   | 'failed'
 
+export type CurrentFile = { path: string; size: number; done: number }
+
 // Mirrors JobSnapshot.as_event (src/sift/core/jobs.py): the body of every `progress` event.
 export type JobEvent = {
   job_id: number
@@ -61,6 +63,7 @@ export type JobEvent = {
   duplicates_skipped: number
   failed: number
   current: string | null
+  current_files: CurrentFile[] // up to 3 files being copied now
   speed_bps: number | null
   eta_s: number | null
   eta_basis: 'measured' | 'stored' | 'reference'
@@ -104,6 +107,7 @@ export type FailuresResponse = { count: number; files: FailedFile[] }
 
 export type ScanInfo = {
   id: number
+  device_id: number | null
   state: string
   sets: string[]
   started_at: number | null
@@ -123,6 +127,7 @@ export type RecentFile = { path: string; size: number; at: number }
 
 // Mirrors GET /api/backup/overview.
 export type BackupOverview = {
+  phone_connected: boolean // false: the counts are empty because no phone is connected
   sets: SetStatus[]
   recent: RecentFile[]
   pending_scan: ScanInfo | null

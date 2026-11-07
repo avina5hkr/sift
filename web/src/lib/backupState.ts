@@ -51,11 +51,14 @@ type ReasonInput = {
   /** How many sets this button would back up (0 means setup is not finished, or none ticked). */
   setCount: number
   noSetsReason?: string
+  /** A start request is on its way to the engine. */
+  starting?: boolean
 }
 
 /** Why Back up now cannot be used right now, in plain words, or null when it can. */
-export function disabledReason({ device, job, macFreeBytes, setCount, noSetsReason }: ReasonInput): string | null {
+export function disabledReason({ device, job, macFreeBytes, setCount, noSetsReason, starting }: ReasonInput): string | null {
   if (isRunning(job)) return 'A backup is already running.'
+  if (starting) return 'The backup is starting.'
   if (device?.state === 'wrong_device') {
     return 'A different phone is connected. Connect the phone you set Sift up with.'
   }

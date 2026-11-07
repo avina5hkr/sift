@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 
 type Props = {
   children: ReactNode
@@ -23,8 +23,18 @@ const LOOKS = {
  */
 export function ReasonButton({ children, onClick, reason, primary = false, label }: Props) {
   const reasonId = useId()
+  // Escape hides the tooltip until the pointer or focus leaves (WCAG 1.4.13); the reason stays
+  // the button's accessible description.
+  const [dismissed, setDismissed] = useState(false)
   return (
-    <span className="group relative inline-block">
+    <span
+      className="group relative inline-block"
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setDismissed(true)
+      }}
+      onMouseLeave={() => setDismissed(false)}
+      onBlur={() => setDismissed(false)}
+    >
       <button
         type="button"
         aria-label={label}
@@ -41,6 +51,7 @@ export function ReasonButton({ children, onClick, reason, primary = false, label
         <span
           id={reasonId}
           role="tooltip"
+          style={dismissed ? { display: 'none' } : undefined}
           className="pointer-events-none absolute top-full left-0 z-20 mt-1 hidden w-64 rounded-md bg-neutral-900 px-3 py-2 text-sm font-normal text-white shadow-lg group-focus-within:block group-hover:block dark:bg-neutral-100 dark:text-neutral-900"
         >
           {reason}

@@ -66,7 +66,8 @@ export default function BackupPage() {
   const device = status.data?.device
   const mac = status.data?.mac_folder
 
-  const stored = useEventStore((s) => s.job)
+  const storedJob = useEventStore((s) => s.job)
+  const storedAt = useEventStore((s) => s.jobAt)
   const overview = useQuery({
     queryKey: ['backup', 'overview'],
     queryFn: () => apiFetch<BackupOverview>('/api/backup/overview'),
@@ -74,8 +75,21 @@ export default function BackupPage() {
   })
   const sets: SetStatus[] = overview.data?.sets ?? []
   const recent = overview.data?.recent ?? []
+  const noPhoneCounts = overview.data?.phone_connected === false
   const fetched = overview.data?.job ?? null
-  // The event stream is fresher; the fetched job covers a window opened in the middle of a run.
+  // The server's answer wins when it is newer than what the stream last said: a running job
+  // the server no longer lists (or lists as another job) ended while the stream was away.
+  const stale =
+    storedJob != null &&
+    isRunning(storedJob) &&
+    overview.dataUpdatedAt > storedAt &&
+    overview.data?.job !== undefined &&
+    (fetched == null || fetched.job_id !== storedJob.job_id)
+  const stored = stale ? null : storedJob
+  useEffect(() => {
+    if (stale) useEventStore.setState({ job: null, jobAt: 0 })
+  }, [stale])
+  // Otherwise the stream is fresher; the fetched job covers a window opened mid-run.
   const job = stored && (!fetched || stored.job_id >= fetched.job_id) ? stored : fetched
   const running = isRunning(job)
   const state = screenState(device, job)
@@ -159,7 +173,14 @@ export default function BackupPage() {
   })
 
   const reasonFor = (count: number, noSetsReason?: string) =>
-    disabledReason({ device, job, macFreeBytes: mac?.free_bytes, setCount: count, noSetsReason })
+    disabledReason({
+      device,
+      job,
+      macFreeBytes: mac?.free_bytes,
+      setCount: count,
+      noSetsReason,
+      starting: start.isPending || rescan != null,
+    })
   const headerReason = reasonFor(
     selected.length,
     sets.length === 0 ? undefined : 'Tick at least one set under "This run".',
@@ -167,11 +188,14 @@ export default function BackupPage() {
 
   const failedCount = running && job ? job.failed : (failures.data?.count ?? 0)
   const phone = phoneSummary(device)
-  const lastBackup = summary.data?.finished_at
+  // Only a real summary (an answer that is not one is ignored rather than drawn).
+  const savedSummary = summary.data && typeof summary.data.job_id === 'number' ? summary.data : null
+  const lastBackup = savedSummary?.finished_at
   const macTotals = sets.reduce(
     (t, s) => ({ onPhone: t.onPhone + s.on_phone, backedUp: t.backedUp + s.backed_up }),
     { onPhone: 0, backedUp: 0 },
   )
+  const files = job?.current_files ?? []
   const showRun = job && running && state !== 'confirm'
 
   return (
@@ -273,15 +297,27 @@ export default function BackupPage() {
             <span className="w-24 shrink-0">Mac folder</span>
             <ProgressBar
               label="Mac folder"
-              value={macTotals.onPhone ? (macTotals.backedUp / macTotals.onPhone) * 100 : null}
+              value={!noPhoneCounts && macTotals.onPhone ? (macTotals.backedUp / macTotals.onPhone) * 100 : null}
             />
             <span className="shrink-0">{formatCount(macTotals.backedUp)} files</span>
           </div>
-          {job.current && (
+          {(files.length > 0 || job.current) && (
             <div>
               <h2 className="text-sm font-medium">Now copying</h2>
-              <ul className="mt-1 font-mono text-sm break-all">
-                <li>{job.current}</li>
+              <ul className="mt-1 flex flex-col gap-1 text-sm">
+                {files.length > 0
+                  ? files.map((f) => (
+                      <li key={f.path} className="flex gap-3">
+                        <span className="min-w-0 flex-1 font-mono break-all">{f.path}</span>
+                        <span className="shrink-0 text-neutral-600 dark:text-neutral-400">
+                          {formatBytes(f.size)}
+                        </span>
+                        <span className="w-12 shrink-0 text-right tabular-nums">
+                          {f.size > 0 ? `${Math.min(100, Math.round((f.done / f.size) * 100))}%` : ''}
+                        </span>
+                      </li>
+                    ))
+                  : [<li key="one" className="font-mono break-all">{job.current}</li>]}
               </ul>
             </div>
           )}
@@ -322,21 +358,16 @@ export default function BackupPage() {
         </section>
       )}
 
-      {job && !running && (
-        <>
-          <SummaryCard
-            job={job}
-            summary={summary.data ?? null}
-            openError={openError}
-            onOpenFolder={() => open.mutate()}
-          />
-          {failedCount > 0 && (
-            <FailedLink count={failedCount} onShow={() => setShowFailed(true)} triggerRef={failedTrigger} />
-          )}
-        </>
+      {!running && state !== 'confirm' && (
+        <SummaryCard
+          job={job}
+          summary={savedSummary}
+          openError={openError}
+          onOpenFolder={() => open.mutate()}
+        />
       )}
 
-      {!job && failedCount > 0 && (
+      {!running && failedCount > 0 && (
         <FailedLink count={failedCount} onShow={() => setShowFailed(true)} triggerRef={failedTrigger} />
       )}
 
@@ -353,12 +384,13 @@ export default function BackupPage() {
               <div className="min-w-0 flex-1">
                 <p className="font-medium">{s.name}</p>
                 <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                  {formatCount(s.on_phone)} on the phone, {formatCount(s.backed_up)} backed up on the Mac,{' '}
-                  {formatCount(s.pending)} waiting
+                  {noPhoneCounts
+                    ? 'Connect your phone to see what is on it.'
+                    : `${formatCount(s.on_phone)} on the phone, ${formatCount(s.backed_up)} backed up on the Mac, ${formatCount(s.pending)} waiting`}
                 </p>
               </div>
               <ReasonButton
-                label={`Back up ${s.name} now`}
+                label={`Back up now, ${s.name}`}
                 reason={reasonFor(s.enabled ? 1 : 0, 'This set is switched off in Settings.')}
                 onClick={() => start.mutate([s.name])}
               >

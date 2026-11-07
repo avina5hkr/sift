@@ -55,17 +55,21 @@ export function GuardCard({ scan, busy, error, onConfirm, onScanAgain }: Props) 
         <button
           ref={safeRef}
           type="button"
-          disabled={busy}
-          onClick={onScanAgain}
-          className="rounded-md border border-neutral-900 bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-700 disabled:opacity-60 dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900"
+          aria-disabled={busy ? true : undefined}
+          onClick={() => {
+            if (!busy) onScanAgain()
+          }}
+          className={`rounded-md border border-neutral-900 bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-700 dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900 ${busy ? 'opacity-60' : ''}`}
         >
           Scan again
         </button>
         <button
           type="button"
-          disabled={busy || !scan}
-          onClick={onConfirm}
-          className="rounded-md border border-amber-700 px-3 py-1.5 text-sm font-medium hover:bg-amber-200 disabled:opacity-60 dark:border-amber-500 dark:hover:bg-amber-900"
+          aria-disabled={busy || !scan ? true : undefined}
+          onClick={() => {
+            if (!busy && scan) onConfirm()
+          }}
+          className={`rounded-md border border-amber-700 px-3 py-1.5 text-sm font-medium hover:bg-amber-200 dark:border-amber-500 dark:hover:bg-amber-900 ${busy || !scan ? 'opacity-60' : ''}`}
         >
           Confirm
         </button>

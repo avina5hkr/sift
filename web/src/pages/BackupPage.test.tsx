@@ -59,6 +59,10 @@ function job(state: JobStateName, extra: Partial<JobEvent> = {}): JobEvent {
     duplicates_skipped: 1_204,
     failed: 3,
     current: 'DCIM/Camera/clip.mp4',
+    current_files: [
+      { path: 'DCIM/Camera/clip.mp4', size: 312_000_000, done: 199_680_000 },
+      { path: 'WhatsApp Video/VID-1.mp4', size: 18_000_000, done: 2_160_000 },
+    ],
     speed_bps: 38_000_000,
     eta_s: 41 * 60,
     eta_basis: 'measured',
@@ -116,10 +120,10 @@ beforeEach(() => {
     { getItem: () => null, setItem: () => undefined } as unknown as Storage,
     { replaceState: vi.fn() } as unknown as History,
   )
-  useEventStore.setState({ job: null, toasts: [] })
+  useEventStore.setState({ job: null, jobAt: 0, toasts: [] })
   world = {
     status: status(),
-    overview: { sets: SETS, recent: [], pending_scan: null, job: null },
+    overview: { phone_connected: true, sets: SETS, recent: [], pending_scan: null, job: null },
     summary: null,
     failures: { count: 0, files: [] },
   }
@@ -223,8 +227,7 @@ test('Backing up: files, bytes, percent, speed, ETA, current file, duplicates, f
   expect(screen.getByText('32%')).toBeInTheDocument()
   expect(screen.getByText('38.0 MB/s, about 41 min')).toBeInTheDocument()
   expect(screen.getByRole('progressbar', { name: 'Overall progress' })).toHaveAttribute('aria-valuenow', '32')
-  expect(screen.getByText('DCIM/Camera/clip.mp4')).toBeInTheDocument()
-  expect(screen.getByText('Skipped 1,204 duplicates')).toBeInTheDocument()
+    expect(screen.getByText('Skipped 1,204 duplicates')).toBeInTheDocument()
   expect(screen.getByText(/3 failed/)).toBeInTheDocument()
   expect(screen.getByText('Camera, Screenshots')).toBeInTheDocument()
   expect(backUpNow()).toHaveAccessibleDescription('A backup is already running.')
@@ -318,9 +321,9 @@ test('Back up now starts the ticked sets; ticking changes what is sent', async (
 
 test('each set has its own Back up now; a switched-off set explains itself', async () => {
   await ready()
-  await userEvent.click(screen.getByRole('button', { name: 'Back up Screenshots now' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Back up now, Screenshots' }))
   expect(posts()[0].body).toEqual({ sets: ['Screenshots'] })
-  expect(screen.getByRole('button', { name: 'Back up Downloads now' })).toHaveAccessibleDescription(
+  expect(screen.getByRole('button', { name: 'Back up now, Downloads' })).toHaveAccessibleDescription(
     'This set is switched off in Settings.',
   )
 })
@@ -380,6 +383,7 @@ test('Back up now works from the keyboard', async () => {
 
 const SCAN = {
   id: 3,
+  device_id: 1,
   state: 'awaiting_confirmation',
   sets: ['Camera'],
   started_at: 1,
@@ -474,4 +478,103 @@ test('Retry in the drawer is blocked, with the reason, while a backup runs', asy
   expect(retry).toHaveAccessibleDescription(/A backup is running/)
   await user.click(retry)
   expect(posts()).toEqual([])
+})
+
+// -- fix round 1 ---------------------------------------------------------------------------------
+
+test('Now copying lists up to three files with size and percent', async () => {
+  world.overview.job = job('pulling')
+  await ready()
+  const list = await screen.findByRole('heading', { name: 'Now copying' })
+  const items = within(list.parentElement as HTMLElement).getAllByRole('listitem')
+  expect(items).toHaveLength(2)
+  expect(items[0]).toHaveTextContent('DCIM/Camera/clip.mp4')
+  expect(items[0]).toHaveTextContent('312.0 MB')
+  expect(items[0]).toHaveTextContent('64%')
+  expect(items[1]).toHaveTextContent('12%')
+})
+
+test('a stream that dropped mid-run does not leave the page stuck: the server says no job', async () => {
+  // The stream said "pulling" a moment ago; the job has since ended and the overview says so.
+  useEventStore.setState({ job: job('pulling'), jobAt: Date.now() - 60_000 })
+  world.overview.job = null
+  world.summary = SUMMARY
+  await ready()
+  await waitFor(() => expect(stateText()).toHaveTextContent('Ready'))
+  expect(useEventStore.getState().job).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument()
+  expect(backUpNow()).not.toHaveAttribute('aria-disabled')
+  await userEvent.click(backUpNow())
+  expect(posts()[0].path).toBe('/api/backup/start')
+})
+
+test('a job from the stream that the server also lists is kept', async () => {
+  useEventStore.setState({ job: job('pulling', { files_done: 99 }), jobAt: Date.now() - 60_000 })
+  world.overview.job = job('pulling', { files_done: 5 })
+  await ready()
+  expect(await screen.findByText('File 99 of 41,982')).toBeInTheDocument()
+})
+
+test('a reload after a run shows Ready and the last summary card', async () => {
+  world.summary = SUMMARY
+  await ready()
+  await waitFor(() => expect(stateText()).toHaveTextContent('Ready'))
+  const card = await screen.findByRole('region', { name: 'Backup finished' })
+  expect(within(card).getByText('55')).toBeInTheDocument()
+  await userEvent.click(within(card).getByRole('button', { name: 'Open backup folder' }))
+  expect(posts().map((c) => c.path)).toEqual(['/api/backup/open-folder'])
+})
+
+test('with no phone connected the sets say to connect it instead of showing counts', async () => {
+  world.overview.phone_connected = false
+  world.overview.sets = SETS.map((s) => ({ ...s, on_phone: 0, backed_up: 0, pending: 0 }))
+  await ready()
+  expect(screen.getAllByText('Connect your phone to see what is on it.')).toHaveLength(3)
+  expect(screen.queryByText(/0 on the phone/)).not.toBeInTheDocument()
+})
+
+test('a second click while the start request is in flight is refused', async () => {
+  let release: () => void = () => undefined
+  const original = globalThis.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string, init?: RequestInit) =>
+      url === '/api/backup/start'
+        ? new Promise<Response>((resolve) => {
+            calls.push({ method: 'POST', path: url, body: JSON.parse(init?.body as string) })
+            release = () => resolve(new Response(JSON.stringify({ job_id: 8 })))
+          })
+        : original(url, init),
+    ),
+  )
+  await ready()
+  await userEvent.click(backUpNow())
+  await waitFor(() => expect(backUpNow()).toHaveAccessibleDescription('The backup is starting.'))
+  await userEvent.click(backUpNow())
+  expect(posts()).toHaveLength(1)
+  release()
+})
+
+test('Escape hides the tooltip of a disabled button and the reason stays its description', async () => {
+  world.status = status({ state: 'no_device' })
+  const user = userEvent.setup()
+  await ready()
+  await user.tab()
+  const tip = within(backUpNow().parentElement as HTMLElement).getByRole('tooltip')
+  expect(tip).not.toHaveStyle({ display: 'none' })
+  await user.keyboard('{Escape}')
+  expect(tip).toHaveStyle({ display: 'none' })
+  expect(backUpNow()).toHaveAccessibleDescription('Connect your phone to start a backup.')
+})
+
+test('Scan again keeps the focus while the answer is on its way', async () => {
+  world.overview.job = job('awaiting_confirmation')
+  world.overview.pending_scan = SCAN
+  world.failPost = { '/api/backup/scan/3/discard': { status: 409, code: 'x', message: 'Not now.' } }
+  const user = userEvent.setup()
+  await ready()
+  const again = await screen.findByRole('button', { name: 'Scan again' })
+  await user.click(again)
+  expect(again).not.toBeDisabled()
+  expect(document.activeElement).toBe(again)
 })

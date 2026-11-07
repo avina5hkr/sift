@@ -29,7 +29,7 @@ class FakeEventSource {
 beforeEach(() => {
   FakeEventSource.instances = []
   vi.stubGlobal('EventSource', FakeEventSource)
-  useEventStore.setState({ connected: false, last: undefined, job: null, toasts: [] })
+  useEventStore.setState({ connected: false, last: undefined, job: null, jobAt: 0, toasts: [] })
   initToken(
     new URL('http://127.0.0.1:1/backup?t=abc') as unknown as Location,
     { getItem: () => null, setItem: () => undefined } as unknown as Storage,
@@ -122,4 +122,14 @@ test('an error marks the stream disconnected', () => {
   es.emit('hello', { version: '0.1.0' })
   es.onerror?.()
   expect(useEventStore.getState().connected).toBe(false)
+})
+
+test('hello forgets the job the stream last reported, so the server answer replaces it', () => {
+  startEventStream(new QueryClient())
+  const es = FakeEventSource.instances[0]
+  es.emit('progress', JOB)
+  expect(useEventStore.getState().job).not.toBeNull()
+  expect(useEventStore.getState().jobAt).toBeGreaterThan(0)
+  es.emit('hello', { version: '0.1.0' })
+  expect(useEventStore.getState().job).toBeNull()
 })

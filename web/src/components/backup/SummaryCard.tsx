@@ -2,30 +2,38 @@ import { formatBytes, formatCount, formatDuration } from '../../lib/format'
 import type { BackupSummary, JobEvent } from '../../lib/types'
 
 type Props = {
-  job: JobEvent
+  /** The run that just ended in this window, if any; otherwise the saved summary alone. */
+  job: JobEvent | null
   summary: BackupSummary | null
   onOpenFolder: () => void
   openError: string | null
 }
 
-function heading(job: JobEvent, summary: BackupSummary | null): string {
-  if (job.state === 'failed' || summary?.outcome === 'failed') return 'The backup could not finish'
+function heading(job: JobEvent | null, summary: BackupSummary | null): string {
+  if (job?.state === 'failed' || summary?.outcome === 'failed') return 'The backup could not finish'
   if (summary?.outcome === 'discarded') return 'Nothing was copied'
-  if (job.stopped || summary?.outcome === 'stopped') return 'Backup stopped'
+  if (job?.stopped || summary?.outcome === 'stopped') return 'Backup stopped'
   return 'Backup finished'
 }
 
-/** What the last run did. Numbers come from the saved summary, else from the job itself. */
+/**
+ * What a run did. With the run that just ended in this window, numbers come from its saved
+ * summary, else from the job itself. Without one (after a reload) the saved summary alone.
+ */
 export function SummaryCard({ job, summary, onOpenFolder, openError }: Props) {
-  const mine = summary && summary.job_id === job.job_id ? summary : null
+  const mine = summary && (!job || summary.job_id === job.job_id) ? summary : null
+  if (!job && !mine) return null
   const stats: [string, string][] = [
-    ['New files', formatCount(mine?.new_files ?? job.files_done)],
-    ['Duplicates skipped', formatCount(mine?.duplicates_skipped ?? job.duplicates_skipped)],
-    ['Failed', formatCount(mine?.failed ?? job.failed)],
-    ['Copied', formatBytes(mine?.bytes ?? job.bytes_done)],
-    ['Time taken', formatDuration(mine?.duration_s ?? Math.max(0, (job.finished_at ?? 0) - (job.started_at ?? 0)))],
+    ['New files', formatCount(mine?.new_files ?? job?.files_done ?? 0)],
+    ['Duplicates skipped', formatCount(mine?.duplicates_skipped ?? job?.duplicates_skipped ?? 0)],
+    ['Failed', formatCount(mine?.failed ?? job?.failed ?? 0)],
+    ['Copied', formatBytes(mine?.bytes ?? job?.bytes_done ?? 0)],
+    [
+      'Time taken',
+      formatDuration(mine?.duration_s ?? Math.max(0, (job?.finished_at ?? 0) - (job?.started_at ?? 0))),
+    ],
   ]
-  const problem = job.error ?? mine?.error ?? null
+  const problem = job?.error ?? mine?.error ?? null
   return (
     <section
       aria-labelledby="summary-title"

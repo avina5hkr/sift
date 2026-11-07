@@ -78,7 +78,7 @@ from sift.backup.staging import (
 from sift.core.clock import Clock
 from sift.core.crashpoints import hit
 from sift.core.db import Database
-from sift.core.jobs import JobStopped
+from sift.core.jobs import MAX_CURRENT_FILES, CurrentFile, JobStopped
 from sift.device.session import DeviceSession
 from sift.device.transport import (
     DeviceDisconnected,
@@ -212,6 +212,7 @@ class PullControl(Protocol):
         duplicates_skipped: int = 0,
         failed: int = 0,
         transferred_bytes: int | None = None,
+        current_files: Sequence[CurrentFile] = (),
     ) -> None: ...
 
     def wait_for_phone(self) -> DeviceSession: ...
@@ -316,6 +317,10 @@ class Puller:
         def report() -> None:
             with live_lock:
                 in_flight = sum(live.values())
+                files_now = tuple(
+                    CurrentFile(shown(i.path), i.size, min(live.get(i.id, 0), i.size))
+                    for i in list(inflight.values())[:MAX_CURRENT_FILES]
+                )
             ctl.report(
                 stats.files_done,
                 stats.bytes_done + in_flight,
@@ -325,6 +330,7 @@ class Puller:
                 duplicates_skipped=stats.duplicates_skipped,
                 failed=stats.failed,
                 transferred_bytes=stats.bytes_done - stats.bytes_not_transferred + in_flight,
+                current_files=files_now,
             )
 
         def collect(timeout: float | None) -> None:
@@ -392,6 +398,7 @@ class Puller:
                     name=f"sift-pull-{item.id}",
                     daemon=True,
                 ).start()
+                report()  # names the file just started (the job throttles what goes out)
         finally:
             while inflight:  # however the run ends, the files in flight finish first
                 collect(None)

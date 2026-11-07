@@ -33,6 +33,7 @@ function job(state: JobStateName): JobEvent {
     duplicates_skipped: 0,
     failed: 0,
     current: null,
+    current_files: [],
     speed_bps: null,
     eta_s: null,
     eta_basis: 'reference',
@@ -77,6 +78,7 @@ test('each reason is plain words', () => {
   )
   expect(disabledReason({ ...base, device: device('wrong_device') })).toMatch(/different phone/)
   expect(disabledReason({ ...base, job: job('pulling') })).toBe('A backup is already running.')
+  expect(disabledReason({ ...base, starting: true })).toBe('The backup is starting.')
   expect(disabledReason({ ...base, setCount: 0 })).toMatch(/Settings/)
   expect(disabledReason({ ...base, macFreeBytes: 1000 })).toMatch(/almost full/)
   expect(disabledReason({ ...base, macFreeBytes: null })).toBeNull()
