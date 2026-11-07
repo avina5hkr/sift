@@ -24,7 +24,7 @@ from sift.backup.recovery import recover
 from sift.backup.run import run_backup
 from sift.core import testhooks
 from sift.core.clock import SystemClock
-from sift.core.config import load_config
+from sift.core.config import BackupConfig, Config, load_config
 from sift.core.context import AppContext
 from sift.core.db import (
     Database,
@@ -69,6 +69,23 @@ FAKE_NEEDS_HOME_MESSAGE = (
     "Fake-phone mode needs a separate data folder. "
     "Set SIFT_HOME to a test folder (make dev does this)."
 )
+
+
+def keep_fake_backups_at_home(config: Config, sift_home: str, *, home: Path | None = None) -> None:
+    """Fake-phone runs never back up into the real `~/PhoneBackup`.
+
+    When the backup folder is the default one in the real home, it becomes
+    `$SIFT_HOME/PhoneBackup` instead (in memory; the wizard saves whatever it shows). A folder
+    chosen in config.toml elsewhere is kept.
+    """
+    home = home if home is not None else Path.home()
+
+    def expand(text: str) -> Path:
+        text = text.strip()
+        return home / text[2:] if text == "~" or text.startswith("~/") else Path(text)
+
+    if expand(config.backup.mac_root) == expand(BackupConfig().mac_root):
+        config.backup.mac_root = str(Path(sift_home).expanduser().resolve() / "PhoneBackup")
 
 
 def bind_socket(port: int = 0) -> socket.socket:
@@ -447,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         shutdown.add("db", ctx.db.close, timeout_s=_DB_STEP_S)
+        if mode == "fake":  # SIFT_HOME is set (checked above)
+            keep_fake_backups_at_home(ctx.config, os.environ["SIFT_HOME"])
         setup_logging(paths, ctx.bus, level="INFO")
         shutdown.add("logging", teardown_logging, timeout_s=_LOGGING_STEP_S)
         for warning in ctx.config_warnings:

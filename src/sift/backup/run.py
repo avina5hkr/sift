@@ -19,6 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sift.backup.destination import sanitize_label
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
 from sift.backup.scanner import ScanResult, scan, space_check
 from sift.backup.sets import resolve_roots
@@ -44,14 +45,15 @@ def device_label(db: Database, config: Config, device_uuid: str | None) -> str:
 
     Each phone has its own label (`device.label`, set when it is chosen), so two phones never
     share a folder. A phone with no label of its own (stored before labels existed) uses
-    `backup.device_label`.
+    `backup.device_label`. Either is made safe (`sanitize_label`) whatever was stored, so a
+    name typed into config.toml can never be `.staging` or hold a `/`.
     """
     if device_uuid is not None:
         with db.read() as conn:
             row = conn.execute("SELECT label FROM device WHERE uuid = ?", (device_uuid,)).fetchone()
         if row is not None and row[0]:
-            return str(row[0])
-    return config.backup.device_label
+            return sanitize_label(str(row[0]))
+    return sanitize_label(config.backup.device_label)
 
 
 def mac_target(db: Database, config: Config, device_uuid: str | None = None) -> Target:

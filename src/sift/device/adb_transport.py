@@ -377,9 +377,11 @@ class StallGuardedStream(io.RawIOBase):
                     close_chunks()
         finally:
             release, self._release = self._release, None
-            if release is not None:
-                release()
-            super().close()
+            try:
+                if release is not None:
+                    release()
+            finally:
+                super().close()  # closed even when giving the connection back fails
 
     # -- internals ------------------------------------------------------------------------
 

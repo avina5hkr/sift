@@ -93,6 +93,13 @@ def check_mac_root(
 
 
 def sanitize_label(label: str) -> str:
-    """The phone's folder name made safe for any volume; blank becomes "Phone"."""
+    """The phone's folder name made safe for any volume; blank becomes "Phone".
+
+    It never starts with a dot: Sift keeps its own folders under the backup folder with
+    dotted names (`.staging`, whose leftover `.part` files are deleted at start-up), so a phone
+    folder named like one would mix the phone's files with Sift's. A leading dot becomes `_`
+    (".staging" -> "_staging"), whatever the case.
+    """
     text = label.strip() or DEFAULT_LABEL
-    return sanitize_component(text, hash8=hashlib.sha256(text.encode()).hexdigest()[:8])
+    safe = sanitize_component(text, hash8=hashlib.sha256(text.encode()).hexdigest()[:8])
+    return f"_{safe[1:]}" if safe.startswith(".") else safe

@@ -19,10 +19,12 @@ from sift.app import (
     bind_socket,
     build_context,
     fake_announce_delay,
+    keep_fake_backups_at_home,
     main,
     start_server,
     tracker_mode,
 )
+from sift.core.config import Config
 from sift.core.context import AppContext
 from sift.core.db import Database, DatabaseBusyError
 from sift.core.events import EventBus
@@ -508,3 +510,58 @@ def test_stop_with_an_open_event_stream_is_quick_and_logs_no_error(
         handle.stop()
         ctx.db.close()
         client.join(5)
+
+
+def test_fake_phone_backups_default_under_sift_home(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    config = Config()
+    keep_fake_backups_at_home(config, str(tmp_path / "sift"), home=home)
+    assert config.backup.mac_root == str((tmp_path / "sift").resolve() / "PhoneBackup")
+    spelled = Config()
+    spelled.backup.mac_root = f"{home}/PhoneBackup/"
+    keep_fake_backups_at_home(spelled, str(tmp_path / "sift"), home=home)
+    assert spelled.backup.mac_root == config.backup.mac_root
+
+
+def test_fake_phone_keeps_a_backup_folder_chosen_elsewhere(tmp_path: Path) -> None:
+    config = Config()
+    config.backup.mac_root = str(tmp_path / "chosen")
+    keep_fake_backups_at_home(config, str(tmp_path / "sift"), home=tmp_path / "home")
+    assert config.backup.mac_root == str(tmp_path / "chosen")
+
+
+def test_a_fake_phone_run_never_offers_the_real_home_folder(
+    paths: AppPaths, tmp_path: Path
+) -> None:
+    sift_home = os.environ["SIFT_HOME"]
+    env = {
+        **os.environ,
+        "SIFT_DEV_TOKEN": "dev-tok",
+        "HOME": str(tmp_path / "fake-home"),
+        "SIFT_FAKE_PHONE_DELAY_S": "1000",
+    }
+    env.pop("SIFT_TRACKER", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "sift", "--no-window", "--fake-phone", "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().strip()
+        base, _, token = line.removeprefix("Sift running at ").partition("/?t=")
+        r = httpx.get(f"{base}/api/setup/state", headers={"X-Sift-Token": token})
+        assert r.status_code == 200, r.text
+        root = Path(r.json()["mac_root"])
+        assert root.is_relative_to(Path(sift_home).resolve())
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()

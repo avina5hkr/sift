@@ -732,6 +732,24 @@ def test_longer_than_expected_is_fine() -> None:
     stream.close()
 
 
+def test_a_release_that_raises_still_closes_the_stream() -> None:
+    def broken_release() -> None:
+        raise OSError("the pool is gone")
+
+    stream = StallGuardedStream(
+        iter([b"ab"]),
+        path="/p",
+        expected_size=2,
+        stall_s=5,
+        abort=lambda: None,
+        release=broken_release,
+    )
+    with pytest.raises(OSError):
+        stream.close()
+    assert stream.closed
+    stream.close()  # closed: nothing left to do, nothing raised
+
+
 def test_close_releases_once_and_closes_the_source() -> None:
     released: list[int] = []
     closed: list[bool] = []

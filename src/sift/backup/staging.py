@@ -37,6 +37,7 @@ import stat
 import threading
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
 from typing import Self, cast
@@ -275,6 +276,8 @@ class StagedFile:
             _flush_folder(final_path.parent)
         except BaseException:
             final_path.unlink(missing_ok=True)
+            with suppress(OSError):  # the removal is as durable as the rename it undoes
+                _flush_folder(final_path.parent)
             raise
         return expected
 

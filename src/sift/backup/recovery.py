@@ -7,7 +7,12 @@ Run `recover` once at startup, before the tracker and any job start:
 - `reconcile`: every Mac replica row must have its file, a regular file of the recorded size.
   A row whose file is missing or has another size is deleted, and the phone files that pointed
   at that content go back to `discovered` so the next run copies them again. Nothing on disk is
-  touched. A destination whose folder is not there (not mounted) is skipped, rows and all.
+  touched. A destination whose folder is missing is told apart by where it lives: on an
+  external volume (`/Volumes/<name>/...`) that is not mounted now, it is skipped, rows and all
+  (the files are on the unplugged disk). Anywhere else (the Mac's own disk, or a mounted volume)
+  a missing folder means its files are gone: every replica row of it is dropped (rows only),
+  with a plain warning, so the next run copies the files again. A folder that cannot be looked
+  at (no permission) is skipped.
 
 Only destinations recorded in the database are looked at: Sift never sweeps a folder it has not
 written to.
@@ -24,6 +29,8 @@ from sift.backup.staging import sweep_staging
 from sift.core.db import Database
 
 log = logging.getLogger(__name__)
+
+VOLUMES = Path("/Volumes")  # where macOS mounts external disks
 
 
 @dataclass(frozen=True)
@@ -57,22 +64,61 @@ def _intact(path: Path, size: int) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_size == size
 
 
-def reconcile(db: Database) -> tuple[int, int]:
+def _on_unmounted_volume(root: Path, volumes: Path) -> bool:
+    """True when `root` lives on an external volume under `volumes` that is not mounted now."""
+    try:
+        name = root.relative_to(volumes).parts[0]
+    except ValueError, IndexError:
+        return False
+    volume = volumes / name
+    if volume.is_symlink():  # "/Volumes/Macintosh HD" points at the Mac's own disk
+        return False
+    return not os.path.ismount(volume)
+
+
+def _root_state(root: Path, volumes: Path) -> str:
+    """ "present", "gone" (its files are gone) or "unknown" (unmounted, or not readable)."""
+    try:
+        st = os.stat(root)
+    except FileNotFoundError, NotADirectoryError:
+        return "unknown" if _on_unmounted_volume(root, volumes) else "gone"
+    except OSError:
+        return "unknown"
+    if not stat.S_ISDIR(st.st_mode):
+        return "unknown"
+    return "present"
+
+
+def reconcile(db: Database, *, volumes: Path = VOLUMES) -> tuple[int, int]:
     """Drop Mac replica rows whose file is gone or the wrong size; (dropped, skipped dests)."""
     dropped = skipped = 0
     for dest_id, root in _mac_destinations(db):
-        if not root.is_dir():
+        state = _root_state(root, volumes)
+        if state == "unknown":
             skipped += 1
-            log.info("Backup folder %d is not there; not checked", dest_id)
+            log.info("Backup folder %d is not there or cannot be read; not checked", dest_id)
             continue
         with db.read() as conn:
             replicas = conn.execute(
                 "SELECT content_hash, rel_path, size FROM replica WHERE dest_id = ?", (dest_id,)
             ).fetchall()
-        gone = [h for h, rel, size in replicas if not _intact(root / rel, int(size))]
+        if state == "gone":
+            gone = [h for h, _rel, _size in replicas]
+            if gone:
+                log.warning(
+                    "The backup folder %s is missing, so the %d files backed up there are gone; "
+                    "they will be copied again",
+                    root,
+                    len(gone),
+                )
+        else:
+            gone = [h for h, rel, size in replicas if not _intact(root / rel, int(size))]
+            if gone:
+                log.warning(
+                    "%d backed-up files are missing or changed; copying them again", len(gone)
+                )
         if not gone:
             continue
-        log.warning("%d backed-up files are missing or changed; copying them again", len(gone))
         with db.tx() as conn:
             for digest in gone:
                 conn.execute(

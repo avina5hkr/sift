@@ -830,10 +830,47 @@ def test_reconcile_drops_the_row_of_a_missing_file(rig: Rig) -> None:
     assert (rig.root / "Phone/DCIM/Camera/shrunk.jpg").read_bytes() == b"short"
 
 
-def test_reconcile_skips_a_destination_that_is_not_there(rig: Rig) -> None:
+def test_reconcile_skips_a_destination_on_a_volume_that_is_not_mounted(
+    rig: Rig, tmp_path: Path
+) -> None:
     rig.add("/sdcard/DCIM/Camera/a.jpg", b"a" * 10)
     rig.pull()
+    volumes = tmp_path / "Volumes"
+    with rig.db.tx() as conn:  # the folder lives on an external disk, unplugged now
+        conn.execute(
+            "UPDATE destination SET root_path = ? WHERE id = ?",
+            (str(volumes / "Backup Disk" / "PhoneBackup"), rig.dest_id),
+        )
+    assert reconcile(rig.db, volumes=volumes) == (0, 1)
+    assert len(replicas(rig.db)) == 1
+    assert {r[0] for r in phone_rows(rig.db).values()} == {"done"}
+
+
+def test_reconcile_drops_the_rows_of_a_missing_folder_on_the_macs_own_disk(
+    rig: Rig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig.add("/sdcard/DCIM/Camera/a.jpg", b"a" * 10)
+    rig.add("/sdcard/DCIM/Camera/b.jpg", b"b" * 10)
+    rig.pull()
     moved = rig.root.with_name("elsewhere")
-    rig.root.rename(moved)  # as if the disk were not mounted
-    assert reconcile(rig.db) == (0, 1)
+    rig.root.rename(moved)  # the owner deleted or moved the backup folder
+    with caplog.at_level("WARNING"):
+        assert reconcile(rig.db, volumes=tmp_path / "Volumes") == (2, 0)
+    assert replicas(rig.db) == {}
+    assert {r[0] for r in phone_rows(rig.db).values()} == {"discovered"}
+    assert any("missing" in r.getMessage() for r in caplog.records)
+    assert sorted(tree(moved).values()) == [b"a" * 10, b"b" * 10]  # rows only: files untouched
+    # The next run copies them again into the folder Sift was given.
+    assert rig.pull().copied == 2
+    assert sorted(tree(rig.root).values()) == [b"a" * 10, b"b" * 10]
+
+
+def test_reconcile_skips_a_folder_it_cannot_look_at(rig: Rig, tmp_path: Path) -> None:
+    rig.add("/sdcard/DCIM/Camera/a.jpg", b"a" * 10)
+    rig.pull()
+    rig.root.parent.chmod(0o000)  # no permission to look inside the parent
+    try:
+        assert reconcile(rig.db, volumes=tmp_path / "Volumes") == (0, 1)
+    finally:
+        rig.root.parent.chmod(0o755)
     assert len(replicas(rig.db)) == 1

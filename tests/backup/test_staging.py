@@ -263,6 +263,26 @@ def test_reread_mismatch_removes_final_and_raises(
     assert _parts(staging_dir) == []
 
 
+def test_the_removal_after_a_mismatch_is_flushed_to_the_folder(
+    staging_dir: Path, final_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    final = final_dir / "a.jpg"
+    flushed: list[tuple[Path, bool]] = []
+    real_flush = staging._flush_folder
+
+    def spy(folder: Path) -> None:
+        flushed.append((folder, final.exists()))
+        real_flush(folder)
+
+    monkeypatch.setattr(staging, "_hash_uncached", lambda _p: "0" * 64)
+    monkeypatch.setattr(staging, "_flush_folder", spy)
+    with StagedFile(staging_dir, expected_size=4) as staged:
+        staged.write(b"abcd")
+        with pytest.raises(ChecksumMismatch):
+            staged.commit(final, mtime=MTIME)
+    assert (final_dir, False) in flushed  # flushed after the bad copy was removed
+
+
 def test_reread_uses_f_nocache(
     staging_dir: Path, final_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
