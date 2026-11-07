@@ -920,3 +920,16 @@ def test_after_a_switch_the_new_phones_files_land_in_its_own_folder(
     assert tree("Beta")
     assert tree("Alpha") == before  # the old phone's folder is untouched
     assert all(p.startswith("Beta/") for p in tree("Beta"))
+
+
+def test_a_backed_up_phone_without_a_label_keeps_its_folder_after_switching_away_and_back(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker
+) -> None:
+    post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+    with ctx.db.tx() as conn:
+        conn.execute("INSERT INTO destination (kind, root_path) VALUES ('mac', '/x')")
+        a_uuid = conn.execute("SELECT uuid FROM device WHERE model = 'Alpha 1'").fetchone()[0]
+    done_file(ctx, a_uuid)  # phone A's files are in the default "Phone" folder
+    post(client, "switch-phone", {"ref": ref_of(client, "Beta 2"), "confirmation": "SWITCH"})
+    post(client, "switch-phone", {"ref": ref_of(client, "Alpha 1"), "confirmation": "SWITCH"})
+    assert labels(ctx) == [("Alpha 1", "Phone"), ("Beta 2", "Beta 2")]

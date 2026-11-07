@@ -315,8 +315,16 @@ def switch_phone(ctx: Ctx, body: SwitchRequest) -> PhoneOut:
         if stored is not None and chosen.stored:
             return stored
         _refuse_while_running(ctx)
+        # A phone backed up before labels existed uses the default folder name: pin that name on
+        # it now, so its folder stays the same when it is chosen again later.
+        with ctx.db.tx() as conn:
+            conn.execute(
+                "UPDATE device SET label = ? WHERE (label IS NULL OR label = '') AND id IN "
+                "(SELECT DISTINCT device_id FROM phone_file WHERE state = 'done')",
+                (ctx.config.backup.device_label,),
+            )
         phone = _store(ctx, chosen)
-        if phone.label is None or not _has_own_label(ctx, phone.uuid):
+        if not _has_own_label(ctx, phone.uuid):
             label = _unique_label(ctx, sanitize_label(phone.model or ""), phone.uuid)
             with ctx.db.tx() as conn:
                 conn.execute("UPDATE device SET label = ? WHERE uuid = ?", (label, phone.uuid))
