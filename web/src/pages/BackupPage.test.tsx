@@ -211,6 +211,17 @@ test('Ready with nothing backed up yet', async () => {
   expect(screen.getByText('No files copied yet.')).toBeInTheDocument()
 })
 
+test('a dry run (the wizard size scan) does not show as a backup on this screen', async () => {
+  world.summary = SUMMARY
+  world.overview.job = job('scanning', { job_id: 99, dry_run: true })
+  useEventStore.setState({ job: job('done', { job_id: 99, dry_run: true }) })
+  await ready()
+  await waitFor(() => expect(stateText()).toHaveTextContent('Ready'))
+  expect(stateText()).not.toHaveTextContent('Looking through your phone')
+  expect(screen.queryByRole('progressbar', { name: 'Overall progress' })).not.toBeInTheDocument()
+  expect(backUpNow()).not.toHaveAttribute('aria-disabled')
+})
+
 test('Scanning: an unfinished bar and no speed yet', async () => {
   world.overview.job = job('scanning', { files_done: 0, bytes_done: 0, files_total: null, bytes_total: null, speed_bps: null, eta_s: null })
   await ready()

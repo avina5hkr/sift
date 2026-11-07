@@ -66,7 +66,9 @@ export default function BackupPage() {
   const device = status.data?.device
   const mac = status.data?.mac_folder
 
-  const storedJob = useEventStore((s) => s.job)
+  // A dry run (the wizard's size scan) copies nothing: this screen never shows it as a backup.
+  const streamJob = useEventStore((s) => s.job)
+  const storedJob = streamJob?.dry_run ? null : streamJob
   const storedAt = useEventStore((s) => s.jobAt)
   const overview = useQuery({
     queryKey: ['backup', 'overview'],
@@ -76,7 +78,7 @@ export default function BackupPage() {
   const sets: SetStatus[] = overview.data?.sets ?? []
   const recent = overview.data?.recent ?? []
   const noPhoneCounts = overview.data?.phone_connected === false
-  const fetched = overview.data?.job ?? null
+  const fetched = overview.data?.job && !overview.data.job.dry_run ? overview.data.job : null
   // The server's answer wins when it is newer than what the stream last said: a running job
   // the server no longer lists (or lists as another job) ended while the stream was away.
   const stale =

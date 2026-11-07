@@ -8,7 +8,7 @@ export type Toast = ToastEvent & { id: number }
 type EventState = {
   connected: boolean
   last?: { name: string; data: unknown }
-  /** The newest backup job seen in a `progress` event (also after it ends), else null. */
+  /** The newest backup job seen in a `progress` event (also after it ends; never a dry run), else null. */
   job: JobEvent | null
   /** When `job` arrived (Date.now()), so a later answer from the server can outrank it. */
   jobAt: number
@@ -32,10 +32,12 @@ function asToast(data: unknown): Toast | null {
   return { id: nextToastId++, level: known ? level : 'info', title, message }
 }
 
+/** A backup job from a `progress` event. A dry run (the wizard's size scan) copies nothing and
+ * is not a backup, so it is left out: the Backup screen must not show it as one. */
 function asJob(data: unknown): JobEvent | null {
   if (typeof data !== 'object' || data === null) return null
   const job = data as Partial<JobEvent>
-  return typeof job.job_id === 'number' && typeof job.state === 'string' && job.type === 'backup'
+  return typeof job.job_id === 'number' && typeof job.state === 'string' && job.type === 'backup' && job.dry_run !== true
     ? (job as JobEvent)
     : null
 }

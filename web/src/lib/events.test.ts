@@ -94,6 +94,15 @@ test('progress events keep the newest backup job and refetch only when the state
   expect(spy).toHaveBeenCalledWith({ queryKey: ['backup'] })
 })
 
+test('a dry run (the wizard size scan) is not a backup: the stored job stays as it was', () => {
+  startEventStream(new QueryClient())
+  const es = FakeEventSource.instances[0]
+  es.emit('progress', { ...JOB, state: 'done' })
+  es.emit('progress', { ...JOB, job_id: 5, state: 'scanning', dry_run: true })
+  es.emit('progress', { ...JOB, job_id: 5, state: 'done', dry_run: true })
+  expect(useEventStore.getState().job).toMatchObject({ job_id: 4, state: 'done' })
+})
+
 test('progress events of other kinds of job or without a job id are ignored', () => {
   startEventStream(new QueryClient())
   const es = FakeEventSource.instances[0]
