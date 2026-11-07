@@ -106,6 +106,47 @@ WIFI_MESSAGE = "Connected over Wi-Fi."
 
 _UNAUTHORIZED_STATES = frozenset({"unauthorized", "authorizing"})
 
+# The stored phone: the one the owner chose (`setting.active_device`), else the first one ever
+# seen. The wizard's picker and Settings' switch write that setting; nothing else does.
+ACTIVE_DEVICE_KEY = "active_device"
+STORED_PHONE_ORDER = (
+    f"ORDER BY uuid IS NOT (SELECT value FROM setting WHERE key = '{ACTIVE_DEVICE_KEY}'), id"
+)
+_STORED_PHONE_SQL = f"SELECT uuid, serial, android_id FROM device {STORED_PHONE_ORDER} LIMIT 1"
+
+NOT_ATTACHED_MESSAGE = "That phone is no longer connected. Reconnect it and choose again."
+NOT_READY_MESSAGE = (
+    "Sift cannot read that phone yet. Unlock it and tap Allow on the USB debugging prompt, "
+    "then choose it again."
+)
+
+
+class PhonePickError(Exception):
+    """Choosing a phone did not work; the message is written for the person using Sift."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class PhoneNotAttached(PhonePickError):
+    """The phone chosen is not in adb's device list (any more)."""
+
+
+class PhoneNotReady(PhonePickError):
+    """The phone is attached but cannot be read: it waits for Allow, or does not answer."""
+
+
+@dataclass(frozen=True)
+class AttachedPhone:
+    """One phone adb lists, for the device picker (emulators are never listed)."""
+
+    serial: str  # the adb serial: for matching only, the UI shows its last 4 characters
+    ready: bool  # adb says "device" and the phone answered
+    waiting_for_allow: bool
+    model: str | None  # only for a phone that answered
+    stored: bool  # this is the phone Sift backs up
+
 
 class ConnectionState(StrEnum):
     no_adb = "no_adb"
@@ -215,6 +256,7 @@ class DeviceTracker:
         self._session: DeviceSession | None = None
         self._source: DeviceEventSource | None = None
         self._thread: threading.Thread | None = None
+        self._peeked: dict[str, DeviceInfo] = {}  # picker readings, cleared by a Retry
 
         # Used by the tracker thread only.
         self._backoff = Backoff()
@@ -267,6 +309,97 @@ class DeviceTracker:
         """
         with self._lock:
             return self._session
+
+    def attached_phones(self) -> list[AttachedPhone]:
+        """Every phone adb lists now (no emulators), each read once for its model.
+
+        For the device picker. A phone adb calls ready is read through a short-lived transport
+        and remembered until the next Retry, so polling this does not keep asking the phone.
+        """
+        snapshot = dict(self._snapshot)
+        with self._ctx.db.read() as conn:
+            stored = self._stored_from_row(conn.execute(_STORED_PHONE_SQL).fetchone())
+        out: list[AttachedPhone] = []
+        for serial, state in sorted(snapshot.items()):
+            if _EMULATOR.fullmatch(serial):
+                continue
+            info = self._peek(serial) if state == "device" else None
+            is_stored = (
+                info is not None
+                and stored is not None
+                and stored.identity.matches(PhoneIdentity.from_info(info))
+            )
+            out.append(
+                AttachedPhone(
+                    serial,
+                    ready=info is not None,
+                    waiting_for_allow=state in _UNAUTHORIZED_STATES,
+                    model=info.model if info is not None else None,
+                    stored=is_stored,
+                )
+            )
+        return out
+
+    def _peek(self, serial: str) -> DeviceInfo | None:
+        with self._lock:
+            known = self._peeked.get(serial)
+        if known is not None:
+            return known
+        try:
+            info = self._info(self._connect(serial))
+        except (TransportError, OSError) as e:
+            logger.info("Could not read an attached phone for the picker: %s", e)
+            return None
+        with self._lock:
+            self._peeked[serial] = info
+        return info
+
+    def choose_phone(self, serial: str) -> str:
+        """Make the attached phone `serial` the phone Sift backs up; returns its `device.uuid`.
+
+        A phone Sift has stored before keeps its row (its backups stay its own); a new one gets
+        a row. Either way it becomes the stored phone, and the tracker reads it afresh at once.
+        Raises `PhoneNotAttached` or `PhoneNotReady`. The full serial is never logged.
+        """
+        state = self._snapshot.get(serial)
+        if state is None or _EMULATOR.fullmatch(serial):
+            raise PhoneNotAttached(NOT_ATTACHED_MESSAGE)
+        if state != "device":
+            raise PhoneNotReady(NOT_READY_MESSAGE)
+        try:
+            info = self._info(self._connect(serial))
+        except (TransportError, OSError) as e:
+            logger.info("Could not read the phone chosen: %s", e)
+            raise PhoneNotReady(NOT_READY_MESSAGE) from e
+        seen = PhoneIdentity.from_info(info)
+        now = int(self._wall_clock())
+        with self._ctx.db.tx() as conn:
+            chosen: str | None = None
+            for row in conn.execute("SELECT uuid, serial, android_id FROM device ORDER BY id"):
+                known = self._stored_from_row(row)
+                if known is not None and known.identity.matches(seen):
+                    chosen = known.uuid
+                    conn.execute(
+                        "UPDATE device SET model = ?, android_version = ?, last_seen_at = ?, "
+                        "android_id = COALESCE(?, android_id) WHERE uuid = ?",
+                        (info.model, info.android_version, now, seen.android_id, chosen),
+                    )
+                    break
+            if chosen is None:
+                chosen = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO device "
+                    "(uuid, serial, android_id, model, android_version, last_seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (chosen, seen.key(), seen.android_id, info.model, info.android_version, now),
+                )
+            conn.execute(
+                "INSERT INTO setting (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (ACTIVE_DEVICE_KEY, chosen),
+            )
+        self.retry()
+        return chosen
 
     def retry(self) -> None:
         """Reconnect now: reset the backoff, reopen the device list, and read the phone again."""
@@ -345,6 +478,8 @@ class DeviceTracker:
             self._lost()
 
     def _after_retry(self) -> None:
+        with self._lock:
+            self._peeked.clear()
         self._backoff.reset()
         self._forget_phone()
         self._stored_loaded = False
@@ -532,9 +667,7 @@ class DeviceTracker:
         """The stored phone, read once (and again after a Retry)."""
         if not self._stored_loaded:
             with self._ctx.db.read() as conn:
-                row = conn.execute(
-                    "SELECT uuid, serial, android_id FROM device ORDER BY id LIMIT 1"
-                ).fetchone()
+                row = conn.execute(_STORED_PHONE_SQL).fetchone()
             self._stored = self._stored_from_row(row)
             self._stored_loaded = True
         return self._stored
@@ -557,11 +690,11 @@ class DeviceTracker:
     def _remember(self, info: DeviceInfo, now: float, *, touch: bool) -> _StoredPhone | None:
         """Store or refresh the phone; the stored phone, or None if another phone is stored.
 
-        M1 rule until the setup wizard picks a phone: the first phone ever seen (the row with
-        the lowest id) is the phone Sift backs up. A reading is that phone when either of its
-        identifiers (serial, Android ID) equals one of the stored phone's. With `touch` (the
-        phone just appeared) its row is updated at once; on refreshes at most every
-        `LAST_SEEN_EVERY_S`.
+        Until the owner picks a phone (the wizard, or Settings' switch: `choose_phone`), the
+        first phone ever seen (the row with the lowest id) is the phone Sift backs up. A reading
+        is that phone when either of its identifiers (serial, Android ID) equals one of the
+        stored phone's. With `touch` (the phone just appeared) its row is updated at once; on
+        refreshes at most every `LAST_SEEN_EVERY_S`.
         """
         seen = PhoneIdentity.from_info(info)
         stored = self._stored_phone()
@@ -597,9 +730,7 @@ class DeviceTracker:
                         stored.saved_android_id = new_android_id
             return stored
         with self._ctx.db.tx() as conn:
-            row = conn.execute(
-                "SELECT uuid, serial, android_id FROM device ORDER BY id LIMIT 1"
-            ).fetchone()
+            row = conn.execute(_STORED_PHONE_SQL).fetchone()
             if row is None:
                 new_uuid = str(uuid.uuid4())
                 conn.execute(

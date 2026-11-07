@@ -5,6 +5,22 @@ import { expect, test, type Page } from '@playwright/test'
 const statusOk = (page: Page) =>
   page.waitForResponse((r) => r.url().endsWith('/api/status') && r.status() === 200)
 
+// The first test sees a fresh install (the wizard opens); setup is finished after each test so the
+// others open the Backup screen. Finishing is idempotent.
+test.afterEach(async ({ request }) => {
+  const done = await request.post('/api/setup/complete', { headers: { 'X-Sift-Token': 'e2e' } })
+  expect(done.status()).toBe(200)
+})
+
+test('a fresh install opens the setup wizard', async ({ page }) => {
+  await page.goto('/?t=e2e')
+  await expect(page).toHaveURL(/\/setup$/)
+  await expect(page.getByRole('heading', { level: 2, name: 'Welcome to Sift' })).toBeVisible()
+  await expect(page.getByText(/Everything stays on this Mac/)).toBeVisible()
+  await page.getByRole('button', { name: 'Get started' }).click()
+  await expect(page.getByRole('heading', { level: 2, name: 'Turn on USB debugging' })).toBeVisible()
+})
+
 test('shell loads status and connects to live events', async ({ page }) => {
   const ok = statusOk(page)
   await page.goto('/?t=e2e')

@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { Navigate, Route, Routes, useNavigate } from 'react-router'
 import { ConfigWarnings } from './components/ConfigWarnings'
@@ -7,16 +7,26 @@ import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
 import { Toasts } from './components/Toasts'
 import { ApiError, apiFetch } from './lib/api'
+import type { SetupState } from './lib/types'
 import { useStatus } from './lib/useStatus'
 import BackupPage from './pages/BackupPage'
 import CleanupPage from './pages/CleanupPage'
 import LogsPage from './pages/LogsPage'
 import QuarantinePage from './pages/QuarantinePage'
 import SettingsPage from './pages/SettingsPage'
+import WizardPage from './pages/Wizard'
 
 export default function App() {
   const navigate = useNavigate()
   const status = useStatus()
+
+  // First run: until setup is finished the app opens the wizard instead of the Backup screen.
+  const setup = useQuery({
+    queryKey: ['setup', 'state'],
+    queryFn: () => apiFetch<SetupState>('/api/setup/state'),
+    retry: false,
+  })
+  const home = setup.data?.complete === false ? '/setup' : '/backup'
 
   const qc = useQueryClient()
   const retry = useMutation({
@@ -59,13 +69,14 @@ export default function App() {
         <Sidebar />
         <main className="min-w-0 flex-1 overflow-auto">
           <Routes>
-            <Route path="/" element={<Navigate to="/backup" replace />} />
+            <Route path="/" element={setup.isPending ? null : <Navigate to={home} replace />} />
+            <Route path="/setup" element={<WizardPage />} />
             <Route path="/backup" element={<BackupPage />} />
             <Route path="/cleanup" element={<CleanupPage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="*" element={<Navigate to="/backup" replace />} />
+            <Route path="*" element={<Navigate to={home} replace />} />
           </Routes>
         </main>
       </div>

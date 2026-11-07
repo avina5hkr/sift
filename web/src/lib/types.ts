@@ -133,3 +133,65 @@ export type BackupOverview = {
   pending_scan: ScanInfo | null
   job: JobEvent | null
 }
+
+// First-run wizard: mirrors src/sift/server/routes/setup.py.
+export type SetupPhone = { uuid: string; model: string | null; last4: string | null; label: string | null }
+export type SetupState = {
+  complete: boolean
+  phone: SetupPhone | null
+  mac_root: string
+  device_label: string
+  suggested_label: string
+  ssd_volume_uuid: string
+}
+export type AdbState = {
+  status: 'ready' | 'missing' | 'broken'
+  version: string | null
+  message: string
+  download_bytes: number
+  download_host: string
+}
+export type AttachedPhone = {
+  ref: string // opaque; the serial number never reaches the window, only its last 4 characters
+  model: string | null
+  last4: string
+  ready: boolean
+  waiting_for_allow: boolean
+  stored: boolean
+}
+export type FolderCheck = {
+  path: string
+  ok: boolean
+  problem: string | null
+  exists: boolean
+  free_bytes: number | null
+}
+export type FolderSaved = { mac_root: string; device_label: string; free_bytes: number | null }
+export type SsdVolume = {
+  name: string
+  file_system: string
+  uuid: string
+  free_bytes: number | null
+  total_bytes: number | null
+  suitable: boolean
+  warning: string | null
+}
+export type SetNode = {
+  name: string
+  enabled: boolean
+  paths: string[]
+  files: number | null // null until a scan has seen the set
+  bytes: number | null
+}
+export type SetsTree = {
+  phone_connected: boolean
+  scanning: boolean
+  scan_job_id: number | null
+  sets: SetNode[]
+}
+export type ReaderTestResult = {
+  tested: boolean
+  readers: number | null
+  speed_bps: number | null
+  message: string
+}

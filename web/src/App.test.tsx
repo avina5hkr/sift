@@ -207,3 +207,52 @@ test('shows messages from the engine as toasts', async () => {
   expect(await screen.findByText('Backup finished')).toBeInTheDocument()
   useEventStore.setState({ toasts: [] })
 })
+
+function stubApi(setupComplete: boolean | 'fails') {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      if (url === '/api/setup/state') {
+        if (setupComplete === 'fails') return new Response(JSON.stringify({ code: 'x', message: 'nope', detail: null }), { status: 500 })
+        return new Response(
+          JSON.stringify({
+            complete: setupComplete,
+            phone: null,
+            mac_root: '~/PhoneBackup',
+            device_label: 'Phone',
+            suggested_label: 'Phone',
+            ssd_volume_uuid: '',
+          }),
+          { status: 200 },
+        )
+      }
+      return new Response(JSON.stringify(STATUS), { status: 200 })
+    }),
+  )
+}
+
+test('the first run opens the setup wizard instead of the Backup screen', async () => {
+  stubApi(false)
+  renderApp('/')
+  expect(await screen.findByRole('heading', { name: 'Set up Sift' })).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 2, name: 'Welcome to Sift' })).toBeInTheDocument()
+})
+
+test('after setup the app opens the Backup screen', async () => {
+  stubApi(true)
+  renderApp('/')
+  expect(await screen.findByRole('heading', { name: 'Backup' })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { name: 'Set up Sift' })).toBeNull()
+})
+
+test('if the setup state cannot be read the app still opens the Backup screen', async () => {
+  stubApi('fails')
+  renderApp('/')
+  expect(await screen.findByRole('heading', { name: 'Backup' })).toBeInTheDocument()
+})
+
+test('the wizard can be reopened at /setup after setup is finished', async () => {
+  stubApi(true)
+  renderApp('/setup')
+  expect(await screen.findByRole('heading', { name: 'Set up Sift' })).toBeInTheDocument()
+})

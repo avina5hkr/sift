@@ -28,6 +28,7 @@ from sift.device.adb_manager import (
     ConsentRequired,
 )
 from sift.device.session import WrongDevice
+from sift.device.tracker import PhoneNotAttached, PhoneNotReady, PhonePickError
 from sift.device.transport import (
     DeviceDisconnected,
     DeviceTimeout,
@@ -61,6 +62,9 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "AdbPortBusy": AdbPortBusy,
     "AlreadyRunningError": AlreadyRunningError,
     "BusClosed": BusClosed,
+    "PhoneNotAttached": PhoneNotAttached,
+    "PhoneNotReady": PhoneNotReady,
+    "PhonePickError": PhonePickError,
     "NoPhone": NoPhone,
     "JobNotFound": JobNotFound,
     "JobConflict": JobConflict,

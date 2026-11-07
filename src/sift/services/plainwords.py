@@ -26,6 +26,7 @@ from sift.device.adb_manager import (
     ConsentRequired,
 )
 from sift.device.session import WrongDevice
+from sift.device.tracker import PhoneNotAttached, PhoneNotReady, PhonePickError
 from sift.device.transport import (
     DeviceDisconnected,
     DeviceTimeout,
@@ -61,6 +62,9 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (AlreadyRunningError, "Sift is already running."),
     (BusClosed, "Sift is closing."),
     (NoPhone, "Connect your phone to start a backup."),
+    (PhoneNotAttached, "That phone is not connected any more."),
+    (PhoneNotReady, "Sift cannot read that phone yet. Unlock it and tap Allow on the phone."),
+    (PhonePickError, "Sift could not choose that phone."),
     (JobNotFound, "That backup was not found."),
     (JobConflict, "That is not possible while a backup is running or Sift is closing."),
     (JobError, "That backup request could not be completed."),
