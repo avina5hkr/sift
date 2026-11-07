@@ -613,8 +613,8 @@ def test_at_least_one_set_must_be_ticked(phone_ctx: AppContext) -> None:
 
 
 def quick_reader_test(monkeypatch: pytest.MonkeyPatch) -> None:
-    def quick(ctx: AppContext, session: DeviceSession) -> Any:
-        return run_reader_test(ctx, session, duration_s=0.05)
+    def quick(ctx: AppContext, session: DeviceSession, **kwargs: Any) -> Any:
+        return run_reader_test(ctx, session, duration_s=0.05, **kwargs)
 
     monkeypatch.setattr(setup_routes, "run_reader_test", quick)
 
@@ -657,7 +657,7 @@ def test_a_phone_that_drops_during_the_reader_test_is_reported_plainly(
 ) -> None:
     from sift.device.transport import DeviceDisconnected
 
-    def boom(ctx: AppContext, session: DeviceSession) -> Any:
+    def boom(ctx: AppContext, session: DeviceSession, **_kwargs: Any) -> Any:
         raise DeviceDisconnected("serial SECRET-1234 vanished")
 
     monkeypatch.setattr(setup_routes, "run_reader_test", boom)
@@ -665,6 +665,93 @@ def test_a_phone_that_drops_during_the_reader_test_is_reported_plainly(
     assert resp.status_code == 502
     assert resp.json()["message"] == "The phone disconnected."
     assert "SECRET" not in resp.text
+
+
+def _scanned(ctx: AppContext) -> TestClient:
+    client = client_for(ctx)
+    post(client, "scan")
+    assert ctx.jobs is not None
+    for job in ctx.jobs.snapshot():
+        assert ctx.jobs.wait_finished(job.id, 30.0)
+    return client
+
+
+def test_the_reader_test_is_refused_while_a_backup_runs(
+    phone_ctx: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    quick_reader_test(monkeypatch)
+    client = _scanned(phone_ctx)
+    phone_ctx.jobs = RunningJobs()  # type: ignore[assignment]
+    resp = post(client, "reader-test")
+    assert resp.status_code == 409 and resp.json()["code"] == "job_conflict"
+    assert phone_ctx.config.phone.measured_read_bps == 0
+
+
+def test_no_backup_starts_while_the_reader_test_runs(
+    phone_ctx: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _scanned(phone_ctx)
+    inside, release = threading.Event(), threading.Event()
+
+    def held(ctx: AppContext, session: DeviceSession, **kwargs: Any) -> Any:
+        inside.set()
+        assert release.wait(10)
+        return run_reader_test(ctx, session, duration_s=0.02, **kwargs)
+
+    monkeypatch.setattr(setup_routes, "run_reader_test", held)
+    results: dict[str, Any] = {}
+    tester = threading.Thread(target=lambda: results.update(test=post(client, "reader-test")))
+    tester.start()
+    assert inside.wait(10)
+    starter = threading.Thread(
+        target=lambda: results.update(
+            start=client.post("/api/backup/start", headers=H, json={"sets": ["Screenshots"]})
+        )
+    )
+    starter.start()
+    starter.join(0.3)
+    assert starter.is_alive()  # the start waits for the speed test
+    assert phone_ctx.jobs is not None
+    assert all(s.dry_run for s in phone_ctx.jobs.snapshot())  # no backup began meanwhile
+    release.set()
+    tester.join(10)
+    starter.join(10)
+    assert results["test"].status_code == 200, results["test"].text
+    assert results["start"].status_code == 200, results["start"].text
+    assert phone_ctx.jobs.wait_finished(results["start"].json()["job_id"], 30.0)
+
+
+def test_closing_stops_a_running_reader_test_before_the_database_closes(
+    phone_ctx: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _scanned(phone_ctx)
+    started = threading.Event()
+    order: list[str] = []
+
+    def long_test(ctx: AppContext, session: DeviceSession, **kwargs: Any) -> Any:
+        started.set()
+        try:
+            return run_reader_test(ctx, session, duration_s=30.0, **kwargs)
+        finally:
+            order.append("test ended")
+
+    monkeypatch.setattr(setup_routes, "run_reader_test", long_test)
+    results: dict[str, Any] = {}
+    tester = threading.Thread(target=lambda: results.update(test=post(client, "reader-test")))
+    tester.start()
+    assert started.wait(10)
+    time.sleep(0.1)  # the readers are reading
+    assert phone_ctx.jobs is not None
+    began = time.monotonic()
+    phone_ctx.jobs.stop_all(5)
+    order.append("jobs stopped")
+    assert time.monotonic() - began < 3  # it stopped, it did not run its 90 s
+    phone_ctx.db.close()  # what shutdown does next
+    tester.join(10)
+    assert order == ["test ended", "jobs stopped"]
+    assert results["test"].status_code == 409 and results["test"].json()["code"] == "closing"
+    assert phone_ctx.config.phone.measured_read_bps == 0  # nothing stored
+    assert not phone_ctx.paths.config.exists()
 
 
 # -- guarded phone choice and switch -------------------------------------------------------------

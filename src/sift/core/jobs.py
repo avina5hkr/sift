@@ -38,7 +38,8 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -542,6 +543,8 @@ class JobManager:
         self._poll_s = poll_s
         self._on_finished = on_finished
         self._lock = threading.Lock()
+        self._side_idle = threading.Condition(self._lock)
+        self._side_tasks = 0  # work on the phone outside a job (the reader test) still running
         self._jobs: dict[int, _Job] = {}
         self._closing = False
         self._starting = False  # a start_backup is between its checks and registering the job
@@ -551,6 +554,26 @@ class JobManager:
     def closing(self) -> bool:
         """True once Sift began closing (`stop_all` was called)."""
         return self._closing
+
+    @contextmanager
+    def side_task(self) -> Iterator[Callable[[], bool]]:
+        """Run work outside a job (the first-run reader test) that must end before Sift closes.
+
+        Raises `JobConflict` once Sift is closing. Yields `cancelled()`, true once `stop_all`
+        began: the work checks it often and stops, and writes nothing once it is true.
+        `stop_all` waits (within its deadline) until every side task has left this block, so
+        one ends before the database closes.
+        """
+        with self._lock:
+            if self._closing:
+                raise JobConflict(CLOSING_MESSAGE)
+            self._side_tasks += 1
+        try:
+            yield lambda: self._closing
+        finally:
+            with self._lock:
+                self._side_tasks -= 1
+                self._side_idle.notify_all()
 
     # -- requests ---------------------------------------------------------------------------
 
@@ -653,6 +676,8 @@ class JobManager:
         runner that is still alive and writes on its own (its own `db.tx()`) is not covered by
         that; it finds the database closed and fails inside its own thread, which is caught and
         discarded here (the job is already `failed`).
+
+        Then it waits, within the same deadline, for every `side_task` to end.
         """
         deadline = time.monotonic() + timeout_s
         with self._lock:
@@ -671,6 +696,14 @@ class JobManager:
         for job in jobs:
             if job.state not in TERMINAL:
                 self._abandon(job, deadline)
+        if self._lock.acquire(timeout=_left(deadline)):
+            try:
+                while self._side_tasks and _left(deadline) > 0:
+                    self._side_idle.wait(_left(deadline))
+                if self._side_tasks:
+                    _log.warning("Work outside a backup did not stop in time")
+            finally:
+                self._lock.release()
 
     def _abandon(self, job: _Job, deadline: float) -> None:
         _log.warning("Job %d did not stop in time; abandoning it", job.id)

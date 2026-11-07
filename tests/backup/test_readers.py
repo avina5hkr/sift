@@ -12,6 +12,7 @@ from typing import Any, BinaryIO, cast
 import pytest
 
 from sift.backup.readers import (
+    ReaderTestCancelled,
     largest_files,
     measure_readers,
     run_reader_test,
@@ -234,3 +235,20 @@ def test_reader_test_with_no_known_files_does_nothing(paths: AppPaths) -> None:
     session = DeviceSession(transport, PhoneIdentity.from_info(transport.info()), "nobody")
     assert run_reader_test(ctx, session, duration_s=0.01) is None
     assert not paths.config.exists()
+
+
+def test_a_cancelled_reader_test_stops_and_stores_nothing(
+    setup: tuple[AppContext, DeviceSession, Path], paths: AppPaths
+) -> None:
+    ctx, session, _backup = setup
+    asked = [0]
+
+    def cancelled() -> bool:
+        asked[0] += 1
+        return asked[0] > 5
+
+    began = time.monotonic()
+    with pytest.raises(ReaderTestCancelled):
+        run_reader_test(ctx, session, duration_s=30.0, cancelled=cancelled)
+    assert time.monotonic() - began < 5
+    assert stored_read_speed(ctx) is None and not paths.config.exists()

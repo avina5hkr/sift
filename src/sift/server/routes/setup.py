@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -21,7 +22,7 @@ from pydantic import BaseModel, Field, StrictStr
 
 from sift.backup.destination import DEFAULT_LABEL, check_mac_root, sanitize_label
 from sift.backup.phonepaths import shown
-from sift.backup.readers import run_reader_test
+from sift.backup.readers import ReaderTestCancelled, run_reader_test
 from sift.backup.run import mac_target
 from sift.core.config import BackupSet, save_config
 from sift.core.jobs import TERMINAL, JobError
@@ -42,7 +43,7 @@ from sift.services.volumes import Volume, list_external_volumes
 
 router = APIRouter(prefix="/setup")
 _log = logging.getLogger("sift.server")
-_config_lock = threading.Lock()
+_config_lock = _sets_lock  # one lock for every write of config.toml (sets, folder, SSD, speed)
 _reader_test_lock = threading.Lock()
 
 SETUP_COMPLETE_KEY = "setup_complete"
@@ -241,6 +242,10 @@ def _attached(ctx: Ctx, ref: str) -> AttachedPhone:
         "phone_not_found",
         "That phone is not connected any more. Reconnect it and choose again.",
     )
+
+
+def _never() -> bool:
+    return False
 
 
 def _running_job(ctx: Ctx) -> bool:
@@ -656,12 +661,22 @@ def reader_test(ctx: Ctx) -> ReaderTestOut:
     session = ctx.tracker.session() if ctx.tracker is not None else None
     if session is None:
         raise ApiError(409, "no_phone", "Connect your phone first.")
-    if _running_job(ctx):
-        raise ApiError(409, "job_conflict", "A backup is running. Try the speed test afterwards.")
     if not _reader_test_lock.acquire(blocking=False):
         raise ApiError(409, "test_running", "The speed test is already running.")
     try:
-        result: Any = run_reader_test(ctx, session)
+        # Under the lock that starts backups: no backup starts while it runs (a start waits),
+        # since both would share the phone's connection slots.
+        with _run_lock:
+            if _running_job(ctx):
+                raise ApiError(
+                    409, "job_conflict", "A backup is running. Try the speed test afterwards."
+                )
+            with ctx.jobs.side_task() if ctx.jobs is not None else nullcontext(_never) as stop:
+                result: Any = run_reader_test(ctx, session, cancelled=stop, lock=_config_lock)
+    except JobError as e:  # Sift is closing
+        raise _job_error(e) from e
+    except ReaderTestCancelled as e:
+        raise ApiError(409, "closing", describe(e)) from e
     except TransportError as e:
         _log.warning("The reader test failed: %s", e)
         raise ApiError(502, "reader_test_failed", describe(e)) from e

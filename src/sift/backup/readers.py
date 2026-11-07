@@ -5,12 +5,17 @@ reader through its own stream. **The bytes are read from the phone and thrown aw
 is opened, created or staged on the Mac, and no function here takes a `Path`. The fastest
 round's reader count is stored as `phone.parallel_reads_usb`, and its speed as
 `phone.measured_read_bps` (the time estimate's basis until a job measures its own speed).
+
+`cancelled()` is asked between chunks: once it is true (Sift is closing) the readers stop, the
+test raises `ReaderTestCancelled` and nothing is stored.
 """
 
 import threading
 import time
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
+from typing import Any
 
 from sift.backup.phonepaths import from_db
 from sift.core.config import save_config
@@ -23,6 +28,14 @@ COUNTS = (1, 2, 4)
 ROUND_S = 3.0
 LARGEST_FILES = 8
 _CHUNK = 1 << 20
+
+
+def _never() -> bool:
+    return False
+
+
+class ReaderTestCancelled(Exception):
+    """The reader test was stopped before it finished (Sift is closing); nothing was stored."""
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,7 @@ def _round(
     readers: int,
     duration_s: float,
     monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] = _never,
 ) -> float:
     """Bytes per second that `readers` parallel streams read in `duration_s`."""
     totals = [0] * readers
@@ -63,7 +77,7 @@ def _round(
     def read(index: int) -> None:
         turn, misses = index, 0
         try:
-            while monotonic() < deadline and misses < len(files):
+            while monotonic() < deadline and misses < len(files) and not cancelled():
                 entry = files[turn % len(files)]
                 turn += readers
                 try:
@@ -72,7 +86,7 @@ def _round(
                     misses += 1
                     continue
                 try:
-                    while monotonic() < deadline:
+                    while monotonic() < deadline and not cancelled():
                         data = stream.read(_CHUNK)
                         if not data:
                             break
@@ -95,6 +109,8 @@ def _round(
         thread.join()
     if errors:
         raise errors[0]
+    if cancelled():
+        raise ReaderTestCancelled
     return sum(totals) / max(monotonic() - start, 1e-9)
 
 
@@ -105,21 +121,33 @@ def measure_readers(
     counts: Sequence[int] = COUNTS,
     duration_s: float = ROUND_S,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] = _never,
 ) -> ReaderTestResult:
     """Read `files` with each reader count in turn; the fastest wins (fewer readers on a tie)."""
     if not files:
         raise ValueError("the reader test needs at least one file")
-    speeds = tuple((n, _round(transport, files, n, duration_s, monotonic)) for n in counts)
+    speeds = tuple(
+        (n, _round(transport, files, n, duration_s, monotonic, cancelled)) for n in counts
+    )
     readers, speed = max(speeds, key=lambda s: (s[1], -s[0]))
     return ReaderTestResult(readers, speed, speeds)
 
 
-def store_result(ctx: AppContext, result: ReaderTestResult) -> None:
-    """Save the reader count and the speed in the settings."""
-    phone = ctx.config.phone
-    phone.parallel_reads_usb = result.readers
-    phone.measured_read_bps = int(result.speed_bps)
-    save_config(ctx.config, ctx.paths.config)
+def store_result(
+    ctx: AppContext, result: ReaderTestResult, *, lock: AbstractContextManager[Any] | None = None
+) -> None:
+    """Save the reader count and the speed in the settings (under `lock`, the one every other
+    write of the settings file takes)."""
+    with lock if lock is not None else nullcontext():
+        phone = ctx.config.phone
+        previous = (phone.parallel_reads_usb, phone.measured_read_bps)
+        phone.parallel_reads_usb = result.readers
+        phone.measured_read_bps = int(result.speed_bps)
+        try:
+            save_config(ctx.config, ctx.paths.config)
+        except BaseException:
+            phone.parallel_reads_usb, phone.measured_read_bps = previous
+            raise
 
 
 def stored_read_speed(ctx: AppContext) -> float | None:
@@ -134,11 +162,13 @@ def run_reader_test(
     *,
     duration_s: float = ROUND_S,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] = _never,
+    lock: AbstractContextManager[Any] | None = None,
 ) -> ReaderTestResult | None:
     """Measure on the phone's largest files and store the result; None when none are known yet.
 
     The rounds never use more readers than the phone's connection slots allow, keeping one for
-    everything else.
+    everything else. Raises `ReaderTestCancelled`, storing nothing, once `cancelled()` is true.
     """
     files = largest_files(ctx.db, session.device_uuid)
     if not files:
@@ -147,7 +177,14 @@ def run_reader_test(
     most = getattr(limits, "max_connections", None)
     counts = [n for n in COUNTS if most is None or n <= max(1, most - 1)]
     result = measure_readers(
-        session.transport, files, counts=counts, duration_s=duration_s, monotonic=monotonic
+        session.transport,
+        files,
+        counts=counts,
+        duration_s=duration_s,
+        monotonic=monotonic,
+        cancelled=cancelled,
     )
-    store_result(ctx, result)
+    if cancelled():
+        raise ReaderTestCancelled
+    store_result(ctx, result, lock=lock)
     return result

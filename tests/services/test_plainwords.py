@@ -9,6 +9,7 @@ from hypothesis import strategies as st
 
 import sift
 from sift.backup.phonepaths import UnstorablePath
+from sift.backup.readers import ReaderTestCancelled
 from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.core.db import (
@@ -55,6 +56,7 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "TargetExists": TargetExists,
     "ScanNotPending": ScanNotPending,
     "UnstorablePath": UnstorablePath,
+    "ReaderTestCancelled": ReaderTestCancelled,
     "ConsentRequired": ConsentRequired,
     "AdbDownloadError": AdbDownloadError,
     "AdbServerError": AdbServerError,
