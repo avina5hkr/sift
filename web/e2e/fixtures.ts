@@ -58,7 +58,17 @@ function start(env: NodeJS.ProcessEnv): Promise<{ child: ChildProcess; url: stri
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let out = ''
-    const timer = setTimeout(() => reject(new Error(`Sift did not start:\n${out}`)), START_TIMEOUT_MS)
+    const timer = setTimeout(() => {
+      // Never leave a half-started server (and its port) behind.
+      if (child.pid !== undefined && child.exitCode === null) {
+        try {
+          process.kill(-child.pid, 'SIGKILL')
+        } catch {
+          // already gone
+        }
+      }
+      reject(new Error(`Sift did not start:\n${out}`))
+    }, START_TIMEOUT_MS)
     const onData = (chunk: Buffer) => {
       out += chunk.toString()
       const m = /Sift running at (http:\/\/127\.0\.0\.1:\d+)\//.exec(out)
@@ -104,7 +114,9 @@ export const test = base.extend<{ sift: Sift } & Options>({
     await chmod(adb, 0o755)
     await writeFile(join(home, 'support', 'config.toml'), `[phone]\nadb_path = "${adb}"\n`)
 
-    const { child, url } = await start({
+    let started: { child: ChildProcess; url: string }
+    try {
+      started = await start({
       ...process.env,
       SIFT_HOME: home,
       SIFT_DEV_TOKEN: TOKEN,
@@ -112,7 +124,12 @@ export const test = base.extend<{ sift: Sift } & Options>({
       SIFT_TRACKER: 'fake',
       SIFT_FAKE_PHONE_DELAY_S: String(phoneDelayS),
       SIFT_TEST_PHONE_CONTROL: '1',
-    })
+      })
+    } catch (err) {
+      await rm(root, { recursive: true, force: true })
+      throw err
+    }
+    const { child, url } = started
     const get = <T,>(path: string) => call(url, 'GET', path) as Promise<T>
     const post = <T,>(path: string, body?: unknown) => call(url, 'POST', path, body) as Promise<T>
     const phone = (action: string, body?: unknown) => post(`/api/test/phone/${action}`, body ?? undefined).then(() => {})
