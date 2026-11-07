@@ -39,16 +39,38 @@ VERSION_OUT = (
 )
 
 
-class FakeRunner:
-    """Records every call; answers `version` and `start-server` unless told otherwise."""
+GOOGLE_DISPLAY = (
+    "Executable=/x/adb\nIdentifier=adb\nAuthority=Developer ID Application: Google LLC "
+    "(EQHXZ8M8AV)\nTeamIdentifier=EQHXZ8M8AV\n"
+)
 
-    def __init__(self, *, version_rc: int = 0, start_rc: int = 0) -> None:
+
+class FakeRunner:
+    """Records every call; answers `version` and `start-server` unless told otherwise.
+
+    `codesign` is answered too (signed by Google unless told otherwise): no real codesign runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        version_rc: int = 0,
+        start_rc: int = 0,
+        verify_rc: int = 0,
+        display: str = GOOGLE_DISPLAY,
+    ) -> None:
         self.calls: list[tuple[list[str], float]] = []
         self.version_rc = version_rc
         self.start_rc = start_rc
+        self.verify_rc = verify_rc
+        self.display = display
 
     def __call__(self, args: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(args), timeout))
+        if args[0] == "/usr/bin/codesign":
+            if "--verify" in args:
+                return subprocess.CompletedProcess(list(args), self.verify_rc, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", self.display)
         if "version" in args:
             rc = self.version_rc
             return subprocess.CompletedProcess(list(args), rc, VERSION_OUT if rc == 0 else "", "")
@@ -216,7 +238,7 @@ def test_download_installs_and_verifies(paths):
     assert loc == AdbLocation(adb, "35.0.2-12147458", AdbStatus.ready, loc.message)
     assert adb.read_bytes() == b"#!/bin/sh\n" and os.access(adb, os.X_OK)
     assert (paths.platform_tools / "NOTICE.txt").read_bytes() == b"n"
-    assert [c[0][1:] for c in runner.calls] == [["version"]]  # verified once, before installing
+    assert [c[0][1:] for c in runner.calls if c[0][0] != "/usr/bin/codesign"] == [["version"]]
     # No leftovers next to the install.
     assert sorted(
         p.name for p in paths.support.iterdir() if "platform" in p.name or ".tmp" in p.name
@@ -424,6 +446,49 @@ def test_locate_does_not_restore_a_broken_old_copy(paths):
     loc = manager(paths, FakeRunner(version_rc=1)).locate()
     assert loc.status == AdbStatus.missing
     assert (paths.support / ".platform-tools.old" / "adb").exists()
+
+
+def test_download_checks_the_signature_before_installing(paths):
+    runner = FakeRunner()
+    manager(paths, runner).download(consent=True, opener=Opener(GOOD_ZIP))
+    codesign = [c for c, _ in runner.calls if c[0] == "/usr/bin/codesign"]
+    assert [c[1] for c in codesign] == ["--verify", "--display"]
+    assert codesign[0][:3] == ["/usr/bin/codesign", "--verify", "--strict"]
+    assert all(".new" in c[-1] for c in codesign)  # the staged copy, not the installed one
+    assert all(t > 0 for _, t in runner.calls)
+
+
+@pytest.mark.parametrize(
+    "runner",
+    [
+        FakeRunner(verify_rc=3),  # unsigned or tampered
+        FakeRunner(display="TeamIdentifier=AAAAAAAAAA\n"),  # signed by someone else
+        FakeRunner(display="TeamIdentifier=not set\n"),
+        FakeRunner(display=""),
+        FakeRunner(display="TeamIdentifier=AAAAAAAAAA\nTeamIdentifier=EQHXZ8M8AV\n"),
+    ],
+    ids=["unsigned", "wrong-team", "no-team", "no-output", "two-teams"],
+)
+def test_a_download_that_is_not_signed_by_google_is_discarded(paths, runner):
+    old = make_exe(paths.platform_tools / "adb")
+    (paths.platform_tools / "keep.txt").write_text("keep")
+    with pytest.raises(AdbDownloadError) as e:
+        manager(paths, runner).download(consent=True, opener=Opener(GOOD_ZIP))
+    assert "verified" in e.value.message
+    assert old.exists() and (paths.platform_tools / "keep.txt").read_text() == "keep"
+    assert [p.name for p in paths.support.iterdir() if p.name.startswith(".platform")] == []
+
+
+def test_a_codesign_that_cannot_run_discards_the_download(paths):
+    class Missing(FakeRunner):
+        def __call__(self, args, timeout):
+            if args[0] == "/usr/bin/codesign":
+                raise subprocess.TimeoutExpired(list(args), timeout)
+            return super().__call__(args, timeout)
+
+    with pytest.raises(AdbDownloadError):
+        manager(paths, Missing()).download(consent=True, opener=Opener(GOOD_ZIP))
+    assert not (paths.platform_tools / "adb").exists()
 
 
 class BrokenAdbRunner(FakeRunner):

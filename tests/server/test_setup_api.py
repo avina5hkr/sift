@@ -1,6 +1,7 @@
 """The first-run wizard's API, over the fake phone and scripted device lists. Nothing here reaches
 adb, a real volume, the network or a real home folder."""
 
+import hashlib
 import json
 import threading
 import time
@@ -23,6 +24,7 @@ from sift.device.track_devices import Snapshot
 from sift.device.tracker import DeviceTracker
 from sift.device.transport import Transport
 from sift.server.routes import setup as setup_routes
+from sift.server.routes.backup import _run_lock
 from sift.server.routes.setup import get_volume_lister
 from sift.services.volumes import Volume
 from tests.helpers import H, client_for, make_ctx
@@ -663,3 +665,258 @@ def test_a_phone_that_drops_during_the_reader_test_is_reported_plainly(
     assert resp.status_code == 502
     assert resp.json()["message"] == "The phone disconnected."
     assert "SECRET" not in resp.text
+
+
+# -- guarded phone choice and switch -------------------------------------------------------------
+
+
+class RunningJobs:
+    """A job manager stand-in whose one job is not finished."""
+
+    class Snap:
+        state = JobState.pulling
+
+    def __init__(self) -> None:
+        self.running = True
+
+    def snapshot(self) -> list[Any]:
+        return [self.Snap()] if self.running else []
+
+
+def test_a_stored_phone_is_not_replaced_by_choosing_even_when_setup_is_not_complete(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker
+) -> None:
+    """An install upgraded from M1 has a stored phone and no `setup_complete` row."""
+    post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+    assert get(client, "state").json()["complete"] is False
+    resp = post(client, "phone", {"ref": ref_of(client, "Beta 2")})
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "phone_already_chosen"
+    assert "Switch phone" in resp.json()["message"] and "SWITCH" in resp.json()["message"]
+    assert stored_uuid(ctx) == [(A, "Alpha 1")]
+    with ctx.db.read() as conn:
+        assert conn.execute("SELECT value FROM setting WHERE key = 'active_device'").fetchone()
+
+
+def test_choosing_the_stored_phone_again_changes_nothing_even_while_a_job_runs(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker
+) -> None:
+    post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+    ctx.jobs = RunningJobs()  # type: ignore[assignment]
+    resp = post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+    assert resp.status_code == 200 and resp.json()["model"] == "Alpha 1"
+
+
+def test_choosing_a_first_phone_is_refused_while_a_job_runs(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker
+) -> None:
+    ctx.jobs = RunningJobs()  # type: ignore[assignment]
+    resp = post(client, "phone", {"ref": ref_of(client, "Beta 2")})
+    assert resp.status_code == 409 and resp.json()["code"] == "job_conflict"
+    assert stored_uuid(ctx) == []
+
+
+@pytest.mark.parametrize("route", ["phone", "switch-phone"])
+def test_the_job_check_and_the_change_happen_under_the_lock_that_starts_backups(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker, route: str
+) -> None:
+    """A backup that starts while the request waits for the lock is seen by the check."""
+    if route == "switch-phone":
+        post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+        body = {"ref": ref_of(client, "Beta 2"), "confirmation": "SWITCH"}
+    else:
+        body = {"ref": ref_of(client, "Beta 2")}
+    jobs = RunningJobs()
+    jobs.running = False
+    ctx.jobs = jobs  # type: ignore[assignment]
+    answer: list[Any] = []
+    with _run_lock:  # what Start and Retry hold while they start a backup
+        thread = threading.Thread(target=lambda: answer.append(post(client, route, body)))
+        thread.start()
+        thread.join(0.3)
+        assert thread.is_alive(), "the request must wait for the lock"
+        jobs.running = True  # the backup started in the meantime
+    thread.join(10)
+    assert answer[0].status_code == 409 and answer[0].json()["code"] == "job_conflict"
+    assert [row[1] for row in stored_uuid(ctx)] == (["Alpha 1"] if route == "switch-phone" else [])
+
+
+def test_switch_phone_is_refused_while_a_scan_or_backup_runs_and_nothing_changes(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker
+) -> None:
+    post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+    ctx.jobs = RunningJobs()  # type: ignore[assignment]
+    resp = post(client, "switch-phone", {"ref": ref_of(client, "Beta 2"), "confirmation": "SWITCH"})
+    assert resp.status_code == 409 and resp.json()["code"] == "job_conflict"
+    assert stored_uuid(ctx) == [(A, "Alpha 1")]
+
+
+# -- each phone has its own folder ---------------------------------------------------------------
+
+
+def labels(ctx: AppContext) -> list[tuple[str, str | None]]:
+    with ctx.db.read() as conn:
+        return [(r[0], r[1]) for r in conn.execute("SELECT model, label FROM device ORDER BY id")]
+
+
+def test_switching_gives_the_new_phone_its_own_folder_name(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker
+) -> None:
+    post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+    post(client, "complete")
+    resp = post(client, "switch-phone", {"ref": ref_of(client, "Beta 2"), "confirmation": "SWITCH"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["label"] == "Beta 2"
+    assert labels(ctx) == [("Alpha 1", None), ("Beta 2", "Beta 2")]  # the old row is untouched
+    assert ctx.config.backup.device_label == "Phone"  # the default is not renamed under phone A
+
+
+def test_the_new_phones_folder_name_never_equals_another_phones_ignoring_case(
+    client: TestClient, ctx: AppContext, two_phones: DeviceTracker
+) -> None:
+    post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+    with ctx.db.tx() as conn:
+        conn.execute("UPDATE device SET label = 'beta 2'")  # phone A's folder
+    resp = post(client, "switch-phone", {"ref": ref_of(client, "Beta 2"), "confirmation": "SWITCH"})
+    assert resp.json()["label"] == "Beta 2 2"
+    # switching back keeps each phone's own name
+    post(client, "switch-phone", {"ref": ref_of(client, "Alpha 1"), "confirmation": "SWITCH"})
+    assert labels(ctx) == [("Alpha 1", "beta 2"), ("Beta 2", "Beta 2 2")]
+
+
+def test_a_phone_with_no_label_of_its_own_collides_with_the_default_name(
+    client: TestClient, ctx: AppContext
+) -> None:
+    tracker = start_tracker(ctx, {A: "device", B: "device"})
+    try:
+        wait_for(lambda: len(tracker.attached_phones()) == 2)
+        post(client, "phone", {"ref": ref_of(client, "Alpha 1")})
+        with ctx.db.tx() as conn:  # phone A has been using the default folder name
+            conn.execute("UPDATE device SET model = 'Phone'")
+        resp = post(
+            client, "switch-phone", {"ref": ref_of(client, "Beta 2"), "confirmation": "SWITCH"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["label"] == "Beta 2"
+        tracker.choose_phone(B)
+    finally:
+        tracker.stop()
+
+
+def test_the_folder_name_cannot_be_one_another_phone_uses(
+    client: TestClient, ctx: AppContext, home: Path
+) -> None:
+    with ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO device (uuid, serial, model, label) VALUES ('a', 'A1', 'A', 'Alpha')"
+        )
+        conn.execute("INSERT INTO device (uuid, serial, model) VALUES ('b', 'B1', 'B')")
+        conn.execute("INSERT INTO setting (key, value) VALUES ('active_device', 'b')")
+    resp = post(client, "mac-folder", {"path": "~/B", "label": "ALPHA"})
+    assert resp.status_code == 409 and resp.json()["code"] == "label_taken"
+    assert post(client, "mac-folder", {"path": "~/B", "label": "Beta"}).status_code == 200
+    assert labels(ctx) == [("A", "Alpha"), ("B", "Beta")]
+    assert ctx.config.backup.device_label == "Phone"  # two phones: the default stays
+
+
+def done_file(ctx: AppContext, device_uuid: str) -> None:
+    with ctx.db.tx() as conn:
+        device_id = conn.execute("SELECT id FROM device WHERE uuid = ?", (device_uuid,)).fetchone()[
+            0
+        ]
+        conn.execute(
+            "INSERT INTO phone_file (device_id, remote_path, origin, size, mtime, state, present) "
+            "VALUES (?, '/sdcard/x', 'camera', 1, 1, 'done', 1)",
+            (device_id,),
+        )
+        dest = conn.execute("SELECT id FROM destination").fetchone()[0]
+        conn.execute(
+            "INSERT INTO content (hash, size, kind, created_at) VALUES ('h', 1, 'other', 1)"
+        )
+        conn.execute(
+            "INSERT INTO replica (content_hash, dest_id, rel_path, rel_key, size, verified_at) "
+            "VALUES ('h', ?, 'p', 'p', 1, 1)",
+            (dest,),
+        )
+
+
+def test_a_phone_that_was_backed_up_keeps_its_folder_name_but_a_new_one_can_choose(
+    client: TestClient, ctx: AppContext, home: Path
+) -> None:
+    with ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO device (uuid, serial, model, label) VALUES ('a', 'A1', 'A', 'Alpha')"
+        )
+    assert post(client, "mac-folder", {"path": "~/B", "label": "Alpha"}).status_code == 200
+    done_file(ctx, "a")
+    assert post(client, "mac-folder", {"path": "~/B", "label": "Other"}).status_code == 409
+    # phone B arrives (switch), has no files yet, so it can still name its folder, and the
+    # backup folder itself stays locked
+    with ctx.db.tx() as conn:
+        conn.execute("INSERT INTO device (uuid, serial, model) VALUES ('b', 'B1', 'Beta')")
+        conn.execute("INSERT INTO setting (key, value) VALUES ('active_device', 'b')")
+    assert post(client, "mac-folder", {"path": "~/B", "label": "Mine"}).status_code == 200
+    assert labels(ctx) == [("A", "Alpha"), ("Beta", "Mine")]
+    assert post(client, "mac-folder", {"path": "~/Elsewhere", "label": "Mine"}).status_code == 409
+
+
+def test_the_state_shows_a_backed_up_phones_folder_name_even_if_it_never_had_its_own(
+    client: TestClient, ctx: AppContext
+) -> None:
+    with ctx.db.tx() as conn:
+        conn.execute("INSERT INTO device (uuid, serial, model) VALUES ('a', 'A1', 'Alpha')")
+        conn.execute("INSERT INTO destination (kind, root_path) VALUES ('mac', '/x')")
+    assert get(client, "state").json()["phone"]["label"] is None  # nothing backed up: free to name
+    done_file(ctx, "a")
+    assert get(client, "state").json()["phone"]["label"] == "Phone"
+    assert get(client, "state").json()["device_label"] == "Phone"
+
+
+def seeded_phone(salt: str, n: int = 40) -> FakePhone:
+    phone = build_fake_phone(n, seed=ord(salt[0]))
+    phone.remove(BIG_VIDEO)
+    for path, file in list(phone.files.items()):
+        if file.size > 100_000 and not file.is_symlink_to:
+            phone.modify(path, hashlib.sha256((salt + path).encode()).digest() * 100, file.mtime)
+    return phone
+
+
+def test_after_a_switch_the_new_phones_files_land_in_its_own_folder(
+    paths: AppPaths, tmp_path: Path
+) -> None:
+    ctx = make_ctx(paths)
+    root = tmp_path / "backup"
+    ctx.config.backup.mac_root = str(root)
+    with ctx.db.tx() as conn:
+        conn.execute("INSERT INTO device (uuid, serial, label) VALUES ('dev-a', 'SER-A', 'Alpha')")
+        conn.execute("INSERT INTO device (uuid, serial) VALUES ('dev-b', 'SER-B')")
+    transport_a = FakeTransport(seeded_phone("a"))
+    session_a = DeviceSession(transport_a, PhoneIdentity.from_info(transport_a.info()), "dev-a")
+    tracker = Tracker(session_a)
+    ctx.tracker = tracker  # type: ignore[assignment]
+    ctx.jobs = real_jobs(ctx)
+    client = client_for(ctx)
+
+    def backup() -> None:
+        resp = client.post("/api/backup/start", headers=H, json={"sets": ["Camera"]})
+        assert resp.status_code == 200, resp.text
+        assert ctx.jobs is not None and ctx.jobs.wait_finished(resp.json()["job_id"], 60.0)
+
+    def tree(folder: str) -> set[str]:
+        return {str(p.relative_to(root)) for p in (root / folder).rglob("*") if p.is_file()}
+
+    backup()
+    before = tree("Alpha")
+    assert before and not (root / "Beta").exists()
+
+    # the switch: phone B has its own label, chosen the way Switch phone chooses it
+    with ctx.db.tx() as conn:
+        conn.execute("UPDATE device SET label = 'Beta' WHERE uuid = 'dev-b'")
+    transport_b = FakeTransport(seeded_phone("b"))
+    tracker.current = DeviceSession(
+        transport_b, PhoneIdentity.from_info(transport_b.info()), "dev-b"
+    )
+    backup()
+    assert tree("Beta")
+    assert tree("Alpha") == before  # the old phone's folder is untouched
+    assert all(p.startswith("Beta/") for p in tree("Beta"))

@@ -418,7 +418,7 @@ test('Settings links back to the setup and switching phones needs the typed word
     'GET /api/setup/devices': () => ({
       phones: [{ ...PHONES.phones[0], stored: true }, PHONES.phones[1]],
     }),
-    'POST /api/setup/switch-phone': () => ({ uuid: 'u2', model: 'Beta 2', last4: '0002', label: null }),
+    'POST /api/setup/switch-phone': () => ({ uuid: 'u2', model: 'Beta 2', last4: '0002', label: 'Beta 2' }),
   })
   renderWizard('/settings')
   expect(await screen.findByRole('link', { name: 'Run the setup again' })).toHaveAttribute('href', '/setup')
@@ -430,7 +430,11 @@ test('Settings links back to the setup and switching phones needs the typed word
   await userEvent.type(screen.getByLabelText('Type SWITCH to confirm'), 'switch')
   expect(action).toBeEnabled()
   await userEvent.click(action)
-  expect(await screen.findByText('Sift now backs up Beta 2 ending 0002.')).toBeInTheDocument()
+  expect(
+    await screen.findByText('Sift now backs up Beta 2 ending 0002. Its files go into the folder Beta 2.'),
+  ).toBeInTheDocument()
+  expect(screen.getByText(/gets its own folder inside your backup folder/)).toBeInTheDocument()
+  expect(screen.queryByText(/give the new phone its own name/)).toBeNull()
   expect(posted('/api/setup/switch-phone').map((c) => c.body)).toEqual([{ ref: 'r2', confirmation: 'switch' }])
 })
 

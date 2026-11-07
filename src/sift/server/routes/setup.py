@@ -92,14 +92,49 @@ class SetupState(BaseModel):
     ssd_volume_uuid: str
 
 
+def _has_files(ctx: Ctx, device_uuid: str) -> bool:
+    """True once any file of this phone has been backed up."""
+    with ctx.db.read() as conn:
+        return (
+            conn.execute(
+                "SELECT 1 FROM phone_file p JOIN device d ON d.id = p.device_id "
+                "WHERE d.uuid = ? AND p.state = 'done' LIMIT 1",
+                (device_uuid,),
+            ).fetchone()
+            is not None
+        )
+
+
 def _stored_phone(ctx: Ctx) -> PhoneOut | None:
+    """The phone Sift backs up. `label` is its folder name: its own, or (for a phone backed up
+    before labels were per phone) the default one; null while it has none to keep."""
     with ctx.db.read() as conn:
         row = conn.execute(
             f"SELECT uuid, serial, model, label FROM device {STORED_PHONE_ORDER} LIMIT 1"
         ).fetchone()
     if row is None:
         return None
-    return PhoneOut(uuid=row[0], model=row[2], last4=_last4(row[1]), label=row[3])
+    label = row[3] or (ctx.config.backup.device_label if _has_files(ctx, row[0]) else None)
+    return PhoneOut(uuid=row[0], model=row[2], last4=_last4(row[1]), label=label)
+
+
+def _other_labels(ctx: Ctx, device_uuid: str | None) -> set[str]:
+    """The folder names (case-folded) in use by every phone except `device_uuid`."""
+    with ctx.db.read() as conn:
+        rows = conn.execute(
+            "SELECT label FROM device WHERE uuid IS NOT ?", (device_uuid,)
+        ).fetchall()
+    return {str(r[0] or ctx.config.backup.device_label).casefold() for r in rows}
+
+
+def _unique_label(ctx: Ctx, wanted: str, device_uuid: str | None) -> str:
+    """`wanted`, or `wanted 2`, `wanted 3`... so no two phones share a folder (ignoring case)."""
+    taken = _other_labels(ctx, device_uuid)
+    label, n = wanted, 1
+    while label.casefold() in taken:
+        n += 1
+        label = f"{wanted} {n}"
+    return label
 
 
 @router.get("/state")
@@ -111,7 +146,7 @@ def get_state(ctx: Ctx) -> SetupState:
         complete=_setting(ctx, SETUP_COMPLETE_KEY) == "1",
         phone=phone,
         mac_root=backup.mac_root,
-        device_label=backup.device_label,
+        device_label=phone.label if phone and phone.label else backup.device_label,
         suggested_label=sanitize_label(phone.model or "")
         if phone and phone.model
         else DEFAULT_LABEL,
@@ -197,10 +232,10 @@ class SwitchRequest(PickRequest):
     confirmation: StrictStr = ""
 
 
-def _resolve(ctx: Ctx, ref: str) -> str:
+def _attached(ctx: Ctx, ref: str) -> AttachedPhone:
     for phone in _tracker(ctx).attached_phones():
         if _ref(phone.serial) == ref:
-            return phone.serial
+            return phone
     raise ApiError(
         404,
         "phone_not_found",
@@ -208,44 +243,65 @@ def _resolve(ctx: Ctx, ref: str) -> str:
     )
 
 
-def _choose(ctx: Ctx, ref: str) -> PhoneOut:
-    serial = _resolve(ctx, ref)
-    try:
-        uuid = _tracker(ctx).choose_phone(serial)
-    except PhonePickError as e:
-        raise ApiError(409, "phone_not_ready", e.message) from e
-    phone = _stored_phone(ctx)
-    assert phone is not None and phone.uuid == uuid
-    return phone
-
-
-@router.post("/phone")
-def choose_phone(ctx: Ctx, body: PickRequest) -> PhoneOut:
-    """The owner's choice becomes the stored phone. Free during first-run setup; once setup is
-    finished, changing the phone is `switch-phone` and needs typed confirmation."""
-    stored = _stored_phone(ctx)
-    if stored is not None and _setting(ctx, SETUP_COMPLETE_KEY) == "1":
-        chosen = next(
-            (p for p in _tracker(ctx).attached_phones() if _ref(p.serial) == body.ref), None
-        )
-        if chosen is None or not chosen.stored:
-            raise ApiError(
-                409,
-                "phone_already_chosen",
-                "Sift already backs up another phone. To change phones, use Switch phone.",
-            )
-    return _choose(ctx, body.ref)
-
-
 def _running_job(ctx: Ctx) -> bool:
     return ctx.jobs is not None and any(s.state not in TERMINAL for s in ctx.jobs.snapshot())
 
 
+def _refuse_while_running(ctx: Ctx) -> None:
+    if _running_job(ctx):
+        raise ApiError(
+            409,
+            "job_conflict",
+            "A backup or a look through the phone is running. Wait for it to finish, or stop "
+            "it, before changing the phone.",
+        )
+
+
+def _store(ctx: Ctx, phone: AttachedPhone) -> PhoneOut:
+    try:
+        uuid = _tracker(ctx).choose_phone(phone.serial)
+    except PhonePickError as e:
+        raise ApiError(409, "phone_not_ready", e.message) from e
+    stored = _stored_phone(ctx)
+    assert stored is not None and stored.uuid == uuid
+    return stored
+
+
+@router.post("/phone")
+def choose_phone(ctx: Ctx, body: PickRequest) -> PhoneOut:
+    """The owner's choice becomes the stored phone, but only while none is stored yet. Once a
+    phone is stored, a different one can only be chosen with Switch phone (typed SWITCH), whatever
+    state setup is in. Choosing the stored phone again changes nothing.
+
+    The check and the change happen under the lock that starts backups, and nothing changes
+    while one runs, so no job can start or lose its phone in between.
+    """
+    with _run_lock:
+        chosen = _attached(ctx, body.ref)
+        stored = _stored_phone(ctx)
+        if stored is not None:
+            if chosen.stored:
+                return stored
+            raise ApiError(
+                409,
+                "phone_already_chosen",
+                "Sift already backs up another phone. To back up this one instead, use Switch "
+                f"phone in Settings and type {SWITCH_WORD}.",
+            )
+        _refuse_while_running(ctx)
+        return _store(ctx, chosen)
+
+
 @router.post("/switch-phone")
 def switch_phone(ctx: Ctx, body: SwitchRequest) -> PhoneOut:
-    """Back up a different phone from now on. The old phone's backups stay where they are.
+    """Back up a different phone from now on.
 
-    Needs the word SWITCH typed (any case), and refuses while a backup is running.
+    The old phone's rows and backed-up files stay exactly as they are. The new phone gets a
+    folder of its own under the backup folder, named after its model (a number is added if
+    another phone already uses that name), unless it was backed up before and has one.
+
+    Needs the word SWITCH typed (any case); refused while a backup or scan runs. The check and the
+    change are made under the lock that starts backups.
     """
     if body.confirmation.strip().casefold() != SWITCH_WORD.casefold():
         raise ApiError(
@@ -253,9 +309,25 @@ def switch_phone(ctx: Ctx, body: SwitchRequest) -> PhoneOut:
             "confirmation_required",
             f"Type {SWITCH_WORD} to confirm that you want to back up a different phone.",
         )
-    if _running_job(ctx):
-        raise ApiError(409, "job_conflict", "A backup is running. Stop it before switching phones.")
-    return _choose(ctx, body.ref)
+    with _run_lock:
+        chosen = _attached(ctx, body.ref)
+        stored = _stored_phone(ctx)
+        if stored is not None and chosen.stored:
+            return stored
+        _refuse_while_running(ctx)
+        phone = _store(ctx, chosen)
+        if phone.label is None or not _has_own_label(ctx, phone.uuid):
+            label = _unique_label(ctx, sanitize_label(phone.model or ""), phone.uuid)
+            with ctx.db.tx() as conn:
+                conn.execute("UPDATE device SET label = ? WHERE uuid = ?", (label, phone.uuid))
+            phone = phone.model_copy(update={"label": label})
+        return phone
+
+
+def _has_own_label(ctx: Ctx, device_uuid: str) -> bool:
+    with ctx.db.read() as conn:
+        row = conn.execute("SELECT label FROM device WHERE uuid = ?", (device_uuid,)).fetchone()
+    return bool(row and row[0])
 
 
 # -- the Mac folder ------------------------------------------------------------------------------
@@ -307,14 +379,27 @@ def save_mac_folder(ctx: Ctx, body: FolderRequest) -> FolderSaved:
     label = sanitize_label(body.label or (phone.model if phone and phone.model else ""))
     backup = ctx.config.backup
     current = os.path.expanduser(backup.mac_root)
-    if _has_backups(ctx) and (
-        check.path != os.path.normpath(current) or label != backup.device_label
-    ):
+    if _has_backups(ctx) and check.path != os.path.normpath(current):
         raise ApiError(
             409,
             "backups_exist",
-            "Sift has already backed up files, so the folder and the phone's name can no longer "
-            "change here. Move the existing backup first.",
+            "Sift has already backed up files, so the backup folder can no longer change here. "
+            "Move the existing backup first.",
+        )
+    keeps = phone.label if phone is not None and phone.label else backup.device_label
+    own_files = _has_files(ctx, phone.uuid) if phone is not None else _has_backups(ctx)
+    if label != keeps and own_files:
+        raise ApiError(
+            409,
+            "backups_exist",
+            "Sift has already backed up this phone's files, so its folder name can no longer "
+            "change here.",
+        )
+    if label.casefold() in _other_labels(ctx, phone.uuid if phone else None):
+        raise ApiError(
+            409,
+            "label_taken",
+            "Another phone already uses that folder name. Choose a different name.",
         )
     try:
         (Path(check.path) / label).mkdir(parents=True, exist_ok=True)
@@ -325,10 +410,16 @@ def save_mac_folder(ctx: Ctx, body: FolderRequest) -> FolderSaved:
         ) from e
     with _config_lock:
         previous = (backup.mac_root, backup.device_label)
-        backup.mac_root, backup.device_label = body.path.strip(), label
+        with ctx.db.read() as conn:
+            only_phone = conn.execute("SELECT COUNT(*) FROM device").fetchone()[0] <= 1
+        # The default name moves only with the one phone that has used it; with several phones
+        # each keeps its own, so changing the default would rename another phone's folder.
+        backup.mac_root = body.path.strip()
+        if only_phone:
+            backup.device_label = label
         try:
             save_config(ctx.config, ctx.paths.config)
-            mac_target(ctx.db, ctx.config)  # the destination row, with this folder and name
+            mac_target(ctx.db, ctx.config, phone.uuid if phone else None)  # the destination row
         except OSError as e:
             backup.mac_root, backup.device_label = previous
             _log.exception("Could not save the backup folder")

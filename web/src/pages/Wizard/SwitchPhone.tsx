@@ -33,7 +33,10 @@ export function SwitchPhone() {
       setDone(null)
     },
     onSuccess: (phone) => {
-      setDone(`Sift now backs up ${phone.model ?? 'the new phone'} ending ${phone.last4 ?? ''}.`)
+      setDone(
+        `Sift now backs up ${phone.model ?? 'the new phone'} ending ${phone.last4 ?? ''}.` +
+          (phone.label ? ` Its files go into the folder ${phone.label}.` : ''),
+      )
       setTyped('')
       void qc.invalidateQueries({ queryKey: ['setup'] })
       void qc.invalidateQueries({ queryKey: ['status'] })
@@ -57,9 +60,9 @@ export function SwitchPhone() {
       {open && (
         <div className="flex flex-col gap-3 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
           <p className="text-sm">
-            Plug in the new phone (any other phone can stay plugged in), choose it below, and type {WORD}. The backups
-            already made for the old phone stay on your Mac. If both phones should keep separate folders, give the new
-            phone its own name in the setup steps.
+            Plug in the new phone (any other phone can stay plugged in), choose it below, and type {WORD}. The new
+            phone gets its own folder inside your backup folder, named after its model. The old phone&apos;s backups
+            and its folder stay exactly where they are. You cannot switch while a backup is running.
           </p>
           {phones.isError && <ErrorNote message={plain(phones.error)} />}
           {phones.data && phones.data.phones.length === 0 && <p role="status">No phone is connected.</p>}

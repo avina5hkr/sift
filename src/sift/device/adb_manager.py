@@ -36,6 +36,9 @@ logger = logging.getLogger("sift.device")
 
 PLATFORM_TOOLS_URL = "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip"
 ADB_SERVER_HOST = "127.0.0.1"
+CODESIGN = "/usr/bin/codesign"
+GOOGLE_TEAM_ID = "EQHXZ8M8AV"  # Developer ID Application: Google LLC
+_CODESIGN_TIMEOUT = 30
 
 _VERSION_TIMEOUT = 10
 _START_SERVER_TIMEOUT = 10
@@ -311,6 +314,7 @@ class AdbManager:
                     "Google's platform-tools downloaded, but adb did not run, so it was not "
                     "installed. Try again, or set phone.adb_path in config.toml."
                 )
+            self._check_signature(staging / "platform-tools" / "adb")
             _replace_dir(staging / "platform-tools", live, live_works=live_works)
         finally:
             if archive is not None:
@@ -319,6 +323,36 @@ class AdbManager:
                 shutil.rmtree(staging, ignore_errors=True)
         final = self._paths.platform_tools / "adb"
         return AdbLocation(final, loc.version, AdbStatus.ready, loc.message)
+
+    def _check_signature(self, adb: Path) -> None:
+        """The downloaded adb must be validly signed by Google (`codesign`, no shell).
+
+        Checked before it replaces anything; on failure the download is discarded and the
+        installed copy is left alone.
+        """
+        refused = AdbDownloadError(
+            "The downloaded platform-tools could not be verified as coming from Google, so "
+            "nothing was installed."
+        )
+        try:
+            verify = self._runner([CODESIGN, "--verify", "--strict", str(adb)], _CODESIGN_TIMEOUT)
+            shown = self._runner(
+                [CODESIGN, "--display", "--verbose=2", str(adb)], _CODESIGN_TIMEOUT
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("codesign could not run: %r", e)
+            raise refused from e
+        if verify.returncode != 0:
+            logger.warning(
+                "platform-tools adb failed the signature check (exit %s)", verify.returncode
+            )
+            raise refused
+        teams = re.findall(
+            r"^TeamIdentifier=(\S+)", f"{shown.stdout}\n{shown.stderr}", re.MULTILINE
+        )
+        if shown.returncode != 0 or teams != [GOOGLE_TEAM_ID]:
+            logger.warning("platform-tools adb is not signed by the expected team: %s", teams)
+            raise refused
 
     def _fetch(self, opener: Opener, dest: Path) -> None:
         try:

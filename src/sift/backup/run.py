@@ -38,8 +38,24 @@ UNKNOWN_SET_MESSAGE = "A backup set chosen for this backup is no longer in the s
 MAC_LABEL = "Mac"
 
 
-def mac_target(db: Database, config: Config) -> Target:
-    """The Mac destination for `backup.mac_root`, its row created on first use."""
+def device_label(db: Database, config: Config, device_uuid: str | None) -> str:
+    """The folder name of a phone under the backup folder: its own label, else the default one.
+
+    Each phone has its own label (`device.label`, set when it is chosen), so two phones never
+    share a folder. A phone with no label of its own (stored before labels existed) uses
+    `backup.device_label`.
+    """
+    if device_uuid is not None:
+        with db.read() as conn:
+            row = conn.execute("SELECT label FROM device WHERE uuid = ?", (device_uuid,)).fetchone()
+        if row is not None and row[0]:
+            return str(row[0])
+    return config.backup.device_label
+
+
+def mac_target(db: Database, config: Config, device_uuid: str | None = None) -> Target:
+    """The Mac destination for `backup.mac_root` (its row created on first use), with the folder
+    name of the phone `device_uuid`."""
     root = Path(config.backup.mac_root).expanduser()
     with db.tx() as conn:
         row = conn.execute(
@@ -54,7 +70,7 @@ def mac_target(db: Database, config: Config) -> Target:
             dest_id = int(cur.lastrowid or 0)
         else:
             dest_id = int(row[0])
-    return Target(dest_id, root, config.backup.device_label, config.backup.layout)
+    return Target(dest_id, root, device_label(db, config, device_uuid), config.backup.layout)
 
 
 def reader_count(config: Config, session: DeviceSession) -> int:
@@ -183,7 +199,7 @@ def _run(
     device_id = _device_id(db, session.device_uuid)
     progress.device_id = device_id
     items = pending_items(db, device_id, names)
-    target = mac_target(db, config)
+    target = mac_target(db, config, session.device_uuid)
     problem = space_check(
         sum(i.size for i in items), target.root, config.backup.free_space_headroom_pct
     )
