@@ -896,3 +896,44 @@ def test_api_download_makes_the_tracker_look_again(paths):
         == 200
     )
     assert retried == [True]
+
+
+def test_locate_never_sees_a_download_half_way_through_its_swap(paths, monkeypatch):
+    """A status check landing between "set the old copy aside" and "move the new one in" must
+    wait for the swap, not restore the old copy over it."""
+    old = make_exe(paths.platform_tools / "adb")
+    old.write_text("#!/bin/sh\n# OLD\n")
+    mid, go = threading.Event(), threading.Event()
+    real_rename = Path.rename
+
+    def slow_rename(self: Path, target):  # type: ignore[no-untyped-def]
+        if self.name == "platform-tools" and self.parent.name.endswith(".new"):
+            mid.set()  # the old copy is aside now, the new one not yet in
+            assert go.wait(10)
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", slow_rename)
+    errors: list[BaseException] = []
+
+    def download() -> None:
+        try:
+            manager(paths).download(consent=True, opener=Opener(GOOD_ZIP))
+        except BaseException as e:
+            errors.append(e)
+
+    found: list[AdbLocation] = []
+    downloader = threading.Thread(target=download)
+    downloader.start()
+    assert mid.wait(10)
+    checker = threading.Thread(target=lambda: found.append(manager(paths).locate()))
+    checker.start()
+    checker.join(0.3)
+    assert checker.is_alive()  # it waits for the swap
+    go.set()
+    downloader.join(10)
+    checker.join(10)
+    assert errors == []
+    assert found and found[0].status is AdbStatus.ready
+    assert (paths.platform_tools / "adb").read_text() == "#!/bin/sh\n"  # the new copy
+    assert not (paths.support / ".platform-tools.old").exists()
+    assert not (paths.support / ".platform-tools.broken").exists()

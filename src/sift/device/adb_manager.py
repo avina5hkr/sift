@@ -51,6 +51,10 @@ _MAX_MEMBERS = 2000
 
 # One download at a time, however many requests arrive.
 _download_lock = threading.Lock()
+# Held while the managed platform-tools folder is swept or swapped, and while `locate` looks at
+# it (and may restore a set-aside copy), so `locate` never sees a swap half done. Unlike
+# `_download_lock` it is never held across the network fetch.
+_swap_lock = threading.Lock()
 
 MISSING_MESSAGE = (
     "adb was not found. Install Android platform-tools, or set phone.adb_path in config.toml."
@@ -173,13 +177,14 @@ class AdbManager:
                 return _broken(path, configured=True)
             return self._verify(path, configured=True)
         managed = self._paths.platform_tools / "adb"
-        found = self._verify(managed) if _is_executable(managed) else None
-        if found is not None and found.status is AdbStatus.ready:
-            return found
-        # Missing or broken: an interrupted install may have left a working copy set aside.
-        if self._restore_previous_install():
-            return self._verify(managed)
-        return found or AdbLocation(None, None, AdbStatus.missing, MISSING_MESSAGE)
+        with _swap_lock:  # a download's swap is either not begun or finished
+            found = self._verify(managed) if _is_executable(managed) else None
+            if found is not None and found.status is AdbStatus.ready:
+                return found
+            # Missing or broken: an interrupted install may have left a working copy set aside.
+            if self._restore_previous_install():
+                return self._verify(managed)
+            return found or AdbLocation(None, None, AdbStatus.missing, MISSING_MESSAGE)
 
     def _restore_previous_install(self) -> bool:
         """Put back the copy set aside by an install that was interrupted half way.
@@ -295,10 +300,11 @@ class AdbManager:
         support = self._paths.support
         support.mkdir(parents=True, exist_ok=True)
         live = self._paths.platform_tools
-        live_works = _is_executable(live / "adb") and (
-            self._verify(live / "adb").status is AdbStatus.ready
-        )
-        _sweep_leftovers(support, live, live_works=live_works)
+        with _swap_lock:
+            live_works = _is_executable(live / "adb") and (
+                self._verify(live / "adb").status is AdbStatus.ready
+            )
+            _sweep_leftovers(support, live, live_works=live_works)
         archive: Path | None = None
         staging: Path | None = None
         try:
@@ -315,7 +321,12 @@ class AdbManager:
                     "installed. Try again, or set phone.adb_path in config.toml."
                 )
             self._check_signature(staging / "platform-tools" / "adb")
-            _replace_dir(staging / "platform-tools", live, live_works=live_works)
+            with _swap_lock:
+                # Looked at again: `locate` may have restored a set-aside copy meanwhile.
+                live_works = _is_executable(live / "adb") and (
+                    self._verify(live / "adb").status is AdbStatus.ready
+                )
+                _replace_dir(staging / "platform-tools", live, live_works=live_works)
         finally:
             if archive is not None:
                 archive.unlink(missing_ok=True)
