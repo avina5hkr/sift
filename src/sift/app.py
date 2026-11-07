@@ -41,7 +41,7 @@ from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
 from sift.core.shutdown import Shutdown
 from sift.core.slow_job import SlowJob
-from sift.device.fake_tracker import FAKE_ANNOUNCE_AFTER_S, fake_tracker
+from sift.device.fake_tracker import FAKE_ANNOUNCE_AFTER_S, FakePhoneControl, fake_tracker
 from sift.device.fake_transport import FaultPlan
 from sift.device.tracker import DeviceTracker, adb_tracker
 from sift.server.app import create_app
@@ -214,7 +214,13 @@ def build_tracker(mode: str, ctx: AppContext, env: Mapping[str, str]) -> DeviceT
     if mode == "fake":
         slow = testhooks.flag("SIFT_TEST_SLOW_PHONE")
         faults = FaultPlan(slow_read_bps=SLOW_PHONE_BPS) if slow else None
-        return fake_tracker(ctx, announce_after_s=fake_announce_delay(env), faults=faults)
+        control = None
+        if testhooks.flag("SIFT_TEST_PHONE_CONTROL"):
+            # The browser tests unplug the phone and change what is on it (routes/testphone.py).
+            control = ctx.phone_control = FakePhoneControl(faults)
+        return fake_tracker(
+            ctx, announce_after_s=fake_announce_delay(env), faults=faults, control=control
+        )
     return adb_tracker(ctx)
 
 

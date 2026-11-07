@@ -11,6 +11,7 @@ from sift.core.paths import AppPaths
 
 if TYPE_CHECKING:
     from sift.core.jobs import JobManager
+    from sift.device.fake_tracker import FakePhoneControl
     from sift.device.tracker import DeviceTracker
 
 
@@ -27,3 +28,4 @@ class AppContext:
     web_dist: Path | None
     tracker: DeviceTracker | None = None  # the phone's connection state; None until wired
     jobs: JobManager | None = None  # backup jobs; None until wired
+    phone_control: FakePhoneControl | None = None  # test hook only: see routes/testphone.py

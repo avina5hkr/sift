@@ -211,6 +211,10 @@ class FakeTransport:
         """Every call raises DeviceDisconnected until `seconds` have passed on the clock."""
         self._offline_until = self.clock() + seconds
 
+    def come_online(self) -> None:
+        """End a `go_offline` early (the cable is plugged back in)."""
+        self._offline_until = None
+
     def check_online(self) -> None:
         if self._offline_until is None:
             return
