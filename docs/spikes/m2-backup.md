@@ -1,29 +1,25 @@
-# M2: real-phone backup into a scratch folder
+# M2: real-phone backup check
 
-Task 18 of the M2 plan. The app ran headless against the real phone over USB (read-only), with
-`SIFT_HOME` and `backup.mac_root` in a scratch folder under the ignored `build/` directory. The
-owner's existing backup folders were not used.
+The M2 exit check asks for a backup of about 100 real files into an empty scratch folder,
+checked by hand. It ran headless (`--no-window`) against the real phone over USB, with
+`SIFT_HOME` and the backup folder both under the repository's ignored `build/` folder, never
+an existing backup folder. Only the Screenshots set was ticked.
 
-## Run
+| | Result |
+|---|---|
+| Files copied | 75 (30.95 MB), 0 failed, 0 warnings |
+| First run | 2.6 s wall, including the scan: about 12 MB/s end to end |
+| First-run reader test | best with 4 readers, 40.6 MB/s (reference: 37.5 MB/s) |
+| Second run, no phone changes | 0 files, 0 bytes transferred (P6 on a real phone) |
+| Checksums | SHA-256 of all 75 Mac copies equals the phone's `sha256sum` of each original |
+| adb server | same process id before and after; nothing was written to the phone |
 
-| | Run 1 | Run 2 (nothing changed on the phone) |
-|---|---|---|
-| Set | one small set (screenshots) | same |
-| New files | 75 | 0 |
-| Bytes copied | 30,952,777 (31.0 MB) | 0 |
-| Time | about 2 s (whole seconds recorded) | under 1 s |
-| Failed / duplicates | 0 / 0 | 0 / 0 |
+The end-to-end figure is below the reader-test speed because the files are small (about
+400 KB each): per-file work (a full flush to disk, the read-back check, the folder flush)
+dominates, not the USB link. The reader test measures the link itself.
 
-- Effective speed about 15 MB/s for 75 small files (about 0.4 MB each), where per-file overhead
-  dominates (stat, open, F_FULLFSYNC, read-back). The first-run reader test measured 40.2 MB/s on
-  large files with 4 parallel readers, above the 37.5 MB/s reference.
-- Run 2 transferred 0 bytes (P6 holds on the real phone).
+The first attempt surfaced one defect, fixed before the run above: a set's folder that does not
+exist on the phone was reported as "could not read". It is now treated as empty, with no
+warning; a folder that had files and goes missing still trips the mass-disappearance guard.
 
-## Checks
-
-- All 75 Mac files re-hashed (SHA-256) and matched their database rows; no `.part` file left.
-- 5 random files hashed on the phone (`sha256sum`) matched both the Mac copy and the database.
-- A sampled file opens as a JPEG with its Exif data.
-- The adb server's pid was the same before and after; nothing was written to the phone.
-
-Sample size note: the plan asked for about 100 files; the chosen set held 75.
+The scratch folder was deleted afterwards.
