@@ -7,10 +7,14 @@ import { initToken } from '../lib/token'
 import type {
   BackupOverview,
   BackupSummary,
+  Analysis,
+  Confirmation,
   FailuresResponse,
   JobEvent,
   JobStateName,
+  Problem,
   StatusResponse,
+  TaskEvent,
 } from '../lib/types'
 import BackupPage from './BackupPage'
 
@@ -105,6 +109,10 @@ type World = {
   overview: BackupOverview
   summary: BackupSummary | null
   failures: FailuresResponse
+  problems: Problem[]
+  confirmations: Record<string, Confirmation>
+  task: TaskEvent | null
+  analysis: Analysis | null
   failPost?: Record<string, { status: number; code: string; message: string }>
 }
 let world: World
@@ -120,12 +128,16 @@ beforeEach(() => {
     { getItem: () => null, setItem: () => undefined } as unknown as Storage,
     { replaceState: vi.fn() } as unknown as History,
   )
-  useEventStore.setState({ job: null, jobAt: 0, toasts: [] })
+  useEventStore.setState({ job: null, jobAt: 0, toasts: [], task: null, analysisId: null })
   world = {
     status: status(),
     overview: { phone_connected: true, sets: SETS, recent: [], pending_scan: null, job: null },
     summary: null,
     failures: { count: 0, files: [] },
+    problems: [],
+    confirmations: {},
+    task: null,
+    analysis: null,
   }
   calls = []
   vi.stubGlobal(
@@ -142,6 +154,13 @@ beforeEach(() => {
       if (url === '/api/backup/overview') return reply(world.overview)
       if (url === '/api/backup/summary') return reply(world.summary)
       if (url === '/api/backup/failures') return reply(world.failures)
+      if (url === '/api/backup/problems') return reply(world.problems)
+      if (url === '/api/tasks/current') return reply(world.task)
+      if (url.startsWith('/api/backup/confirmation?set=')) {
+        const c = world.confirmations[decodeURIComponent(url.split('=')[1])]
+        return c ? reply(c) : reply({ code: 'no_phone', message: 'Connect your phone first.', detail: null }, 409)
+      }
+      if (url.startsWith('/api/analyse/phone/')) return reply(world.analysis)
       if (method === 'POST') return reply({ job_id: 8 })
       return reply({ code: 'nope', message: 'No.', detail: null }, 404)
     }),
@@ -588,4 +607,157 @@ test('Scan again keeps the focus while the answer is on its way', async () => {
   await user.click(again)
   expect(again).not.toBeDisabled()
   expect(document.activeElement).toBe(again)
+})
+
+// -- M3: Problems, tasks, confirmation, analysis ----------------------------------------------
+
+const PROBLEM: Problem = {
+  id: 5,
+  kind: 'hash_mismatch',
+  destination: 'ssd',
+  rel_path: 'Camera/2024/a.jpg',
+  detail: 'The SSD copy differs.',
+  created_at: 1_700_000_000,
+  repairable: true,
+}
+
+const confirmation = (extra: Partial<Confirmation>): Confirmation => ({
+  set_name: 'Camera',
+  report: {
+    on_phone: 1,
+    bytes: 1,
+    verified: {},
+    provisional: 0,
+    not_backed_up: 0,
+    failed: 0,
+    phone_hash_mismatch: 0,
+    phone_unchecked: 0,
+    required: ['mac'],
+    confirmed: true,
+    missing: {},
+  },
+  last_confirmed_at: 1_700_000_000,
+  last_confirmed: true,
+  stale_reason: null,
+  ...extra,
+})
+
+test('the Problems card says what, where and which file, and Repair refetches', async () => {
+  world.problems = [PROBLEM, { ...PROBLEM, id: 6, kind: 'missing_file', destination: 'mac', rel_path: 'b.jpg', repairable: false }]
+  await ready()
+  const card = await screen.findByRole('region', { name: 'Problems' })
+  expect(card).toHaveTextContent('A copy does not match the original on the SSD: Camera/2024/a.jpg')
+  expect(card).toHaveTextContent('A file is missing on the Mac: b.jpg')
+  expect(within(card).getAllByRole('button', { name: /Repair/ })).toHaveLength(1)
+  world.problems = []
+  await userEvent.click(within(card).getByRole('button', { name: 'Repair Camera/2024/a.jpg' }))
+  expect(posts().map((c) => c.path)).toContain('/api/backup/problems/5/repair')
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Problems' })).not.toBeInTheDocument())
+})
+
+test('the Problems card is hidden when there are none', async () => {
+  await ready()
+  expect(screen.queryByRole('region', { name: 'Problems' })).not.toBeInTheDocument()
+})
+
+test('a refused Repair shows the plain message', async () => {
+  world.problems = [PROBLEM]
+  world.failPost = { '/api/backup/problems/5/repair': { status: 409, code: 'no_good_copy', message: 'No good copy is left to repair from.' } }
+  await ready()
+  await userEvent.click(await screen.findByRole('button', { name: 'Repair Camera/2024/a.jpg' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('No good copy is left to repair from.')
+})
+
+test('tools start their tasks; Adopt (SSD) only shows when the SSD is connected', async () => {
+  await ready()
+  expect(screen.queryByRole('button', { name: 'Adopt existing backup (SSD)' })).not.toBeInTheDocument()
+  expect(screen.getByText(/Nothing in the folder is changed/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Verify backups' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Adopt existing backup (Mac)' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Analyse phone' }))
+  expect(posts().map((c) => [c.path, c.body])).toEqual(
+    expect.arrayContaining([
+      ['/api/backup/verify', undefined],
+      ['/api/backup/adopt', { destination: 'mac' }],
+      ['/api/analyse/phone', { sets: ['Camera', 'Screenshots'] }],
+    ]),
+  )
+})
+
+test('with the SSD connected, Adopt offers the SSD too', async () => {
+  world.status.ssd = { configured: true, connected: true, name: 'Backup SSD', mount: '/v', root: '/v/r', free_bytes: 1, dest_id: 2, safe_to_unplug: true }
+  await ready()
+  await userEvent.click(await screen.findByRole('button', { name: 'Adopt existing backup (SSD)' }))
+  expect(posts().map((c) => c.body)).toContainEqual({ destination: 'ssd' })
+})
+
+test('a running task shows its progress and Stop; the buttons wait', async () => {
+  world.task = { kind: 'verify', state: 'running', done: 40, total: 200, message: '', result: null }
+  await ready()
+  const line = await screen.findByText(/Checking your backups · 40 of 200/)
+  expect(line).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Verify backups' })).toHaveAttribute('aria-disabled', 'true')
+  expect(screen.getByRole('button', { name: 'Confirm Camera' })).toHaveAttribute('aria-disabled', 'true')
+  await userEvent.click(screen.getByRole('button', { name: 'Stop' }))
+  expect(posts().map((c) => c.path)).toContain('/api/tasks/stop')
+  act(() => useEventStore.setState({ task: { kind: 'verify', state: 'done', done: 200, total: 200, message: 'All good.', result: null } }))
+  expect(await screen.findByText(/finished\. All good\./)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Verify backups' })).not.toHaveAttribute('aria-disabled')
+})
+
+test('a busy engine (409) is explained in plain words', async () => {
+  world.failPost = { '/api/backup/verify': { status: 409, code: 'task_running', message: 'Another task is already running.' } }
+  await ready()
+  await userEvent.click(screen.getByRole('button', { name: 'Verify backups' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Another task is already running.')
+})
+
+test('each set shows Confirmed, Stale or Not confirmed, and Confirm starts the task', async () => {
+  world.confirmations = {
+    Camera: confirmation({}),
+    Screenshots: confirmation({ set_name: 'Screenshots', last_confirmed: false, stale_reason: 'New files arrived since.' }),
+  }
+  await ready()
+  await waitFor(() => expect(screen.getByTestId('confirm-Camera')).toHaveTextContent(/^Confirmed \d+ \w+ \d\d:\d\d$/))
+  expect(screen.getByTestId('confirm-Screenshots')).toHaveTextContent('Stale: New files arrived since.')
+  expect(screen.getByTestId('confirm-Downloads')).toHaveTextContent('Not confirmed')
+  await userEvent.click(screen.getByRole('button', { name: 'Confirm Camera' }))
+  expect(posts().find((c) => c.path === '/api/backup/confirm')?.body).toEqual({ set: 'Camera' })
+})
+
+test('Confirm needs the phone', async () => {
+  world.status = status({ state: 'no_device', message: 'No phone found.' })
+  await ready()
+  await waitFor(() => expect(stateText()).toHaveTextContent('Not connected'))
+  const button = screen.getByRole('button', { name: 'Confirm Camera' })
+  expect(button).toHaveAccessibleDescription('Connect your phone to confirm.')
+})
+
+test('a finished analysis shows four groups per set and the time estimate, with no delete', async () => {
+  const g = (files: number, bytes: number) => ({ files, bytes })
+  world.analysis = {
+    id: 3,
+    sets: ['Camera'],
+    state: 'done',
+    started_at: 1,
+    finished_at: 2,
+    result: {
+      sets: { Camera: { verified: g(90, 9_000_000), not_verified: g(5, 500_000), not_backed_up: g(1, 2_000), problems: g(2, 4_000) } },
+      hashed_files: 5,
+      hashed_bytes: 500_000,
+      estimate_s: 600,
+      warnings: [],
+    },
+    error: null,
+  }
+  await ready()
+  act(() => useEventStore.setState({ analysisId: 3 }))
+  const card = await screen.findByRole('region', { name: 'What is on the phone' })
+  for (const label of ['Backed up and verified', 'Not verified yet', 'Not backed up', 'Problems']) {
+    expect(within(card).getByText(label)).toBeInTheDocument()
+  }
+  expect(card).toHaveTextContent('90 files, 9.0 MB')
+  expect(card).toHaveTextContent('1 file, 2.0 KB')
+  expect(card).toHaveTextContent('would take about 10 min')
+  expect(within(card).queryByRole('button')).not.toBeInTheDocument()
 })

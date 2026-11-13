@@ -24,11 +24,23 @@ export type DeviceStatus = {
   reason: 'adb_missing' | 'adb_unavailable' | null // why the state is no_adb
 }
 
+// Mirrors the SSD part of GET /api/status; the `ssd` event carries the same without safe_to_unplug.
+export type SsdStatus = {
+  configured: boolean
+  connected: boolean
+  name: string | null
+  mount: string | null
+  root: string | null
+  free_bytes: number | null
+  dest_id: number | null
+  safe_to_unplug: boolean
+}
+
 // Mirrors GET /api/status (src/sift/server/routes/status.py).
 export type StatusResponse = {
   app: { version: string; schema_version: number; config_warnings: string[] }
   device: DeviceStatus | null // null when no tracker runs
-  ssd: null // typed model arrives in M3
+  ssd: SsdStatus | null // null when no SSD is set up
   mac_folder: { path: string; exists: boolean; free_bytes: number | null }
   jobs: unknown[]
 }
@@ -195,4 +207,73 @@ export type ReaderTestResult = {
   readers: number | null
   speed_bps: number | null
   message: string
+}
+
+// The `task` event and TaskOut: one long job (verify, adopt, rebuild, confirm, analyse) at a time.
+export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse'
+export type TaskEvent = {
+  kind: TaskKind
+  state: 'running' | 'done' | 'stopped' | 'failed'
+  done: number
+  total: number
+  message: string
+  result: Record<string, unknown> | null
+}
+// The `replication` event: copying to the SSD after a run.
+export type ReplicationEvent = { state: 'running' | 'done'; copied: number; bytes: number; problems: number; failed: number }
+
+// Mirrors GET /api/backup/problems.
+export type Problem = {
+  id: number
+  kind: 'hash_mismatch' | 'missing_file' | 'older_copy_differs' | 'unreadable'
+  destination: 'mac' | 'ssd' | null
+  rel_path: string
+  detail: string
+  created_at: number
+  repairable: boolean
+}
+
+// Mirrors GET /api/backup/confirmation?set=NAME.
+export type Confirmation = {
+  set_name: string
+  report: {
+    on_phone: number
+    bytes: number
+    verified: { mac?: number; ssd?: number }
+    provisional: number
+    not_backed_up: number
+    failed: number
+    phone_hash_mismatch: number
+    phone_unchecked: number
+    required: string[]
+    confirmed: boolean
+    missing: Record<string, number>
+  }
+  last_confirmed_at: number | null
+  last_confirmed: boolean
+  stale_reason: string | null
+}
+
+// Mirrors GET /api/analyse/phone/{id}.
+export type AnalyseGroup = { files: number; bytes: number }
+export type AnalyseSet = {
+  verified: AnalyseGroup
+  not_verified: AnalyseGroup
+  not_backed_up: AnalyseGroup
+  problems: AnalyseGroup
+}
+export type Analysis = {
+  id: number
+  sets: string[]
+  state: string
+  started_at: number | null
+  finished_at: number | null
+  result: {
+    sets: Record<string, AnalyseSet>
+    hashed_files: number
+    hashed_bytes: number
+    estimate_s: number
+    warnings: string[]
+  } | null
+  error: string | null
 }

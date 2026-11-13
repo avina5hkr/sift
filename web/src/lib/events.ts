@@ -1,7 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { create } from 'zustand'
 import { withToken } from './api'
-import type { JobEvent, ToastEvent } from './types'
+import type { JobEvent, ReplicationEvent, TaskEvent, ToastEvent } from './types'
 
 export type Toast = ToastEvent & { id: number }
 
@@ -13,9 +13,23 @@ type EventState = {
   /** When `job` arrived (Date.now()), so a later answer from the server can outrank it. */
   jobAt: number
   toasts: Toast[]
+  /** The newest long task (verify, adopt, ...) seen in a `task` event. */
+  task: TaskEvent | null
+  /** The newest finished Analyse phone run, so its card stays up after the next task starts. */
+  analysisId: number | null
+  /** The newest copy to the SSD seen in a `replication` event. */
+  replication: ReplicationEvent | null
 }
 
-export const useEventStore = create<EventState>()(() => ({ connected: false, job: null, jobAt: 0, toasts: [] }))
+export const useEventStore = create<EventState>()(() => ({
+  connected: false,
+  job: null,
+  jobAt: 0,
+  toasts: [],
+  task: null,
+  analysisId: null,
+  replication: null,
+}))
 
 export function dismissToast(id: number) {
   useEventStore.setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
@@ -42,7 +56,13 @@ function asJob(data: unknown): JobEvent | null {
     : null
 }
 
-const EVENT_NAMES = ['hello', 'device', 'job', 'progress', 'log', 'toast'] as const
+function asTask(data: unknown): TaskEvent | null {
+  if (typeof data !== 'object' || data === null) return null
+  const t = data as Partial<TaskEvent>
+  return typeof t.kind === 'string' && typeof t.state === 'string' ? (t as TaskEvent) : null
+}
+
+const EVENT_NAMES = ['hello', 'device', 'job', 'progress', 'log', 'toast', 'ssd', 'task', 'replication'] as const
 
 export function startEventStream(qc: QueryClient): () => void {
   const es = new EventSource(withToken('/api/events'))
@@ -59,16 +79,38 @@ export function startEventStream(qc: QueryClient): () => void {
         // After "hello" (first connect or a reconnect) the job the stream last told us about may
         // be out of date: forget it, and the server's answer (fetched below) takes its place.
         name === 'hello'
-          ? { connected: true, last: { name, data }, job: null, jobAt: 0 }
+          ? { connected: true, last: { name, data }, job: null, jobAt: 0, task: null, replication: null }
           : { last: { name, data } },
       )
       // "hello" also arrives after a reconnect, so a missed device event heals at once.
-      if (name === 'hello' || name === 'device' || name === 'job') {
+      if (name === 'hello' || name === 'device' || name === 'job' || name === 'ssd') {
         void qc.invalidateQueries({ queryKey: ['status'] })
       }
       if (name === 'toast') {
         const toast = asToast(data)
         if (toast) useEventStore.setState((s) => ({ toasts: [...s.toasts, toast].slice(-MAX_TOASTS) }))
+      }
+      if (name === 'task') {
+        const task = asTask(data)
+        if (task) {
+          useEventStore.setState({ task })
+          if (task.state !== 'running') {
+            // Problems, confirmations and the counts may all have changed.
+            void qc.invalidateQueries({ queryKey: ['backup'] })
+            const id = task.result?.analysis_id
+            if (task.kind === 'analyse' && task.state === 'done' && typeof id === 'number') {
+              useEventStore.setState({ analysisId: id })
+            }
+          }
+        }
+      }
+      if (name === 'replication' && data && typeof data === 'object') {
+        const replication = data as ReplicationEvent
+        useEventStore.setState({ replication })
+        if (replication.state === 'done') {
+          void qc.invalidateQueries({ queryKey: ['status'] })
+          void qc.invalidateQueries({ queryKey: ['backup'] })
+        }
       }
       if (name === 'progress') {
         const job = asJob(data)

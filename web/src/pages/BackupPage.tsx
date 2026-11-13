@@ -2,21 +2,28 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { Chip } from '../components/Chip'
 import { FailedDrawer } from '../components/backup/FailedDrawer'
+import { AnalysisCard } from '../components/backup/AnalysisCard'
+import { ConfirmStatus } from '../components/backup/ConfirmStatus'
 import { GuardCard } from '../components/backup/GuardCard'
+import { ProblemsCard } from '../components/backup/ProblemsCard'
 import { ProgressBar } from '../components/backup/ProgressBar'
 import { ReasonButton } from '../components/backup/ReasonButton'
 import { SummaryCard } from '../components/backup/SummaryCard'
+import { TaskLine } from '../components/backup/TaskLine'
 import { ApiError, apiFetch } from '../lib/api'
 import { disabledReason, isConnected, isRunning, screenState, type ScreenState } from '../lib/backupState'
 import { useEventStore } from '../lib/events'
 import { formatBytes, formatCount, formatEta, formatSpeed, formatWhen } from '../lib/format'
 import type {
+  Analysis,
   BackupOverview,
   BackupSummary,
   DeviceStatus,
   FailuresResponse,
   JobEvent,
+  Problem,
   SetStatus,
+  TaskEvent,
 } from '../lib/types'
 import { useStatus } from '../lib/useStatus'
 
@@ -165,6 +172,54 @@ export default function BackupPage() {
     // only when the drawer opens
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showFailed])
+
+  // -- long tasks (verify, adopt, confirm, analyse), one at a time
+  const streamTask = useEventStore((s) => s.task)
+  const currentTask = useQuery({
+    queryKey: ['backup', 'task'],
+    queryFn: () => apiFetch<TaskEvent | null>('/api/tasks/current'),
+  })
+  const task = streamTask ?? currentTask.data ?? null
+  const taskRunning = task?.state === 'running'
+  const startTask = useMutation({
+    mutationFn: (v: { path: string; body?: unknown }) => post<TaskEvent>(v.path, v.body),
+    onMutate: () => setMessage(null),
+    onSuccess: (t) => useEventStore.setState({ task: t }),
+    onError: (e) => setMessage(plain(e)),
+    onSettled: done,
+  })
+  const stopTask = useMutation({
+    mutationFn: () => post('/api/tasks/stop'),
+    onError: (e) => setMessage(plain(e)),
+    onSettled: done,
+  })
+  const taskReason = (needsSets = false): string | null => {
+    if (taskRunning) return 'Another task is running. Wait for it to finish or stop it.'
+    if (running) return 'A backup is running. This works when it has finished.'
+    if (startTask.isPending) return 'Starting…'
+    if (needsSets && !isConnected(device)) return 'Connect your phone to do this.'
+    if (needsSets && selected.length === 0) return 'Tick at least one set under "This run".'
+    return null
+  }
+  const ssdConnected = status.data?.ssd?.connected === true
+
+  const problems = useQuery({
+    queryKey: ['backup', 'problems'],
+    queryFn: () => apiFetch<Problem[]>('/api/backup/problems'),
+  })
+  const repair = useMutation({
+    mutationFn: (p: Problem) => post(`/api/backup/problems/${p.id}/repair`),
+    onMutate: () => setMessage(null),
+    onError: (e) => setMessage(plain(e)),
+    onSettled: done,
+  })
+
+  const analysisId = useEventStore((s) => s.analysisId)
+  const analysis = useQuery({
+    queryKey: ['analysis', analysisId],
+    queryFn: () => apiFetch<Analysis>(`/api/analyse/phone/${analysisId}`),
+    enabled: analysisId != null,
+  })
 
   // -- Open backup folder
   const [openError, setOpenError] = useState<string | null>(null)
@@ -369,9 +424,54 @@ export default function BackupPage() {
         />
       )}
 
+      <ProblemsCard
+        problems={Array.isArray(problems.data) ? problems.data : []}
+        busy={repair.isPending || taskRunning}
+        onRepair={(p) => repair.mutate(p)}
+      />
+
       {!running && failedCount > 0 && (
         <FailedLink count={failedCount} onShow={() => setShowFailed(true)} triggerRef={failedTrigger} />
       )}
+
+      {task && <TaskLine task={task} stopping={stopTask.isPending} onStop={() => stopTask.mutate()} />}
+
+      <section aria-labelledby="tools-title">
+        <h2 id="tools-title" className="mb-2 text-lg font-semibold">
+          Tools
+        </h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <ReasonButton reason={taskReason()} onClick={() => startTask.mutate({ path: '/api/backup/verify' })}>
+            Verify backups
+          </ReasonButton>
+          <ReasonButton
+            reason={taskReason()}
+            onClick={() => startTask.mutate({ path: '/api/backup/adopt', body: { destination: 'mac' } })}
+          >
+            Adopt existing backup (Mac)
+          </ReasonButton>
+          {ssdConnected && (
+            <ReasonButton
+              reason={taskReason()}
+              onClick={() => startTask.mutate({ path: '/api/backup/adopt', body: { destination: 'ssd' } })}
+            >
+              Adopt existing backup (SSD)
+            </ReasonButton>
+          )}
+          <ReasonButton
+            reason={taskReason(true)}
+            onClick={() => startTask.mutate({ path: '/api/analyse/phone', body: { sets: selected } })}
+          >
+            Analyse phone
+          </ReasonButton>
+        </div>
+        <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">
+          Adopting reads a backup folder that is already there so Sift knows about it. Nothing in the folder is
+          changed. Analyse phone only looks: it never changes the phone or your backups.
+        </p>
+      </section>
+
+      {analysis.data && <AnalysisCard analysis={analysis.data} />}
 
       <section aria-labelledby="sets-title">
         <h2 id="sets-title" className="mb-2 text-lg font-semibold">
@@ -390,7 +490,15 @@ export default function BackupPage() {
                     ? 'Connect your phone to see what is on it.'
                     : `${formatCount(s.on_phone)} on the phone, ${formatCount(s.backed_up)} backed up on the Mac, ${formatCount(s.pending)} waiting`}
                 </p>
+                <ConfirmStatus set={s.name} />
               </div>
+              <ReasonButton
+                label={`Confirm ${s.name}`}
+                reason={isConnected(device) ? taskReason() : 'Connect your phone to confirm.'}
+                onClick={() => startTask.mutate({ path: '/api/backup/confirm', body: { set: s.name } })}
+              >
+                Confirm
+              </ReasonButton>
               <ReasonButton
                 label={`Back up now, ${s.name}`}
                 reason={reasonFor(s.enabled ? 1 : 0, 'This set is switched off in Settings.')}
