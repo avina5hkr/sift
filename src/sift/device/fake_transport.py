@@ -9,6 +9,7 @@ one while it runs; an open read stream holds one until it is closed, and a walk 
 limit raises `DeviceTimeout`.
 """
 
+import errno
 import hashlib
 import io
 import threading
@@ -356,15 +357,19 @@ class FakeTransport:
     ) -> list[RemoteEntry]:
         self.check_online()
         if not self.phone.is_dir(path):
-            raise RemoteError(f"cannot list {path}: no such directory", path)
+            raise RemoteError(f"cannot list {path}: no such directory", path, errno=errno.ENOENT)
         if self.phone.is_unreadable(path):
-            raise RemoteError(f"cannot list {path}: permission denied", path)
+            raise RemoteError(f"cannot list {path}: permission denied", path, errno=errno.EACCES)
         if path.rstrip("/") in self.faults.lists_empty:
             return []
         entries: list[RemoteEntry] = []
         for entry in self.phone.children(path):
             if entry.path in self.faults.unstatable:
-                failure = RemoteError(f"cannot look at {entry.path}: permission denied", entry.path)
+                failure = RemoteError(
+                    f"cannot look at {entry.path}: permission denied",
+                    entry.path,
+                    errno=errno.EACCES,
+                )
                 if on_error is None:
                     raise failure
                 on_error(failure)

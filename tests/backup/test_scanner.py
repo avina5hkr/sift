@@ -686,3 +686,24 @@ def test_space_check_needs_a_writable_destination(tmp_path: Path) -> None:
     )
     assert list(dest.iterdir()) == []  # the write probe leaves nothing behind
     assert space_check(1, dest, 2.0) is None
+
+
+def test_a_set_folder_missing_on_this_phone_is_empty_without_a_warning(rig: Rig) -> None:
+    rig.add("/sdcard/Download/a.pdf")  # /sdcard/DCIM does not exist on this phone
+
+    result = rig.scan((DCIM, DOWNLOADS))
+
+    assert result.state == "applied"
+    assert result.warnings == ()
+    assert present(rig.db) == {"/sdcard/Download/a.pdf"}
+
+
+def test_a_set_folder_that_had_files_and_is_now_missing_trips_the_guard(rig: Rig) -> None:
+    paths = fill(rig, "/sdcard/DCIM/Camera", 3)
+    rig.scan((DCIM,))
+    rig.phone.remove("/sdcard/DCIM")
+
+    result = rig.scan((DCIM,))
+
+    assert result.state == "awaiting_confirmation"
+    assert present(rig.db) == set(paths)  # nothing changes until the owner confirms

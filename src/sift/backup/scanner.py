@@ -30,6 +30,7 @@ alone and waits for the owner: `confirm_scan` applies the staged result, `discar
   even that cannot store (a NUL in it) leaves that one file out, with a plain warning.
 """
 
+import errno
 import json
 import math
 import os
@@ -155,6 +156,8 @@ def _list_roots(transport: Transport, roots: Sequence[ScanRoot], rules: SkipRule
     for root in roots:
 
         def on_error(error: RemoteError, root: ScanRoot = root) -> None:
+            if _root_missing(error, root):
+                return
             # Without a path the folder is unknown, so everything under the root is kept.
             seen.cannot_read(error.path or root.path)
 
@@ -166,9 +169,23 @@ def _list_roots(transport: Transport, roots: Sequence[ScanRoot], rules: SkipRule
                 entries = transport.walk(root.path, on_error=on_error, prune=prune)
             for entry in entries:
                 take(entry)
-        except RemoteError:
-            seen.cannot_read(root.path)
+        except RemoteError as error:
+            if not _root_missing(error, root):
+                seen.cannot_read(root.path)
     return seen
+
+
+def _root_missing(error: RemoteError, root: ScanRoot) -> bool:
+    """True when a set's folder simply does not exist on this phone (ENOENT on the root itself).
+
+    That folder is treated as empty, with no warning: many phones lack some default folders. It
+    stays safe because a folder that had files and is now missing loses them all at once, which
+    the mass-disappearance guard stops until the owner confirms. A folder that cannot be read
+    (EACCES, or no error number) still warns and keeps its rows.
+    """
+    return error.errno == errno.ENOENT and (error.path or root.path).rstrip(
+        "/"
+    ) == root.path.rstrip("/")
 
 
 # -- staging -------------------------------------------------------------------------------------
