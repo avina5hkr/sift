@@ -375,6 +375,7 @@ class ScoringConfig(_Section):
     protect_screenshots: bool = True
     min_labels_each: Count = 30
     calibration_sample: Positive = 300
+    protected_folders: list[str] = Field(default_factory=list)  # never suggested as junk
 
 
 # Folders the app never deletes from, whatever the config says: app data, and the WhatsApp

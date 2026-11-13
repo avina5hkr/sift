@@ -14,6 +14,7 @@ from sift.backup.replicator import SourceCorrupt
 from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.backup.verifier import NothingToRepairFrom
+from sift.cleanup.calibration import NothingToCalibrate
 from sift.core.db import (
     DatabaseBusyError,
     DatabaseCorruptError,
@@ -62,6 +63,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (ModelDownloadError, "Sift could not download the model."),
     (DownloadStopped, "The model download was stopped."),
     (ClusteringStopped, "Grouping look-alike pictures was stopped."),
+    (NothingToCalibrate, "There is nothing suggested to check yet."),
     (NothingToRepairFrom, "No good copy of this file is on another backup drive."),
     (SourceCorrupt, "A backed-up file no longer matches its checksum, so it was not copied."),
     (ScanNotPending, "That scan is no longer waiting for your confirmation."),
