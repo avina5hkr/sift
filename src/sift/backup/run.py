@@ -21,6 +21,7 @@ from pathlib import Path
 
 from sift.backup.destination import sanitize_label
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
+from sift.backup.replicator import REPLICATION_LOCK, Dest, Replicator, load_dest
 from sift.backup.scanner import ScanResult, scan, space_check
 from sift.backup.sets import resolve_roots
 from sift.backup.skiprules import SkipRules
@@ -112,6 +113,91 @@ class _Progress:
     discarded: bool = False  # the owner discarded the scan the guard held: nothing was copied
 
 
+def ssd_dest(ctx: AppContext) -> Dest | None:
+    """The SSD destination when the SSD is plugged in, else None."""
+    state = ctx.ssd.state() if ctx.ssd is not None else None
+    if state is None or not state.connected or state.dest_id is None:
+        return None
+    return load_dest(ctx.db, state.dest_id)
+
+
+def ssd_pending(ctx: AppContext, mac: Dest) -> int:
+    """Files on the Mac with no copy on the configured SSD (all of them if it was never seen)."""
+    uuid = ctx.config.backup.ssd_volume_uuid
+    with ctx.db.read() as conn:
+        row = conn.execute(
+            "SELECT id FROM destination WHERE kind = 'ssd' AND volume_uuid = ?", (uuid,)
+        ).fetchone()
+        ssd_id = -1 if row is None else int(row[0])
+        return int(
+            conn.execute(
+                "SELECT count(*) FROM replica r WHERE r.dest_id = ? AND NOT EXISTS "
+                "(SELECT 1 FROM replica o WHERE o.dest_id = ? AND o.content_hash = r.content_hash)",
+                (mac.id, ssd_id),
+            ).fetchone()[0]
+        )
+
+
+def replicate_to_ssd(
+    ctx: AppContext, ctl: JobControl, progress: _Progress, clock: Clock | None = None
+) -> None:
+    """After the pull: bring the SSD and the Mac to the same content, or note what is pending."""
+    if not ctx.config.backup.ssd_volume_uuid:
+        return  # no SSD chosen in setup: the Mac is the only destination
+    target = mac_target(ctx.db, ctx.config)
+    mac = Dest(target.dest_id, "mac", target.root)
+    ssd = ssd_dest(ctx)
+    if ssd is None or not REPLICATION_LOCK.acquire(blocking=False):
+        pending_now = ssd_pending(ctx, mac)
+        if pending_now:
+            progress.warnings.append(f"Mac done, SSD pending: {pending_now} files.")
+        return
+    try:
+        ctl.set_state(JobState.replicating)
+        to_ssd, to_mac = Replicator(ctx.db, clock=clock).replicate_union(
+            mac, ssd, should_stop=lambda: ctl.stop_requested
+        )
+    finally:
+        REPLICATION_LOCK.release()
+    corrupt = to_ssd.corrupt + to_mac.corrupt
+    failed = to_ssd.failed + to_mac.failed
+    if corrupt:
+        progress.warnings.append(
+            f"{corrupt} backed-up files did not match their checksum. See Backup, Problems."
+        )
+    if failed:
+        progress.warnings.append(
+            f"{failed} files could not be copied to the SSD; they will be tried again."
+        )
+
+
+def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
+    """Plugging the SSD in: bring both destinations to the same content, without a phone."""
+    if not ctx.config.backup.mac_root:
+        return
+    target = mac_target(ctx.db, ctx.config)
+    mac = Dest(target.dest_id, "mac", target.root)
+    ssd = ssd_dest(ctx)
+    if ssd is None or not REPLICATION_LOCK.acquire(blocking=False):
+        return  # a backup run is replicating already
+    try:
+        ctx.bus.publish("replication", {"state": "running"})
+        to_ssd, to_mac = Replicator(ctx.db).replicate_union(mac, ssd, should_stop=should_stop)
+        ctx.bus.publish(
+            "replication",
+            {
+                "state": "done",
+                "copied": to_ssd.copied + to_mac.copied,
+                "bytes": to_ssd.bytes + to_mac.bytes,
+                "problems": to_ssd.corrupt + to_mac.corrupt,
+                "failed": to_ssd.failed + to_mac.failed,
+            },
+        )
+    finally:
+        REPLICATION_LOCK.release()
+        ctx.db.release_thread()
+
+
 def run_backup(
     ctx: AppContext,
     ctl: JobControl,
@@ -136,6 +222,8 @@ def run_backup(
     outcome = "failed"
     try:
         result = _run(ctx, ctl, sets, dry_run, clock, sleep, reconnect_pause_s, progress)
+        if not dry_run and not ctl.stop_requested:
+            replicate_to_ssd(ctx, ctl, progress, clock)
         # A stop asked for just as the run ended is still a stop, not a plain "done".
         outcome = "stopped" if ctl.stop_requested else "done"
         return result

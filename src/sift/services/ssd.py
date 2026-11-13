@@ -86,6 +86,7 @@ class SsdWatcher:
         self._mounts: frozenset[str] | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._worker: threading.Thread | None = None  # on_connect runs here, off the poll loop
 
     def state(self) -> SsdState:
         with self._lock:
@@ -135,11 +136,31 @@ class SsdWatcher:
             logger.info("SSD %s", "connected" if state.connected else "not connected")
             self._ctx.bus.publish("ssd", self.state().as_event())
             if state.connected and self._on_connect is not None:
-                try:
-                    self._on_connect(state)
-                except Exception:
-                    logger.exception("Could not start work for the connected SSD")
+                self._start_work(state)
         return self.state()
+
+    @property
+    def stopping(self) -> bool:
+        return self._stop.is_set()
+
+    def _start_work(self, state: SsdState) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        on_connect = self._on_connect
+        assert on_connect is not None
+
+        def work() -> None:
+            try:
+                on_connect(state)
+            except Exception:
+                logger.exception("Could not bring the connected SSD up to date")
+
+        self._worker = threading.Thread(target=work, name="sift-ssd-work", daemon=True)
+        self._worker.start()
+
+    def wait_for_work(self, timeout_s: float) -> None:
+        if self._worker is not None:
+            self._worker.join(timeout_s)
 
     def _run(self) -> None:
         try:
@@ -161,3 +182,4 @@ class SsdWatcher:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(5.0)
+        self.wait_for_work(30.0)  # replication stops between files once `stopping` is set

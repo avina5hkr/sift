@@ -41,6 +41,7 @@ export type JobStateName =
   | 'scanning'
   | 'awaiting_confirmation'
   | 'pulling'
+  | 'replicating'
   | 'paused'
   | 'waiting_for_phone'
   | 'stopping'

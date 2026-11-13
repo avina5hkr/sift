@@ -378,3 +378,66 @@ def test_a_stall_during_the_scan_scans_again_instead_of_failing(
     snap = finished(jobs, jobs.start_backup(["Screenshots"]))
     assert snap.state is JobState.done and snap.error is None
     assert snap.files_done > 0 and stalls == []
+
+
+class FakeSsd:
+    """Stands in for SsdWatcher: an SSD destination row at a temp folder, plugged in or not."""
+
+    def __init__(self, rig: Rig, root: Path) -> None:
+        from sift.services.ssd import SsdState, ensure_destination
+
+        self.connected = True
+        rig.ctx.config.backup.ssd_volume_uuid = "uuid-ssd"
+        root.parent.mkdir(parents=True, exist_ok=True)
+        dest_id = ensure_destination(rig.ctx, "uuid-ssd", root, "SSD")
+        self._on = SsdState(True, True, "SSD", str(root.parent), str(root), None, dest_id)
+        self._off = SsdState(True, False)
+
+    def state(self):
+        return self._on if self.connected else self._off
+
+
+def test_a_backup_with_the_ssd_plugged_in_ends_with_the_same_files_on_both(
+    rig: Rig, tmp_path: Path
+) -> None:
+    rig.ctx.ssd = FakeSsd(rig, tmp_path / "ssd" / "backup")  # type: ignore[assignment]
+    jobs = rig.jobs()
+    snap = finished(jobs, jobs.start_backup(ENABLED_SMALL))
+    assert snap.state is JobState.done
+    mac, ssd = tree(rig.root), tree(tmp_path / "ssd" / "backup")
+    assert mac and mac == ssd
+    with rig.ctx.db.read() as conn:
+        per_dest = conn.execute("SELECT dest_id, count(*) FROM replica GROUP BY dest_id").fetchall()
+    assert len(per_dest) == 2 and per_dest[0][1] == per_dest[1][1] == len(mac)
+
+
+def test_without_the_ssd_the_run_says_what_is_pending_and_a_later_plug_in_catches_up(
+    rig: Rig, tmp_path: Path
+) -> None:
+    from sift.backup.run import replicate_now
+
+    fake = FakeSsd(rig, tmp_path / "ssd" / "backup")
+    fake.connected = False
+    rig.ctx.ssd = fake  # type: ignore[assignment]
+    jobs = rig.jobs()
+    finished(jobs, jobs.start_backup(ENABLED_SMALL))
+    with rig.ctx.db.read() as conn:
+        warnings = conn.execute("SELECT warnings FROM run_summary").fetchone()[0]
+    assert "Mac done, SSD pending:" in warnings
+    fake.connected = True
+    replicate_now(rig.ctx, should_stop=lambda: False)
+    assert tree(rig.root) == tree(tmp_path / "ssd" / "backup")
+
+
+def test_p3_a_later_run_keeps_every_file_of_the_earlier_run(rig: Rig) -> None:
+    jobs = rig.jobs()
+    finished(jobs, jobs.start_backup(ENABLED_SMALL))
+    first = tree(rig.root)
+    phone = rig.transport.phone
+    for path in list(phone.files)[:5]:  # files vanish from the phone and others change
+        phone.remove(path)
+    for path, file in list(phone.files.items())[:3]:
+        phone.modify(path, b"changed " + path.encode(), file.mtime + 10)
+    finished(jobs, jobs.start_backup(ENABLED_SMALL))
+    second = tree(rig.root)
+    assert all(second.get(rel) == data for rel, data in first.items())  # I1

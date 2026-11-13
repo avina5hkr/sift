@@ -79,6 +79,7 @@ class JobState(StrEnum):
     scanning = "scanning"
     awaiting_confirmation = "awaiting_confirmation"
     pulling = "pulling"
+    replicating = "replicating"
     paused = "paused"
     waiting_for_phone = "waiting_for_phone"
     stopping = "stopping"
@@ -89,7 +90,13 @@ class JobState(StrEnum):
 TERMINAL = frozenset({JobState.done, JobState.failed})
 # The states a runner may choose itself; the rest belong to the manager.
 RUNNER_STATES = frozenset(
-    {JobState.queued, JobState.scanning, JobState.awaiting_confirmation, JobState.pulling}
+    {
+        JobState.queued,
+        JobState.scanning,
+        JobState.awaiting_confirmation,
+        JobState.pulling,
+        JobState.replicating,
+    }
 )
 
 

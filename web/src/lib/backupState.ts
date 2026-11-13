@@ -29,6 +29,7 @@ export function screenState(device: DeviceStatus | null | undefined, job: JobEve
       case 'awaiting_confirmation':
         return 'confirm'
       case 'pulling':
+      case 'replicating':
       case 'stopping':
         return 'backing_up'
       case 'paused':

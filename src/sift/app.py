@@ -21,7 +21,7 @@ import uvicorn
 from sift import __version__
 from sift.backup.readers import stored_read_speed
 from sift.backup.recovery import recover
-from sift.backup.run import run_backup
+from sift.backup.run import replicate_now, run_backup
 from sift.core import testhooks
 from sift.core.clock import SystemClock
 from sift.core.config import BackupConfig, Config, load_config
@@ -201,8 +201,9 @@ def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
 
 
 def ssd_connected(ctx: AppContext) -> None:
-    """The backup SSD was plugged in: bring it up to date (replication arrives with M3)."""
-    _log.info("The backup SSD is connected")
+    """The backup SSD was plugged in: copy across what one destination has and the other lacks."""
+    ssd = ctx.ssd
+    replicate_now(ctx, should_stop=lambda: ssd is not None and ssd.stopping)
 
 
 def tracker_mode(*, fake_phone: bool, no_window: bool, env: Mapping[str, str]) -> str:
