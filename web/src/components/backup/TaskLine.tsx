@@ -8,6 +8,7 @@ const LABEL: Record<TaskKind, string> = {
   confirm: 'Confirming a set',
   analyse: 'Analysing the phone',
   analyze: 'Looking for duplicates',
+  model: 'Downloading the picture model',
 }
 const ENDED = { done: 'finished', stopped: 'stopped', failed: 'could not finish' }
 

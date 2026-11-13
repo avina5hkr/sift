@@ -210,7 +210,7 @@ export type ReaderTestResult = {
 }
 
 // The `task` event and TaskOut: one long job (verify, adopt, rebuild, confirm, analyse) at a time.
-export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze'
+export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model'
 export type TaskEvent = {
   kind: TaskKind
   state: 'running' | 'done' | 'stopped' | 'failed'
@@ -316,3 +316,20 @@ export type CandidatesPage = {
   next_cursor: number | null
 }
 export type ReviewSort = 'size' | 'date' | 'group'
+
+// Mirrors GET /api/cleanup/models.
+export type ModelStatus = { key: string; installed: boolean; size_bytes: number }
+
+// Mirrors GET /api/cleanup/clusters, /clusters/{id} and /search.
+export type ClusterLabel = 'junk' | 'keep'
+export type ClusterTag = 'greeting' | 'quote' | 'meme' | 'devotional' | 'other'
+export type Cluster = {
+  id: number
+  size: number
+  unique: number
+  sample_ids: number[]
+  sample_text: string | null
+  label: ClusterLabel | null
+}
+export type ClustersResponse = { images: number; covered: number; clusters: Cluster[] }
+export type PictureItem = { id: number; path: string; content_hash: string; score: number; label: ClusterLabel | null }
