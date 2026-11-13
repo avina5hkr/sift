@@ -92,3 +92,64 @@ def test_group_types_and_keeper() -> None:
     assert group_type([cam, sent]) == "mixed"  # a Sent copy of a camera photo
     assert group_type([cam, burst]) == "camera_burst"
     assert max([sent, cam, recv], key=keeper_score) is cam
+
+
+def test_near_and_similar_tabs_over_the_api(rig) -> None:
+    import io
+
+    from PIL import Image
+
+    from sift.services.plainwords import describe
+    from sift.services.tasks import TaskRunner
+    from tests.backup.test_confirm import backed_up
+    from tests.helpers import H, client_for
+
+    def jpeg(img: Image.Image, q: int = 90, *, camera: bool = False) -> bytes:
+        out, exif = io.BytesIO(), Image.Exif()
+        if camera:
+            exif[0x010F] = "Maker"
+        img.save(out, "JPEG", quality=q, exif=exif.tobytes())
+        return out.getvalue()
+
+    base = make_fixtures.base_image(7)
+    burst = make_fixtures.base_image(8)
+    phone = rig.transport.phone
+    cam = "/sdcard/DCIM/Camera/IMG_7.jpg"
+    wa = "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/IMG-7-WA.jpg"
+    phone.add_file(cam, jpeg(base, camera=True), mtime=1_700_000_000)
+    phone.add_file(wa, jpeg(base.resize((320, 240)), 40), mtime=1_700_000_500)
+    phone.add_file(
+        "/sdcard/DCIM/Camera/IMG_8.jpg", jpeg(base, 70, camera=True), mtime=1_700_000_001
+    )
+    phone.add_file("/sdcard/DCIM/Camera/IMG_9.jpg", jpeg(burst, camera=True), mtime=1_700_000_002)
+    phone.add_file(
+        "/sdcard/DCIM/Camera/IMG_10.jpg", jpeg(burst, 60, camera=True), mtime=1_700_000_003
+    )
+    backed_up(rig, ["Camera", "WhatsApp media"])
+    rig.ctx.tasks = TaskRunner(rig.ctx, describe)
+    client = client_for(rig.ctx)
+    client.post("/api/cleanup/analyze", headers=H)
+    assert rig.ctx.tasks.wait(60) and rig.ctx.tasks.current().state == "done"
+    near = client.get("/api/cleanup/candidates?tab=near", headers=H).json()["groups"]
+    group = next(g for g in near if any(c["path"] == wa for c in g["copies"]))
+    assert group["keeper"]["path"].startswith("/sdcard/DCIM/Camera/")  # the camera photo is kept
+    similar = client.get("/api/cleanup/candidates?tab=similar", headers=H).json()["groups"]
+    assert similar and not any(
+        c["checked"] for g in similar for c in g["copies"]
+    )  # never pre-ticked
+    wa_id = next(c["id"] for c in group["copies"] if c["path"] == wa)
+    assert (
+        client.post("/api/selection", headers=H, json={"ids": [wa_id], "checked": True}).json()[
+            "changed"
+        ]
+        == 1
+    )
+    keeper_id = group["keeper"]["id"]
+    assert (
+        client.post("/api/selection", headers=H, json={"ids": [keeper_id], "checked": True}).json()[
+            "changed"
+        ]
+        == 0
+    )
+    cards = {c["tab"]: c for c in client.get("/api/cleanup/summary", headers=H).json()["cards"]}
+    assert cards["near"]["files"] >= 1 and cards["similar"]["groups"] >= 1

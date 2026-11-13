@@ -35,14 +35,18 @@ def base_image(seed: int) -> Image.Image:
     for y in range(h):
         t = (y / h) * abs(math.cos(angle)) + 0.3 * abs(math.sin(angle))
         t = min(1.0, t)
-        draw.line([(0, y), (w, y)], fill=tuple(int(a + (b - a) * t) for a, b in zip(c1, c2, strict=True)))
+        draw.line(
+            [(0, y), (w, y)], fill=tuple(int(a + (b - a) * t) for a, b in zip(c1, c2, strict=True))
+        )
     for _ in range(8):
         x0, y0 = rnd.randrange(w), rnd.randrange(h)
         x1, y1 = x0 + rnd.randrange(40, 260), y0 + rnd.randrange(40, 200)
         fill = tuple(rnd.randrange(256) for _ in range(3))
         (draw.ellipse if rnd.random() < 0.5 else draw.rectangle)([x0, y0, x1, y1], fill=fill)
     for i in range(6):
-        draw.rectangle([40, 40 + i * 22, 40 + rnd.randrange(120, 520), 52 + i * 22], fill=(20, 20, 20))
+        draw.rectangle(
+            [40, 40 + i * 22, 40 + rnd.randrange(120, 520), 52 + i * 22], fill=(20, 20, 20)
+        )
     return img
 
 
@@ -98,7 +102,8 @@ def write_mov(path: Path, frames: list[bytes], width: int, height: int, fps: int
     tkhd = _atom(
         b"tkhd",
         struct.pack(">IIIIIIQHHHH", 0x0000000F, 0, 0, 1, 0, duration, 0, 0, 0, 0, 0)
-        + _MATRIX + struct.pack(">II", width << 16, height << 16),
+        + _MATRIX
+        + struct.pack(">II", width << 16, height << 16),
     )
     mdhd = _atom(b"mdhd", struct.pack(">IIIIIHH", 0, 0, 0, scale, duration, 0, 0))
     hdlr = _atom(b"hdlr", struct.pack(">I", 0), b"mhlr", b"vide", bytes(12), b"\0")
@@ -108,19 +113,27 @@ def write_mov(path: Path, frames: list[bytes], width: int, height: int, fps: int
     dinf = _atom(b"dinf", dref)
     name = b"Photo - JPEG"
     entry_body = (
-        bytes(6) + struct.pack(">H", 1)  # reserved, data reference index
-        + struct.pack(">HH", 0, 0) + b"appl"  # version, revision, vendor
+        bytes(6)
+        + struct.pack(">H", 1)  # reserved, data reference index
+        + struct.pack(">HH", 0, 0)
+        + b"appl"  # version, revision, vendor
         + struct.pack(">II", 0, 0x200)  # temporal, spatial quality
         + struct.pack(">HH", width, height)
         + struct.pack(">II", 72 << 16, 72 << 16)  # resolution
         + struct.pack(">IH", 0, 1)  # data size, frames per sample
-        + bytes([len(name)]) + name + bytes(31 - len(name))
+        + bytes([len(name)])
+        + name
+        + bytes(31 - len(name))
         + struct.pack(">hh", 24, -1)  # depth, no colour table
     )
     stsd = _atom(b"stsd", struct.pack(">II", 0, 1), _atom(b"jpeg", entry_body))
     stts = _atom(b"stts", struct.pack(">IIII", 0, 1, len(frames), delta))
     stsc = _atom(b"stsc", struct.pack(">IIIII", 0, 1, 1, len(frames), 1))
-    stsz = _atom(b"stsz", struct.pack(">III", 0, 0, len(frames)), *(struct.pack(">I", len(f)) for f in frames))
+    stsz = _atom(
+        b"stsz",
+        struct.pack(">III", 0, 0, len(frames)),
+        *(struct.pack(">I", len(f)) for f in frames),
+    )
     stco = _atom(b"stco", struct.pack(">III", 0, 1, data_offset))
     stbl = _atom(b"stbl", stsd, stts, stsc, stsz, stco)
     minf = _atom(b"minf", vmhd, dhlr, dinf, stbl)
@@ -130,7 +143,9 @@ def write_mov(path: Path, frames: list[bytes], width: int, height: int, fps: int
     path.write_bytes(ftyp + mdat + moov)
 
 
-def clip_frames(seed: int, seconds: int, fps: int = 10, *, quality: int = 85, skip: int = 0) -> list[bytes]:
+def clip_frames(
+    seed: int, seconds: int, fps: int = 10, *, quality: int = 85, skip: int = 0
+) -> list[bytes]:
     """A moving scene: a base picture that pans, so frames at different times differ."""
     base = base_image(seed).resize((960, 540))
     out = []

@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from sift.analysis.index import run_index
+from sift.analysis.near import find_groups, load_items, store_groups
 from sift.backup.phonepaths import shown
 from sift.backup.run import usable_dests
 from sift.cleanup.candidates import (
@@ -16,6 +17,7 @@ from sift.cleanup.candidates import (
     select_all_in_tab,
     set_selection,
 )
+from sift.cleanup.near_tabs import TabItem, selectable_ids, tab_groups
 from sift.core.origin import classify_origin
 from sift.device.tracker import STORED_PHONE_ORDER
 from sift.server.deps import Ctx
@@ -81,13 +83,19 @@ def analyze(ctx: Ctx) -> TaskOut:
             on_file=control.progress,
         )
         groups = rebuild_exact(ctx.db, device_id)
+        near = store_groups(ctx.db, find_groups(load_items(ctx.db, device_id), ctx.config.analysis))
         with ctx.db.tx() as conn:
             conn.execute(
                 "INSERT INTO setting (key, value) VALUES (?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 (ANALYZED_AT, str(int(time.time()))),
             )
-        return {"indexed": stats.indexed, "unreadable": stats.unreadable, "exact_groups": groups}
+        return {
+            "indexed": stats.indexed,
+            "unreadable": stats.unreadable,
+            "exact_groups": groups,
+            "near_groups": len(near),
+        }
 
     return start_task(ctx, "analyze", work)
 
@@ -110,7 +118,9 @@ def category(path: str, kind: str) -> Category:
     if origin == "whatsapp_sent":
         return "Sent"
     if origin.startswith("whatsapp"):
-        return "WhatsApp video" if kind == "video" else "WhatsApp images"
+        if kind == "video":
+            return "WhatsApp video"
+        return "WhatsApp images" if kind == "image" else "Other"  # documents, voice notes
     return "Other"
 
 
@@ -168,7 +178,17 @@ def summary(ctx: Ctx) -> CleanupSummary:
                 groups=len(groups),
                 files=sum(len(g.copies) for g in groups),
                 bytes=sum(g.reclaimable for g in groups),
-            )
+            ),
+            *(
+                Card(
+                    tab=tab,
+                    groups=len(tg),
+                    files=sum(len(g.copies) for g in tg),
+                    bytes=sum(c.size for g in tg for c in g.copies),
+                )
+                for tab in ("near", "similar")
+                for tg in [tab_groups(ctx.db, device_id, tab) if device_id is not None else []]
+            ),
         ],
     )
 
@@ -240,12 +260,64 @@ def exact_groups_now(ctx: Ctx, device_id: int) -> list[GroupOut]:
     return [g for g in groups.values() if g.copies]
 
 
+def near_groups_now(ctx: Ctx, device_id: int, tab: str) -> list[GroupOut]:
+    groups = tab_groups(ctx.db, device_id, tab)
+    ids = [c.phone_file_id for g in groups for c in g.copies]
+    with ctx.db.read() as conn:
+        chosen = (
+            {
+                int(r[0]): int(r[1])
+                for r in conn.execute(
+                    f"SELECT phone_file_id, checked FROM selection WHERE phone_file_id IN "
+                    f"({','.join('?' for _ in ids)})",
+                    ids,
+                )
+            }
+            if ids
+            else {}
+        )
+
+    def item(t: TabItem, role: str, checked: bool) -> Item:
+        path = shown(t.path)
+        return Item(
+            id=t.phone_file_id,
+            path=path,
+            size=t.size,
+            mtime=t.mtime,
+            origin=classify_origin(path),
+            kind=t.kind,
+            width=t.width,
+            height=t.height,
+            checked=checked,
+            role=role,
+        )
+
+    out = []
+    for g in groups:
+        copies = [
+            item(c, "copy", is_checked(int(c.default_checked), chosen.get(c.phone_file_id)))
+            for c in g.copies
+        ]
+        out.append(
+            GroupOut(
+                group_id=g.group_id,
+                content_hash=g.keeper.content_hash,
+                keeper=item(g.keeper, "keeper", False),
+                copies=copies,
+                reclaimable=sum(c.size for c in copies),
+            )
+        )
+    return out
+
+
 @router.get("/cleanup/candidates")
 def candidates(ctx: Ctx, tab: str = "exact", sort: str = "size", cursor: int = 0) -> CandidatesOut:
-    if tab != "exact":
+    if tab not in ("exact", "near", "similar"):
         return CandidatesOut(tab=tab, groups=[], total_groups=0, next_cursor=None)
     device_id = _device(ctx)
-    ordered = exact_groups_now(ctx, device_id)
+    ordered = (
+        exact_groups_now(ctx, device_id) if tab == "exact" else near_groups_now(ctx, device_id, tab)
+    )
     if sort == "date":
         ordered.sort(key=lambda g: -g.keeper.mtime)
     elif sort == "group":
@@ -284,6 +356,8 @@ def selection(ctx: Ctx, body: SelectionRequest) -> SelectionOut:
                 (device_id,),
             )
         }
+    allowed |= set(selectable_ids(ctx.db, device_id, "near"))
+    allowed |= set(selectable_ids(ctx.db, device_id, "similar"))
     ids = [i for i in body.ids if i in allowed]
     set_selection(ctx.db, ids, body.checked)
     return SelectionOut(changed=len(ids))

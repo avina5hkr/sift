@@ -7,6 +7,7 @@ pHash: grey at 32x32, 2-D DCT-II, the top-left 8x8 block, bit = above that block
 
 import math
 from functools import cache
+from typing import cast
 
 from PIL import Image
 
@@ -28,7 +29,7 @@ def distance(a: int, b: int) -> int:
 
 def dhash(img: Image.Image) -> int:
     small = img.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
-    px = list(small.get_flattened_data())
+    px = cast(list[int], list(small.get_flattened_data()))  # one grey value per pixel
     bits = 0
     for row in range(8):
         for col in range(8):
@@ -46,7 +47,7 @@ def _cosines() -> tuple[tuple[float, ...], ...]:
 
 def phash(img: Image.Image) -> int:
     small = img.convert("L").resize((32, 32), Image.Resampling.LANCZOS)
-    px = list(small.get_flattened_data())
+    px = cast(list[int], list(small.get_flattened_data()))  # one grey value per pixel
     cos = _cosines()
     # rows first: 32 rows x 8 frequencies, then columns: 8 x 8
     rows = [
