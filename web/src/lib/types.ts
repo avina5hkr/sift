@@ -210,7 +210,7 @@ export type ReaderTestResult = {
 }
 
 // The `task` event and TaskOut: one long job (verify, adopt, rebuild, confirm, analyse) at a time.
-export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse'
+export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze'
 export type TaskEvent = {
   kind: TaskKind
   state: 'running' | 'done' | 'stopped' | 'failed'
@@ -277,3 +277,42 @@ export type Analysis = {
   } | null
   error: string | null
 }
+
+// Mirrors GET /api/cleanup/summary.
+export type StorageCategory = 'Camera' | 'WhatsApp images' | 'WhatsApp video' | 'Sent' | 'Other'
+export type CleanupCard = { tab: string; groups: number; files: number; bytes: number }
+export type CleanupSummary = {
+  has_backup: boolean
+  analyzed_at: number | null
+  new_since: number
+  storage: Record<StorageCategory, number>
+  cards: CleanupCard[]
+}
+
+// Mirrors GET /api/cleanup/candidates.
+export type ReviewItem = {
+  id: number
+  path: string
+  size: number
+  mtime: number
+  origin: string
+  kind: string
+  width: number | null
+  height: number | null
+  checked: boolean
+  role: string
+}
+export type ReviewGroup = {
+  group_id: number
+  content_hash: string
+  keeper: ReviewItem
+  copies: ReviewItem[]
+  reclaimable: number
+}
+export type CandidatesPage = {
+  tab: string
+  groups: ReviewGroup[]
+  total_groups: number
+  next_cursor: number | null
+}
+export type ReviewSort = 'size' | 'date' | 'group'

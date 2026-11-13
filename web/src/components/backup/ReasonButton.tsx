@@ -7,6 +7,8 @@ type Props = {
   reason: string | null
   primary?: boolean
   label?: string
+  /** Where the tooltip opens; `above` for a button at the bottom of the screen. */
+  placement?: 'below' | 'above'
 }
 
 const BASE = 'rounded-md border px-3 py-1.5 text-sm font-medium'
@@ -21,7 +23,7 @@ const LOOKS = {
  * says why: the reason is its accessible description and a tooltip that shows on hover and on
  * keyboard focus. Clicking it does nothing.
  */
-export function ReasonButton({ children, onClick, reason, primary = false, label }: Props) {
+export function ReasonButton({ children, onClick, reason, primary = false, label, placement = 'below' }: Props) {
   const reasonId = useId()
   // Escape hides the tooltip until the pointer or focus leaves (WCAG 1.4.13); the reason stays
   // the button's accessible description.
@@ -52,7 +54,7 @@ export function ReasonButton({ children, onClick, reason, primary = false, label
           id={reasonId}
           role="tooltip"
           style={dismissed ? { display: 'none' } : undefined}
-          className="pointer-events-none absolute top-full left-0 z-20 mt-1 hidden w-64 rounded-md bg-neutral-900 px-3 py-2 text-sm font-normal text-white shadow-lg group-focus-within:block group-hover:block dark:bg-neutral-100 dark:text-neutral-900"
+          className={`pointer-events-none absolute left-0 z-20 hidden ${placement === 'above' ? 'bottom-full mb-1' : 'top-full mt-1'} w-64 rounded-md bg-neutral-900 px-3 py-2 text-sm font-normal text-white shadow-lg group-focus-within:block group-hover:block dark:bg-neutral-100 dark:text-neutral-900`}
         >
           {reason}
         </span>

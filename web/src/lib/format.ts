@@ -50,3 +50,16 @@ export function formatDuration(seconds: number): string {
   if (m < 60) return `${m} min ${s % 60} s`
   return `${Math.floor(m / 60)} h ${m % 60} min`
 }
+
+// "just now", "5 minutes ago", "3 days ago" (now is injectable for tests).
+export function formatAgo(epochSeconds: number, now: number = Date.now() / 1000): string {
+  const s = Math.max(0, now - epochSeconds)
+  const unit = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'} ago`
+  if (s < 60) return 'just now'
+  if (s < 3600) return unit(Math.floor(s / 60), 'minute')
+  if (s < 86_400) return unit(Math.floor(s / 3600), 'hour')
+  return unit(Math.floor(s / 86_400), 'day')
+}
+
+// "/sdcard/DCIM/Camera/IMG_1.jpg" -> "IMG_1.jpg"
+export const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)

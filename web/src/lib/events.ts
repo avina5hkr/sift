@@ -97,6 +97,7 @@ export function startEventStream(qc: QueryClient): () => void {
           if (task.state !== 'running') {
             // Problems, confirmations and the counts may all have changed.
             void qc.invalidateQueries({ queryKey: ['backup'] })
+            void qc.invalidateQueries({ queryKey: ['cleanup'] })
             const id = task.result?.analysis_id
             if (task.kind === 'analyse' && task.state === 'done' && typeof id === 'number') {
               useEventStore.setState({ analysisId: id })

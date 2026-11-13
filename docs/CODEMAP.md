@@ -175,18 +175,26 @@ Migrations: 0001_init.sql, 0002_backup.sql, 0003_run_summary.sql, 0004_run_summa
 - `web/src/components/backup/ReasonButton.tsx`: ReasonButton
 - `web/src/components/backup/SummaryCard.tsx`: SummaryCard
 - `web/src/components/backup/TaskLine.tsx`: TaskLine
+- `web/src/components/cleanup/GroupRow.tsx`: GroupRow
+- `web/src/components/cleanup/Lightbox.tsx`: Lightbox
+- `web/src/components/cleanup/StorageBar.tsx`: StorageBar
+- `web/src/components/cleanup/Tile.tsx`: Tile
+- `web/src/components/cleanup/layout.ts`: HEADER_H, PAD, KEEPER_W, KEEPER_BLOCK_H, TILE, GAP, COLUMN_GAP, BORDER, ESTIMATED_ROW_H, columnsFor, rowHeight, copyTop
+- `web/src/components/cleanup/useReview.ts`: useReview
 - `web/src/lib/api.ts`: ApiError, apiFetch, withToken
 - `web/src/lib/backupState.ts`: ScreenState, MIN_MAC_FREE_BYTES, isConnected, isRunning, screenState, disabledReason
 - `web/src/lib/events.ts`: Toast, useEventStore, dismissToast, startEventStream
-- `web/src/lib/format.ts`: formatBytes, formatSpeed, formatEta, formatCount, formatWhen, formatDuration
+- `web/src/lib/format.ts`: formatBytes, formatSpeed, formatEta, formatCount, formatWhen, formatDuration, formatAgo, baseName
 - `web/src/lib/token.ts`: initToken, getToken
-- `web/src/lib/types.ts`: ConnectionState, DeviceStatus, SsdStatus, StatusResponse, ApiErrorBody, JobStateName, CurrentFile, JobEvent, ToastLevel, ToastEvent, BackupSummary, FailedFile, FailuresResponse, ScanInfo, SetStatus, RecentFile, BackupOverview, SetupPhone, SetupState, AdbState, AttachedPhone, FolderCheck, FolderSaved, SsdVolume, SetNode, SetsTree, ReaderTestResult, TaskKind, TaskEvent, ReplicationEvent, Problem, Confirmation, AnalyseGroup, AnalyseSet, Analysis
+- `web/src/lib/types.ts`: ConnectionState, DeviceStatus, SsdStatus, StatusResponse, ApiErrorBody, JobStateName, CurrentFile, JobEvent, ToastLevel, ToastEvent, BackupSummary, FailedFile, FailuresResponse, ScanInfo, SetStatus, RecentFile, BackupOverview, SetupPhone, SetupState, AdbState, AttachedPhone, FolderCheck, FolderSaved, SsdVolume, SetNode, SetsTree, ReaderTestResult, TaskKind, TaskEvent, ReplicationEvent, Problem, Confirmation, AnalyseGroup, AnalyseSet, Analysis, StorageCategory, CleanupCard, CleanupSummary, ReviewItem, ReviewGroup, CandidatesPage, ReviewSort
 - `web/src/lib/useStatus.ts`: useStatus
+- `web/src/lib/windowing.ts`: buildOffsets, rowAt, visibleRange
 - `web/src/main.tsx`
 - `web/src/pages/BackupPage.tsx`: BackupPage
 - `web/src/pages/CleanupPage.tsx`: CleanupPage
 - `web/src/pages/LogsPage.tsx`: LogsPage
 - `web/src/pages/QuarantinePage.tsx`: QuarantinePage
+- `web/src/pages/ReviewPage.tsx`: ReviewPage
 - `web/src/pages/SettingsPage.tsx`: SettingsPage
 - `web/src/pages/Wizard/Adb.tsx`: Adb
 - `web/src/pages/Wizard/Connect.tsx`: PhonePicker, Connect
