@@ -19,11 +19,13 @@ type Props = {
 
 /** One group of identical files: the keeper on the left, the copies as a grid, a header. */
 export const GroupRow = memo(function GroupRow({ group, cols, top, height, checked, focusId, onToggle, onOpen, onSelectCopies }: Props) {
+  const keeper = group.keeper
+  if (!keeper) return null // the Junk tabs have their own list
   const n = group.copies.length
   const allChecked = n > 0 && group.copies.every((c) => checked(c))
   return (
     <section
-      aria-label={`Group: ${baseName(group.keeper.path)}`}
+      aria-label={`Group: ${baseName(keeper.path)}`}
       data-testid="group"
       className="absolute right-0 left-0 border-b border-neutral-200 dark:border-neutral-800"
       style={{ top, height }}
@@ -44,9 +46,9 @@ export const GroupRow = memo(function GroupRow({ group, cols, top, height, check
       </header>
       <div className="flex" style={{ paddingLeft: PAD, paddingRight: PAD, gap: COLUMN_GAP }}>
         <div className="shrink-0" style={{ width: KEEPER_W }}>
-          <Tile item={group.keeper} checked={false} focused={focusId === group.keeper.id} keeper onOpen={onOpen} />
-          <p className="truncate pt-1 text-xs text-neutral-600 dark:text-neutral-400" style={{ height: 28 }} title={group.keeper.path}>
-            {baseName(group.keeper.path)}
+          <Tile item={keeper} checked={false} focused={focusId === keeper.id} keeper onOpen={onOpen} />
+          <p className="truncate pt-1 text-xs text-neutral-600 dark:text-neutral-400" style={{ height: 28 }} title={keeper.path}>
+            {baseName(keeper.path)}
           </p>
         </div>
         <div className="grid content-start" style={{ gridTemplateColumns: `repeat(${cols}, ${TILE}px)`, gap: GAP }}>

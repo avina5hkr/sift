@@ -3,7 +3,7 @@ import { apiFetch } from '../../lib/api'
 import type { CandidatesPage, ReviewGroup, ReviewItem, ReviewSort } from '../../lib/types'
 import { plain, post } from '../../pages/Wizard/request'
 
-export type ReviewTab = 'exact' | 'near' | 'similar'
+export type ReviewTab = 'exact' | 'near' | 'similar' | 'junk' | 'maybe'
 
 type Position = { group: number; copy: number } // copy -1 is the keeper
 
@@ -12,7 +12,7 @@ type Position = { group: number; copy: number } // copy -1 is the keeper
  * and the changes to the ticks. Every change is shown at once and saved through POST
  * /api/selection; if the save fails the change is undone and a message is set.
  */
-export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact') {
+export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact', enabled = true) {
   const [groups, setGroups] = useState<ReviewGroup[]>([])
   const [total, setTotal] = useState(0)
   const [more, setMore] = useState(true)
@@ -65,7 +65,15 @@ export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact') {
 
   // Each sort is its own mount (the page keys it by sort), so this only ever loads the first page.
   useEffect(() => {
-    void loadMore()
+    if (enabled) void loadMore()
+  }, [loadMore, enabled])
+
+  /** Read the tab again from the start (a file left it). */
+  const reload = useCallback(async () => {
+    await inflight.current
+    cursor.current = 0
+    epoch.current += 1
+    await loadMore()
   }, [loadMore])
 
   const isChecked = useCallback((item: ReviewItem) => sel.get(item.id) ?? item.checked, [sel])
@@ -125,8 +133,10 @@ export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact') {
     const items: ReviewItem[] = []
     const at = new Map<number, Position>()
     groups.forEach((g, gi) => {
-      at.set(g.keeper.id, { group: gi, copy: -1 })
-      items.push(g.keeper)
+      if (g.keeper) {
+        at.set(g.keeper.id, { group: gi, copy: -1 })
+        items.push(g.keeper)
+      }
       g.copies.forEach((c, ci) => {
         at.set(c.id, { group: gi, copy: ci })
         items.push(c)
@@ -157,6 +167,7 @@ export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact') {
     error,
     clearError: () => setError(null),
     loadMore,
+    reload,
     isChecked,
     setChecked,
     setAll,
