@@ -392,6 +392,9 @@ class SelectionOut(BaseModel):
 @router.post("/selection")
 def selection(ctx: Ctx, body: SelectionRequest) -> SelectionOut:
     device_id = _device(ctx)
+    from sift.server.routes.junk import fresh
+
+    fresh(ctx, device_id)  # a file that became Protected or Keep can no longer be ticked
     if body.all_in_tab in ("near", "similar"):
         ids = selectable_ids(ctx.db, device_id, body.all_in_tab)
         set_selection(ctx.db, ids, body.checked)

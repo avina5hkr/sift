@@ -55,3 +55,25 @@ One whole-branch review. → Gate B (the owner labels real clusters and runs one
   replace it. Near-duplicate groups are computed live and may show the same file.
 - E5. The Junk tab shows each file as its own one-item group, so the review UI is reused.
 - E6. Calibration samples phone files of the current phone; a mark applies to the content.
+- E7. Videos need a near-duplicate copy or a junk cluster in addition to the image
+  corroboration; "Seen N times" and the cold-start "2+ copies" count extra phone paths too.
+- E8. A file whose protection cannot be judged yet (image not read by OCR, video of unknown
+  length, no embedding once a model exists) is not listed. Training uses every labelled
+  content with an embedding, on any phone, present or not.
+- E9. Candidates have one row per phone file and tab (migration 0007), so an exact duplicate
+  can also be junk. The junk tabs rebuild whenever any input changes (labels, settings, word
+  lists, phone files, analysis results); one rebuild at a time. Pre-checking is allowed only
+  for the model fingerprint a calibration passed on; T_suggest is not capped at 1.
+
+## Outcome
+
+Built: lexicons, features, kNN vote and calibrated logistic regression (numpy), tiers with
+Protected first, reasons, Junk and Lower confidence tabs, calibration, web Junk tab and
+Calibration screen. Review: 2 Critical (stale or lost rebuild key) and 7 Important (threshold
+cap, isotonic lookup, training only on present files, unjudgeable files listed, stale ticks,
+calibration not tied to the model, exact rows hiding junk) fixed in one pass, with the minor
+lexicon, screenshot-origin and calibration-race fixes. Carried: re-check Protected/Keep in the
+M8 preflight (M8); Junk tab keyboard navigation, double-J on the last calibration item, a
+protected label in the UI, and caching the trained model (M9 polish).
+Final run: 1582 Python, 202 web, 13 e2e passed; lint clean. Gate B is the owner's: label 30+
+junk and 30+ keep groups on the real phone, then one calibration.

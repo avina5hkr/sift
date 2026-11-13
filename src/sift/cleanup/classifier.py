@@ -112,19 +112,27 @@ def _folds(y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 
 
 def _isotonic(z: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Pool-adjacent-violators: (thresholds, values) of a non-decreasing step function."""
+    """Pool-adjacent-violators: (x, value) points of a non-decreasing fit; each block gives
+    its first and last score, and a score between points is interpolated linearly."""
     order = np.argsort(z)
     zs, ys = z[order], y[order].astype(float)
-    vals, weights, ends = [], [], []
+    vals: list[float] = []
+    weights: list[float] = []
+    starts: list[float] = []
+    ends: list[float] = []
     for zi, yi in zip(zs, ys, strict=True):
-        vals.append(yi)
+        vals.append(float(yi))
         weights.append(1.0)
-        ends.append(zi)
-        while len(vals) > 1 and vals[-2] > vals[-1]:
+        starts.append(float(zi))
+        ends.append(float(zi))
+        while len(vals) > 1 and vals[-2] >= vals[-1]:
             w = weights[-2] + weights[-1]
             v = (vals[-2] * weights[-2] + vals[-1] * weights[-1]) / w
-            vals[-2:], weights[-2:], ends[-2:] = [v], [w], [ends[-1]]
-    return np.array(ends), np.array(vals)
+            vals[-2:], weights[-2:] = [v], [w]
+            starts[-2:], ends[-2:] = [starts[-2]], [ends[-1]]
+    xs = [x for s, e in zip(starts, ends, strict=True) for x in (s, e)]
+    ys2 = [v for v in vals for _ in (0, 1)]
+    return np.array(xs), np.array(ys2)
 
 
 class LogReg:
@@ -161,7 +169,6 @@ class LogReg:
     def predict(self, x: np.ndarray) -> np.ndarray:
         z = _decision((x - self.mean) / self.std, self.w)
         if self.isotonic:
-            ends, vals = self.steps
-            idx = np.clip(np.searchsorted(ends, z, side="left"), 0, len(vals) - 1)
-            return np.asarray(vals[idx], dtype=float)
+            xs, ys = self.steps
+            return np.asarray(np.interp(z, xs, ys), dtype=float)
         return _sigmoid(self.a * z + self.b)

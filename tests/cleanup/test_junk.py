@@ -10,7 +10,17 @@ from hypothesis import strategies as st
 from sift.analysis.embed import l2, to_blob
 from sift.analysis.models import CLIP
 from sift.cleanup import calibration
-from sift.cleanup.junk import Item, Model, _features, rebuild_junk, state, train, verdicts
+from sift.cleanup.candidates import rebuild_exact, set_selection
+from sift.cleanup.junk import (
+    Item,
+    Model,
+    _features,
+    ensure_fresh,
+    rebuild_junk,
+    state,
+    train,
+    verdicts,
+)
 from sift.cleanup.lexicons import load
 from sift.core.config import Config
 
@@ -30,12 +40,14 @@ def seed(db: Any, rows: list[dict[str, Any]]) -> None:
         for r in rows:
             conn.execute(
                 "INSERT INTO content (hash, size, kind, width, height, duration_ms, "
-                "has_camera_exif, is_screenshot, ocr_text, embedding, embed_version, "
-                "analysis_version, created_at) VALUES (?, ?, ?, 800, 800, ?, ?, ?, ?, ?, ?, 2, 1)",
+                "has_camera_exif, is_screenshot, ocr_text, embedding, embed_version, ocr_version, "
+                "analysis_version, created_at) "
+                "VALUES (?, ?, ?, 800, 800, ?, ?, ?, ?, ?, ?, ?, 2, 1)",
                 (
                     r["hash"], r.get("size", 60_000), r.get("kind", "image"), r.get("duration"),
                     int(r.get("exif", 0)), int(r.get("shot", 0)), r.get("text"),
-                    to_blob(r["emb"]), CLIP.version,
+                    to_blob(r["emb"]) if r["emb"] is not None else None, CLIP.version,
+                    r.get("ocr", 1),
                 ),
             )  # fmt: skip
             for n, path in enumerate(r.get("paths") or [f"{WA}{r['hash']}.jpg"]):
@@ -101,6 +113,47 @@ def test_tiers_protect_first_and_need_a_corroboration(rig) -> None:
     assert counts["suggested"] >= 36 and counts["protected"] >= 5
 
 
+def test_files_whose_protection_is_unknown_are_not_listed(rig) -> None:
+    rng = np.random.default_rng(5)
+    seed(rig.ctx.db, [
+        *taught(),
+        {"hash": "n_ocr", "emb": near(A, rng), "ocr": 0},  # its words are not read yet
+        {"hash": "n_vid", "emb": near(A, rng), "kind": "video", "duration": None,
+         "paths": [f"{WA}n_vid-{n}.mp4" for n in range(3)]},
+        {"hash": "n_emb", "emb": None, "text": "good morning",
+         "paths": [f"{WA}n_emb-{n}.jpg" for n in range(3)]},
+        {"hash": "n_shot", "emb": near(A, rng), "text": "good morning", "origin": "screenshot"},
+    ])  # fmt: skip
+    rebuild_junk(rig.ctx.db, 1, rig.ctx.config, CLIP.version)
+    got = tiers(rig.ctx.db)
+    assert not {"n_ocr", "n_vid", "n_emb", "n_shot"} & set(got)
+
+
+def test_the_tabs_follow_settings_and_drop_stale_ticks(rig) -> None:
+    db, cfg = rig.ctx.db, rig.ctx.config
+    seed(db, taught() + unlabelled())
+    rebuild_junk(db, 1, cfg, CLIP.version)
+    assert not ensure_fresh(db, 1, cfg, CLIP.version)  # nothing changed
+    with db.read() as conn:
+        pid = conn.execute("SELECT id FROM phone_file WHERE content_hash = 'u_greet'").fetchone()[0]
+    set_selection(db, [pid], True)
+    cfg.scoring.protected_folders = [WA]  # the owner protects the WhatsApp folder
+    assert ensure_fresh(db, 1, cfg, CLIP.version)
+    assert "u_greet" not in tiers(db)
+    with db.read() as conn:  # its tick went with it
+        assert conn.execute("SELECT count(*) FROM selection").fetchone()[0] == 0
+
+
+def test_training_uses_labels_of_files_no_longer_on_the_phone(rig) -> None:
+    db, cfg = rig.ctx.db, rig.ctx.config
+    seed(db, taught() + unlabelled())
+    with db.tx() as conn:  # the labelled files were deleted from the phone
+        conn.execute("UPDATE phone_file SET present = 0 WHERE content_hash LIKE 'j%' "
+                     "OR content_hash LIKE 'k%'")  # fmt: skip
+    rebuild_junk(db, 1, cfg, CLIP.version)
+    assert tiers(db).get("u_greet") == "junk"
+
+
 def test_recordings_never_junk(rig) -> None:
     seed(rig.ctx.db, taught() + unlabelled())
     rebuild_junk(rig.ctx.db, 1, rig.ctx.config, CLIP.version)
@@ -116,6 +169,7 @@ def test_cold_start_lists_lexicon_hits_with_copies_under_maybe_only(rig) -> None
         {"hash": "c1", "emb": near(A, rng), "text": "good night"},
     ]  # fmt: skip
     seed(rig.ctx.db, rows)
+    rebuild_exact(rig.ctx.db, 1)  # c3's paths are exact duplicates too; junk still lists them
     rebuild_junk(rig.ctx.db, 1, rig.ctx.config, CLIP.version)
     got = tiers(rig.ctx.db)
     assert got["c3"] == "maybe" and "c1" not in got
@@ -133,9 +187,9 @@ def test_calibration_passes_then_a_wrong_item_raises_the_threshold(rig) -> None:
     assert size == 6  # u_greet and g0-g4: model suggestions, not the owner's junk labels
     result = None
     for h, _pid, _s, _v in calibration.items(db):
-        result = calibration.mark(db, cfg, h, True)
+        result = calibration.mark(db, cfg, h, True, CLIP.version)
     assert result is not None and result.passed and result.errors == 0
-    assert state(db, cfg)["precheck_allowed"]
+    assert state(db, cfg, CLIP.version)["precheck_allowed"]
     rebuild_junk(db, 1, cfg, CLIP.version)
     with db.read() as conn:
         assert (
@@ -149,11 +203,11 @@ def test_calibration_passes_then_a_wrong_item_raises_the_threshold(rig) -> None:
     calibration.start(db, 1, cfg, CLIP.version, rng=random.Random(2))
     sample = calibration.items(db)
     for n, (h, _pid, _s, _v) in enumerate(sample):
-        result = calibration.mark(db, cfg, h, n != 0)  # the first one is wrong
+        result = calibration.mark(db, cfg, h, n != 0, CLIP.version)  # the first one is wrong
     assert result is not None and not result.passed and result.errors == 1
-    st_ = state(db, cfg)
+    st_ = state(db, cfg, CLIP.version)
     assert not st_["precheck_allowed"]
-    assert st_["t_suggest"] == min(sample[0][2] + 0.01, 1.0)
+    assert st_["t_suggest"] == sample[0][2] + 0.01  # not capped at 1
     with db.read() as conn:
         assert conn.execute(
             "SELECT label, source FROM label WHERE content_hash = ?", (sample[0][0],)
@@ -189,6 +243,8 @@ PROTECT_FLAGS = st.fixed_dictionaries(
     {
         "exif": st.booleans(),
         "shot": st.booleans(),
+        "shot_origin": st.booleans(),
+        "folder": st.booleans(),
         "camera": st.booleans(),
         "doc": st.booleans(),
         "unreadable": st.booleans(),
@@ -205,6 +261,7 @@ PROTECT_FLAGS = st.fixed_dictionaries(
 def test_p5_no_protected_file_is_ever_a_candidate(flags: list[dict[str, Any]], salt: int) -> None:
     rng = np.random.default_rng(salt)
     cfg = Config()
+    cfg.scoring.protected_folders = ["/sdcard/Keep"]
     greet, doc = load("greeting"), load("document")
     labelled = [
         Item(f"j{i}", "image", 50_000, 800, 800, None, False, False, False, "good morning", 0.1,
@@ -225,7 +282,10 @@ def test_p5_no_protected_file_is_ever_a_candidate(flags: list[dict[str, Any]], s
             Item(f"p{n}", "video" if f["long_video"] else "image", 40_000, 800, 800,
                  11 * 60_000 if f["long_video"] else None, f["exif"], f["shot"], f["unreadable"],
                  text, 0.1, near(A, rng),
-                 [(500 + n, f"{WA}p{n}.jpg", "camera" if f["camera"] else "whatsapp_received", 1)],
+                 [(500 + n, f"/sdcard/Keep/p{n}.jpg" if f["folder"] else f"{WA}p{n}.jpg",
+                   "camera" if f["camera"] else "whatsapp_received", 1),
+                  *([(900 + n, f"/sdcard/Pictures/Screenshots/p{n}.png", "screenshot", 1)]
+                    if f["shot_origin"] else [])],
                  f["copies"], f["label"])
         )  # fmt: skip
     items = labelled + probes
@@ -235,6 +295,7 @@ def test_p5_no_protected_file_is_ever_a_candidate(flags: list[dict[str, Any]], s
     for f, v in zip(flags, found[len(labelled) :], strict=True):
         is_protected = (
             f["exif"] or f["shot"] or f["camera"] or f["doc"] or f["unreadable"]
+            or f["shot_origin"] or f["folder"]
             or f["label"] == "protected" or f["long_video"]
         )  # fmt: skip
         if is_protected:

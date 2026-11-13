@@ -10,7 +10,7 @@ from sift.analysis.models import CLIP
 from sift.backup.phonepaths import shown
 from sift.cleanup import calibration
 from sift.cleanup.candidates import is_checked
-from sift.cleanup.junk import ensure_fresh, state
+from sift.cleanup.junk import ensure_fresh, label_counts, state
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.server.routes.cleanup import GroupOut, Item, _device
@@ -105,10 +105,11 @@ class JunkStatus(BaseModel):
 @router.get("/cleanup/junk/status")
 def junk_status(ctx: Ctx) -> JunkStatus:
     device_id = _device(ctx)
-    fresh(ctx, device_id)
-    st = state(ctx.db, ctx.config)
+    version = embed_version(ctx)
+    ensure_fresh(ctx.db, device_id, ctx.config, version, ctx.paths.lexicons)
+    st = state(ctx.db, ctx.config, version)
+    counts = label_counts(ctx.db, version)  # the labels the model can learn from
     with ctx.db.read() as conn:
-        counts = dict(conn.execute("SELECT label, count(*) FROM label GROUP BY label").fetchall())
         tabs = dict(
             conn.execute(
                 "SELECT c.tab, count(DISTINCT p.content_hash) FROM candidate c JOIN phone_file p "
@@ -209,7 +210,9 @@ class MarkOut(BaseModel):
 @router.post("/cleanup/calibration/mark")
 def mark_calibration(ctx: Ctx, body: MarkRequest) -> MarkOut:
     try:
-        result = calibration.mark(ctx.db, ctx.config, body.content_hash, body.correct)
+        result = calibration.mark(
+            ctx.db, ctx.config, body.content_hash, body.correct, embed_version(ctx)
+        )
     except KeyError as e:
         raise ApiError(404, "not_in_sample", "This picture is not in the current sample.") from e
     if result is None:
