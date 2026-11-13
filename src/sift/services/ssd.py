@@ -183,3 +183,12 @@ class SsdWatcher:
         if self._thread is not None:
             self._thread.join(5.0)
         self.wait_for_work(30.0)  # replication stops between files once `stopping` is set
+
+
+def eject(mount: str, runner: Runner = subprocess_runner) -> None:
+    """`diskutil eject <mount>`; raises OSError with plain words when macOS refuses."""
+    done = runner(["/usr/sbin/diskutil", "eject", mount], 60.0)
+    if done.returncode != 0:
+        raise OSError(
+            "macOS could not eject the SSD. Close any window or app using it and try again."
+        )

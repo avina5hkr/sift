@@ -8,6 +8,7 @@ and nothing here raises.
 import logging
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from sift.backup.summary import latest_summary
@@ -16,6 +17,7 @@ from sift.core.dbbackup import daily_copy
 from sift.core.jobs import JobSnapshot, JobState
 from sift.services.notify import Notifier, announce
 
+SSD_KEEP = 5  # database copies kept on the SSD
 log = logging.getLogger(__name__)
 
 
@@ -62,6 +64,12 @@ def after_run(
         daily_copy(ctx.db, ctx.paths.db_backups, today())
     except Exception:
         log.exception("Could not make the daily copy of the database")
+    ssd = ctx.ssd.state() if ctx.ssd is not None else None
+    if ssd is not None and ssd.connected and ssd.root:
+        try:  # a copy beside the backups, so the SSD alone can rebuild everything
+            daily_copy(ctx.db, Path(ssd.root) / ".sift", today(), keep=SSD_KEEP)
+        except Exception:
+            log.exception("Could not copy the database to the SSD")
     if closing():
         return
     try:

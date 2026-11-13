@@ -109,3 +109,52 @@ def test_status_reports_the_ssd(ctx: AppContext, tmp_path: Path) -> None:
     ctx.ssd = w
     body = client_for(ctx).get("/api/status", headers={"X-Sift-Token": "t0k"}).json()
     assert body["ssd"]["configured"] is True and body["ssd"]["connected"] is False
+
+
+def test_eject_runs_diskutil_only_when_nothing_writes_to_the_ssd(
+    ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sift.backup.replicator import REPLICATION_LOCK
+    from sift.server.routes import status as status_route
+    from tests.helpers import client_for
+
+    ctx.config.backup.ssd_volume_uuid = UUID
+    (tmp_path / "Backup SSD").mkdir()
+    mounted = {str(tmp_path / "Backup SSD"), "/Volumes/Backup SSD"}
+    w = watcher(ctx, tmp_path, mounted, Diskutil())
+    w.poll_once()
+    ctx.ssd = w
+    ejected: list[str] = []
+    monkeypatch.setattr(status_route, "eject", lambda mount: ejected.append(mount))
+    client = client_for(ctx)
+    h = {"X-Sift-Token": "t0k"}
+    assert client.get("/api/status", headers=h).json()["ssd"]["safe_to_unplug"] is True
+    with REPLICATION_LOCK:
+        assert client.get("/api/status", headers=h).json()["ssd"]["safe_to_unplug"] is False
+        assert client.post("/api/ssd/eject", headers=h).status_code == 409
+    assert ejected == []
+    assert client.post("/api/ssd/eject", headers=h).status_code == 200
+    assert ejected == ["/Volumes/Backup SSD"]
+
+
+def test_after_a_run_the_database_is_copied_to_the_ssd(ctx: AppContext, tmp_path: Path) -> None:
+    from sift.services import afterrun
+
+    ctx.config.backup.ssd_volume_uuid = UUID
+    root = tmp_path / "ssd-root"
+    root.mkdir()
+
+    class On:
+        def state(self):
+            from sift.services.ssd import SsdState
+
+            return SsdState(True, True, "SSD", str(tmp_path), str(root), None, 1)
+
+    ctx.ssd = On()  # type: ignore[assignment]
+
+    class Snap:
+        dry_run = False
+        id = 1
+
+    afterrun.after_run(ctx, Snap(), notifier=None, closing=lambda: True)  # type: ignore[arg-type]
+    assert list((root / ".sift").glob("state-daily-*.db"))
