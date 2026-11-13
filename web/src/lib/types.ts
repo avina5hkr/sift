@@ -305,9 +305,12 @@ export type ReviewItem = {
 export type ReviewGroup = {
   group_id: number
   content_hash: string
-  keeper: ReviewItem
+  /** Null for the Junk and Lower confidence tabs, which have no keeper. */
+  keeper: ReviewItem | null
   copies: ReviewItem[]
   reclaimable: number
+  score?: number | null
+  reasons?: JunkReason[]
 }
 export type CandidatesPage = {
   tab: string
@@ -315,7 +318,42 @@ export type CandidatesPage = {
   total_groups: number
   next_cursor: number | null
 }
-export type ReviewSort = 'size' | 'date' | 'group'
+export type ReviewSort = 'size' | 'date' | 'group' | 'score'
+export type JunkReason = { code: string; text: string }
+
+// Mirrors GET /api/cleanup/junk/status and the calibration routes.
+export type CalibrationRecord = {
+  created_at: number
+  sample_size: number
+  errors: number
+  threshold: number
+  model_version: number
+  passed: boolean
+}
+export type JunkStatus = {
+  junk_labels: number
+  keep_labels: number
+  protected_labels: number
+  needed_each: number
+  cold_start: boolean
+  model_version: number
+  t_suggest: number
+  precheck_allowed: boolean
+  never_precheck: boolean
+  suggested: number
+  maybe: number
+  last_calibration: CalibrationRecord | null
+  calibration_open: number
+}
+export type CalibrationItem = { content_hash: string; id: number; path: string; score: number; verdict: boolean | null }
+export type CalibrationState = { items: CalibrationItem[]; marked: number; total: number; last: CalibrationRecord | null }
+export type CalibrationMark = {
+  finished: boolean
+  passed?: boolean | null
+  errors?: number | null
+  sample_size?: number | null
+  threshold?: number | null
+}
 
 // Mirrors GET /api/cleanup/models.
 export type ModelStatus = { key: string; installed: boolean; size_bytes: number }

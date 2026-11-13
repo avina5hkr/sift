@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sift.analysis.cluster import run_clusters
 from sift.analysis.embed import run_embed
 from sift.analysis.index import run_index
+from sift.analysis.models import CLIP
 from sift.analysis.near import find_groups, load_items, store_groups
 from sift.analysis.ocr import run_ocr
 from sift.backup.phonepaths import shown
@@ -20,6 +21,7 @@ from sift.cleanup.candidates import (
     select_all_in_tab,
     set_selection,
 )
+from sift.cleanup.junk import rebuild_junk
 from sift.cleanup.near_tabs import TabItem, selectable_ids, tab_groups
 from sift.core.origin import classify_origin
 from sift.device.tracker import STORED_PHONE_ORDER
@@ -111,6 +113,13 @@ def analyze(ctx: Ctx) -> TaskOut:
                 changed=embedded > 0,
                 should_stop=stop,
             )
+        junk = rebuild_junk(
+            ctx.db,
+            device_id,
+            ctx.config,
+            model.version if model is not None else CLIP.version,
+            ctx.paths.lexicons,
+        )
         with ctx.db.tx() as conn:
             conn.execute(
                 "INSERT INTO setting (key, value) VALUES (?, ?) "
@@ -118,6 +127,8 @@ def analyze(ctx: Ctx) -> TaskOut:
                 (ANALYZED_AT, str(int(time.time()))),
             )
         return {
+            "suggested": junk["suggested"],
+            "maybe": junk["maybe"],
             "indexed": stats.indexed,
             "unreadable": stats.unreadable,
             "exact_groups": groups,
@@ -239,9 +250,11 @@ class Item(BaseModel):
 class GroupOut(BaseModel):
     group_id: int
     content_hash: str
-    keeper: Item
+    keeper: Item | None  # None on the Junk tabs: each content is its own group
     copies: list[Item]
     reclaimable: int
+    score: float | None = None
+    reasons: list[dict[str, str]] = []
 
 
 class CandidatesOut(BaseModel):
@@ -342,14 +355,21 @@ def near_groups_now(ctx: Ctx, device_id: int, tab: str) -> list[GroupOut]:
 
 @router.get("/cleanup/candidates")
 def candidates(ctx: Ctx, tab: str = "exact", sort: str = "size", cursor: int = 0) -> CandidatesOut:
-    if tab not in ("exact", "near", "similar"):
+    if tab not in ("exact", "near", "similar", "junk", "maybe"):
         return CandidatesOut(tab=tab, groups=[], total_groups=0, next_cursor=None)
     device_id = _device(ctx)
-    ordered = (
-        exact_groups_now(ctx, device_id) if tab == "exact" else near_groups_now(ctx, device_id, tab)
-    )
+    if tab in ("junk", "maybe"):
+        from sift.server.routes.junk import junk_groups_now
+
+        ordered = junk_groups_now(ctx, device_id, tab)
+    elif tab == "exact":
+        ordered = exact_groups_now(ctx, device_id)
+    else:
+        ordered = near_groups_now(ctx, device_id, tab)
     if sort == "date":
-        ordered.sort(key=lambda g: -g.keeper.mtime)
+        ordered.sort(key=lambda g: -(g.keeper or g.copies[0]).mtime)
+    elif sort == "score":
+        ordered.sort(key=lambda g: -(g.score or 0))
     elif sort == "group":
         ordered.sort(key=lambda g: -len(g.copies))
     else:
@@ -372,6 +392,9 @@ class SelectionOut(BaseModel):
 @router.post("/selection")
 def selection(ctx: Ctx, body: SelectionRequest) -> SelectionOut:
     device_id = _device(ctx)
+    from sift.server.routes.junk import fresh
+
+    fresh(ctx, device_id)  # a file that became Protected or Keep can no longer be ticked
     if body.all_in_tab in ("near", "similar"):
         ids = selectable_ids(ctx.db, device_id, body.all_in_tab)
         set_selection(ctx.db, ids, body.checked)

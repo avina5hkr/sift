@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sift.analysis.embed import ClipOnnx, EmbeddingModel, search
 from sift.analysis.models import CLIP, discard_bad, download, installed
 from sift.backup.phonepaths import shown
+from sift.cleanup.junk import bump_labels
 from sift.device.tracker import STORED_PHONE_ORDER
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
@@ -232,6 +233,7 @@ class LabelRequest(BaseModel):
     cluster_id: int | None = None
     label: Literal["junk", "keep"]
     tag: Literal["greeting", "quote", "meme", "devotional", "other"] | None = None
+    source: Literal["manual", "feedback"] = "manual"  # feedback: Not junk on the Junk tab
 
 
 class LabelOut(BaseModel):
@@ -270,14 +272,14 @@ def add_labels(ctx: Ctx, body: LabelRequest) -> LabelOut:
             "label = excluded.label, tag = excluded.tag, source = excluded.source, "
             "cluster_id = excluded.cluster_id, created_at = excluded.created_at "
             # a protected file stays protected; a group label never replaces a picture's own
-            "WHERE label.label != 'protected' AND (excluded.source = 'manual' "
-            "OR label.source != 'manual')",
+            "WHERE label.label != 'protected' AND (excluded.source != 'cluster' "
+            "OR label.source = 'cluster')",
             [
                 (
                     h,
                     body.label,
                     body.tag,
-                    "manual" if h in manual else "cluster",
+                    body.source if h in manual else "cluster",
                     body.cluster_id,
                     now,
                 )
@@ -285,4 +287,5 @@ def add_labels(ctx: Ctx, body: LabelRequest) -> LabelOut:
                 if h in manual or h in members
             ],
         )
+        bump_labels(conn)  # the junk model retrains on its next use
     return LabelOut(labelled=len(known))

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { useSearchParams } from 'react-router'
 import { ReasonButton } from '../components/backup/ReasonButton'
 import { GroupRow } from '../components/cleanup/GroupRow'
+import { JunkReview } from '../components/cleanup/JunkReview'
 import { Lightbox } from '../components/cleanup/Lightbox'
+import { ReviewTabs } from '../components/cleanup/ReviewTabs'
 import {
   copyTop,
   columnsFor,
@@ -19,25 +21,21 @@ const SORTS: { value: ReviewSort; label: string }[] = [
   { value: 'date', label: 'Newest first' },
   { value: 'group', label: 'Most copies first' },
 ]
-const COMING_SOON = ['Junk']
-const TABS: { value: ReviewTab; label: string }[] = [
-  { value: 'exact', label: 'Exact duplicates' },
-  { value: 'near', label: 'Near-duplicates' },
-  { value: 'similar', label: 'Similar shots' },
-]
 const FALLBACK_W = 1000
 const FALLBACK_H = 700
 
 export default function ReviewPage() {
   const [params, setParams] = useSearchParams()
   const wanted = params.get('tab')
-  const tab: ReviewTab = wanted === 'near' || wanted === 'similar' ? wanted : 'exact'
+  const tab: ReviewTab = wanted === 'near' || wanted === 'similar' || wanted === 'junk' ? wanted : 'exact'
   const [sort, setSort] = useState<ReviewSort>('size')
+  const onTab = (t: ReviewTab) => setParams(t === 'exact' ? {} : { tab: t })
+  if (tab === 'junk') return <JunkReview tabs={<ReviewTabs tab={tab} onTab={onTab} />} />
   return (
     <Review
       key={`${tab}-${sort}`}
       tab={tab}
-      onTab={(t) => setParams(t === 'exact' ? {} : { tab: t })}
+      onTab={onTab}
       sort={sort}
       onSort={setSort}
     />
@@ -55,7 +53,6 @@ function Review({
   sort: ReviewSort
   onSort: (s: ReviewSort) => void
 }) {
-  const navigate = useNavigate()
   const review = useReview(sort, tab)
   const { groups, flat, copies, isChecked, setChecked, setAll, loadMore } = review
 
@@ -170,15 +167,15 @@ function Review({
     if (key === 'ArrowRight') return flat.items[i + 1]
     const g = groups[at.group] as ReviewGroup
     if (key === 'ArrowDown') {
-      if (at.copy < 0) return g.copies[0] ?? groups[at.group + 1]?.keeper
-      return g.copies[at.copy + cols] ?? groups[at.group + 1]?.keeper
+      if (at.copy < 0) return g.copies[0] ?? groups[at.group + 1]?.keeper ?? undefined
+      return g.copies[at.copy + cols] ?? groups[at.group + 1]?.keeper ?? undefined
     }
     // ArrowUp
     if (at.copy < 0) {
       const p = groups[at.group - 1]
-      return p ? (p.copies[p.copies.length - 1] ?? p.keeper) : undefined
+      return p ? (p.copies[p.copies.length - 1] ?? p.keeper ?? undefined) : undefined
     }
-    return at.copy >= cols ? g.copies[at.copy - cols] : g.keeper
+    return at.copy >= cols ? g.copies[at.copy - cols] : (g.keeper ?? undefined)
   }
   const keyHandler = useRef<(e: KeyboardEvent) => void>(() => undefined)
   const onKeyDown = (e: KeyboardEvent) => {
@@ -234,39 +231,7 @@ function Review({
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-3 border-b border-neutral-200 px-4 py-2 dark:border-neutral-800">
-        <button type="button" onClick={() => navigate('/cleanup')} className="rounded-md px-2 py-1 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800">
-          ‹ Cleanup
-        </button>
-        <div role="tablist" aria-label="What to review" className="flex gap-1">
-          {TABS.map((t) => (
-            <button
-              key={t.value}
-              role="tab"
-              aria-selected={t.value === tab}
-              type="button"
-              onClick={() => onTab(t.value)}
-              className={`rounded-md px-3 py-1.5 text-sm ${
-                t.value === tab ? 'bg-neutral-200 font-medium dark:bg-neutral-800' : 'hover:bg-neutral-100 dark:hover:bg-neutral-800'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-          {COMING_SOON.map((t) => (
-            <button
-              key={t}
-              role="tab"
-              aria-selected="false"
-              aria-disabled="true"
-              type="button"
-              title="Coming soon"
-              className="cursor-not-allowed rounded-md px-3 py-1.5 text-sm text-neutral-500 opacity-60"
-            >
-              {t}
-              <span className="ml-1 text-xs">(Coming soon)</span>
-            </button>
-          ))}
-        </div>
+        <ReviewTabs tab={tab} onTab={onTab} />
         <label className="ml-auto flex items-center gap-2 text-sm">
           Sort by
           <select

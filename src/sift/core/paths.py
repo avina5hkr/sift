@@ -44,6 +44,10 @@ class AppPaths:
         return self.support / "models"
 
     @property
+    def lexicons(self) -> Path:
+        return self.support / "lexicons"
+
+    @property
     def platform_tools(self) -> Path:
         return self.support / "platform-tools"
 

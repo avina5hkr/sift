@@ -10,6 +10,7 @@ import { ApiError, apiFetch } from './lib/api'
 import type { SetupState } from './lib/types'
 import { useStatus } from './lib/useStatus'
 import BackupPage from './pages/BackupPage'
+import CalibrationPage from './pages/CalibrationPage'
 import CleanupPage from './pages/CleanupPage'
 import LogsPage from './pages/LogsPage'
 import ReviewPage from './pages/ReviewPage'
@@ -80,6 +81,7 @@ export default function App() {
             <Route path="/cleanup" element={<CleanupPage />} />
             <Route path="/cleanup/review" element={<ReviewPage />} />
             <Route path="/cleanup/teach" element={<TeachPage />} />
+            <Route path="/cleanup/calibration" element={<CalibrationPage />} />
             <Route path="/cleanup/search" element={<SearchPage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />

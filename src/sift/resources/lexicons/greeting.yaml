@@ -1,0 +1,23 @@
+# Greeting phrases (spec 9). A hit is a supporting signal only; one hit never makes a file
+# Suggested. Add your own phrases (devotional lines, shayari markers) below.
+phrases:
+  - good morning
+  - good night
+  - good evening
+  - gm
+  - gn
+  - have a nice day
+  - happy monday
+  - happy tuesday
+  - happy wednesday
+  - happy thursday
+  - happy friday
+  - happy saturday
+  - happy sunday
+  - happy diwali
+  - happy holi
+  - सुप्रभात
+  - शुभ प्रभात
+  - शुभ रात्रि
+  - शुभ दिन
+regexes: []

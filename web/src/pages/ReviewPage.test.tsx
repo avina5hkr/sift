@@ -187,16 +187,13 @@ test('Select all copies in a group, Select none and Select all in tab', async ()
   expect(selections().at(-1)?.body).toEqual({ all_in_tab: 'exact', checked: true })
 })
 
-test('tabs: Exact duplicates on, Near-duplicates and Similar shots usable, Junk coming soon', async () => {
+test('tabs: Exact duplicates on, Near-duplicates, Similar shots and Junk usable', async () => {
   groups = [group(1)]
   await open()
   expect(screen.getByRole('tab', { name: 'Exact duplicates' })).toHaveAttribute('aria-selected', 'true')
-  for (const name of [/Near-duplicates/, /Similar shots/]) {
+  for (const name of [/Near-duplicates/, /Similar shots/, /Junk/]) {
     expect(screen.getByRole('tab', { name })).not.toHaveAttribute('aria-disabled')
   }
-  const junk = screen.getByRole('tab', { name: /Junk/ })
-  expect(junk).toHaveAttribute('aria-disabled', 'true')
-  expect(junk).toHaveAttribute('title', 'Coming soon')
 })
 
 test('the sort control asks the server for that order', async () => {

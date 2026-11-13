@@ -20,6 +20,7 @@ let summary: CleanupSummary
 let task: TaskEvent | null
 let calls: { method: string; path: string }[]
 let startFails = false
+let junkStatus: unknown = null
 
 const reply = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status }))
 
@@ -33,6 +34,7 @@ beforeEach(() => {
   summary = structuredClone(SUMMARY)
   task = null
   startFails = false
+  junkStatus = null
   calls = []
   vi.stubGlobal(
     'fetch',
@@ -41,6 +43,7 @@ beforeEach(() => {
       calls.push({ method, path: url })
       if (url === '/api/cleanup/summary') return reply(summary)
       if (url === '/api/tasks/current') return reply(task)
+      if (url === '/api/cleanup/junk/status' && junkStatus) return reply(junkStatus)
       if (url === '/api/cleanup/analyze' && startFails) {
         return reply({ code: 'task_running', message: 'Another task is already running.', detail: null }, 409)
       }
@@ -59,6 +62,7 @@ function renderPage() {
         <Routes>
           <Route path="/cleanup" element={<CleanupPage />} />
           <Route path="/cleanup/review" element={<p>The review screen</p>} />
+          <Route path="/cleanup/calibration" element={<p>The calibration screen</p>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -143,4 +147,13 @@ test('after analysis with nothing found, Review is disabled', async () => {
   renderPage()
   expect(await screen.findByText('No exact copies found.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-disabled', 'true')
+})
+
+test('the Junk card shows the suggested count and links to Calibration', async () => {
+  junkStatus = { cold_start: false, suggested: 42, maybe: 3, precheck_allowed: false, needed_each: 100, junk_labels: 100, keep_labels: 100 }
+  renderPage()
+  const card = await screen.findByRole('region', { name: 'Junk' })
+  expect(card).toHaveTextContent('42 files Sift suggests deleting')
+  await userEvent.click(screen.getByRole('button', { name: 'Calibration' }))
+  expect(await screen.findByText('The calibration screen')).toBeInTheDocument()
 })

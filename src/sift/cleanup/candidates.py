@@ -79,7 +79,7 @@ def rebuild_exact(db: Database, device_id: int) -> int:
         conn.executemany(
             "INSERT INTO candidate (phone_file_id, tab, tier, reasons, group_id, role, "
             "default_checked) VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (phone_file_id) DO UPDATE SET tab = excluded.tab, tier = excluded.tier, "
+            "ON CONFLICT (phone_file_id, tab) DO UPDATE SET tier = excluded.tier, "
             "reasons = excluded.reasons, group_id = excluded.group_id, role = excluded.role, "
             "default_checked = excluded.default_checked",
             rows,
