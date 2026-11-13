@@ -51,3 +51,14 @@ CREATE INDEX IF NOT EXISTS ix_content_size ON content (size);
 -- then; a confirmation re-asks the phone only for files changed since (or never checked).
 ALTER TABLE phone_file ADD COLUMN phone_hash_at INTEGER;
 ALTER TABLE phone_file ADD COLUMN phone_hash_mtime INTEGER;
+
+-- Analyse phone (read-only): one row per run, with its per-set groups as JSON.
+CREATE TABLE analysis_run (
+  id INTEGER PRIMARY KEY,
+  device_id INTEGER REFERENCES device(id),
+  sets TEXT NOT NULL,                                     -- JSON list of set names
+  state TEXT NOT NULL CHECK (state IN ('running', 'done', 'stopped', 'failed')),
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  result TEXT,                                            -- JSON: per-set groups, counts, bytes
+  error TEXT);

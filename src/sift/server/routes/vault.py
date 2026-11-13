@@ -11,6 +11,7 @@ from sift.backup.confirm import build_report, confirm, latest
 from sift.backup.problems import open_problems
 from sift.backup.replicator import Dest, load_dest
 from sift.backup.verifier import NothingToRepairFrom, repair, verify_dest
+from sift.cleanup.analyse import load_analysis, run_analysis
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.services.tasks import TaskBusy, TaskControl, TaskRunner, TaskStatus
@@ -225,3 +226,39 @@ def start_confirm(ctx: Ctx, body: ConfirmRequest) -> TaskOut:
         return {"confirmed": done.confirmed, "files": done.files, "report": done.report}
 
     return start_task(ctx, "confirm", work)
+
+
+class AnalyseRequest(BaseModel):
+    sets: list[str]
+
+
+@router.post("/analyse/phone")
+def start_analyse(ctx: Ctx, body: AnalyseRequest) -> TaskOut:
+    """Read-only: how much of each set is already backed up and verified."""
+    known = {s.name for s in ctx.config.backup.sets}
+    unknown = [s for s in body.sets if s not in known]
+    if not body.sets or unknown:
+        raise ApiError(400, "bad_sets", "Choose one or more of your backup sets to analyse.")
+    device_id, session = _phone(ctx)
+
+    def work(control: TaskControl) -> dict[str, Any]:
+        run_id = run_analysis(
+            ctx.db,
+            ctx.config,
+            session.transport,
+            device_id,
+            body.sets,
+            should_stop=lambda: control.should_stop,
+            on_progress=control.progress,
+        )
+        return {"analysis_id": run_id}
+
+    return start_task(ctx, "analyse", work)
+
+
+@router.get("/analyse/phone/{run_id}")
+def get_analysis(ctx: Ctx, run_id: int) -> dict[str, Any]:
+    found = load_analysis(ctx.db, run_id)
+    if found is None:
+        raise ApiError(404, "not_found", "That analysis does not exist.")
+    return found
