@@ -7,8 +7,8 @@ Run `make codemap` after adding or renaming modules.
 
 1. **Plan small.** A milestone plan lists features, interfaces and the invariants each one
    touches. It does not contain code or test bodies. About 1 page per milestone.
-2. **Build natively.** Claude implements features directly in the main session. No subagent per
-   task, no per-task reviewer, no fix-round loops.
+2. **Build natively.** Claude implements features directly in the main session. A subagent only when
+   it clearly saves tokens (parallel independent work, or a large read whose conclusion is enough). No per-task reviewer, no fix-round loops.
 3. **Test per feature, not per step.** Write the feature, then its tests, then run only the
    affected test files (`uv run pytest -q tests/<area>`). Run the full suite, `make lint`,
    `make web-test` and `make e2e` once at the end of the milestone (and before any merge).
