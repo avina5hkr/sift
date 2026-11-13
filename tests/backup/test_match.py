@@ -4,7 +4,7 @@ from sift.backup.adopt import adopt
 from sift.backup.problems import open_problems
 from sift.backup.replicator import Dest
 from sift.backup.run import mac_target
-from tests.backup.test_run import ENABLED_SMALL, Rig, finished, rig, tree  # noqa: F401
+from tests.backup.test_run import Rig, finished, tree
 
 
 def phone_bytes(rig: Rig, path: str) -> bytes:
