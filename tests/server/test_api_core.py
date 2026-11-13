@@ -1,13 +1,13 @@
-from sift.core.migrations import bundled_migrations
-
-LATEST = bundled_migrations()[-1].version
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from sift.core.migrations import bundled_migrations
 from sift.server.app import create_app
 from sift.server.errors import install_error_handlers
 from sift.server.security import SecurityMiddleware
 from tests.helpers import H, make_client
+
+LATEST = bundled_migrations()[-1].version
 
 
 def test_status_requires_token(client):
