@@ -12,6 +12,7 @@ dependencies = [
     "pillow>=13.0.0",
     "pillow-heif>=1.8.1",
     "pydantic>=2.14.3",
+    "pyobjc-framework-avfoundation==13.0 ; sys_platform == 'darwin'",
     "pyobjc-framework-usernotifications==13.0 ; sys_platform == 'darwin'",
     "pywebview>=6.2.1",
     "tomlkit>=0.15.2",
