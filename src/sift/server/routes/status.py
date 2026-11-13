@@ -41,10 +41,20 @@ class DeviceStatusModel(BaseModel):
     reason: NoAdbReason | None = None
 
 
+class SsdStatus(BaseModel):
+    configured: bool
+    connected: bool
+    name: str | None = None
+    mount: str | None = None
+    root: str | None = None
+    free_bytes: int | None = None
+    dest_id: int | None = None
+
+
 class StatusResponse(BaseModel):
     app: AppStatus
     device: DeviceStatusModel | None = None  # None when no tracker runs (SIFT_TRACKER=off)
-    ssd: None = None  # typed model arrives in M3
+    ssd: SsdStatus | None = None  # None when no SSD watcher runs
     mac_folder: FolderStatus
     jobs: list[dict[str, Any]] = []
 
@@ -76,4 +86,5 @@ def get_status(ctx: Ctx) -> StatusResponse:
             config_warnings=ctx.config_warnings,
         ),
         mac_folder=_mac_folder(ctx.config.backup.mac_root),
+        ssd=SsdStatus(**ctx.ssd.state().as_event()) if ctx.ssd else None,
     )

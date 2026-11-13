@@ -48,6 +48,7 @@ from sift.server.app import create_app
 from sift.services.afterrun import after_run
 from sift.services.notify import MacNotifier, Notifier, NullNotifier
 from sift.services.plainwords import describe
+from sift.services.ssd import SsdWatcher
 from sift.window_quit import WindowQuit
 
 _HOST = "127.0.0.1"
@@ -197,6 +198,11 @@ def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
             raise RuntimeError("The Sift server did not start.")
         time.sleep(0.01)
     return handle
+
+
+def ssd_connected(ctx: AppContext) -> None:
+    """The backup SSD was plugged in: bring it up to date (replication arrives with M3)."""
+    _log.info("The backup SSD is connected")
 
 
 def tracker_mode(*, fake_phone: bool, no_window: bool, env: Mapping[str, str]) -> str:
@@ -481,6 +487,11 @@ def main(argv: list[str] | None = None) -> int:
             ctx.tracker = tracker
             shutdown.add("tracker", tracker.stop, timeout_s=_TRACKER_STEP_S)  # before the DB closes
             tracker.start()
+        if mode == "adb":  # the real app; tests and fake-phone runs never look at real drives
+            ssd = SsdWatcher(ctx, on_connect=lambda _state: ssd_connected(ctx))
+            ctx.ssd = ssd
+            shutdown.add("ssd", ssd.stop, timeout_s=_TRACKER_STEP_S)
+            ssd.start()
         slow = start_test_jobs(ctx)
         # Added last, so it runs first: jobs stop before the tracker, server and database.
         shutdown.add("jobs", lambda: _stop_jobs(jobs, slow), timeout_s=_JOBS_STOP_TIMEOUT_S + 5)

@@ -30,6 +30,7 @@ class Volume:
     total_bytes: int | None
     suitable: bool  # exFAT or APFS: holds big files and is readable by a Mac
     warning: str | None  # plain words, set when it is not suitable
+    mount_point: str | None = None
 
 
 def _plist(runner: Runner, *args: str) -> dict[str, Any] | None:
@@ -87,6 +88,7 @@ def _volume(info: dict[str, Any]) -> Volume | None:
         if suitable
         else f"This drive is formatted as {fs_name}. Sift works best with exFAT or APFS: "
         "other formats cannot hold large videos or are slow and unsafe for backups.",
+        mount_point=str(info.get("MountPoint")),
     )
 
 
