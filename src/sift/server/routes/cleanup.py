@@ -93,7 +93,8 @@ def analyze(ctx: Ctx) -> TaskOut:
         stop = lambda: control.should_stop  # noqa: E731
         read = run_ocr(ctx.db, dest_ids=dests, should_stop=stop, on_file=control.progress)
         model = embedding_model(ctx)
-        embedded = clusters = 0
+        embedded = 0
+        clusters: int | None = 0
         if model is not None:
             embedded = run_embed(
                 ctx.db,
@@ -103,7 +104,13 @@ def analyze(ctx: Ctx) -> TaskOut:
                 should_stop=stop,
                 on_file=control.progress,
             )
-            clusters = run_clusters(ctx.db, ctx.config.analysis, model.version)
+            clusters = run_clusters(
+                ctx.db,
+                ctx.config.analysis,
+                model.version,
+                changed=embedded > 0,
+                should_stop=stop,
+            )
         with ctx.db.tx() as conn:
             conn.execute(
                 "INSERT INTO setting (key, value) VALUES (?, ?) "

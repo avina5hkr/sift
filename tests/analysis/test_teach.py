@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sift.analysis.cluster import find_clusters
+from sift.analysis.cluster import Stopped, find_clusters, run_clusters
 from sift.analysis.embed import ClipOnnx, l2
 from sift.analysis.models import (
     CLIP,
@@ -18,6 +18,7 @@ from sift.analysis.models import (
     ModelDownloadError,
     ModelFile,
     ModelSpec,
+    discard_bad,
     download,
     installed,
 )
@@ -81,6 +82,19 @@ def test_clusters_split_join_and_medoid() -> None:
     )
 
 
+def test_clusters_are_capped_and_stop_when_asked() -> None:
+    rng = np.random.default_rng(2)
+    centre = l2(rng.normal(size=(1, 64)))
+    rows = l2(centre + 0.02 * rng.normal(size=(3000, 64))).astype(np.float32)  # one dense theme
+    hashes = [f"h{i}" for i in range(len(rows))]
+    cfg = AnalysisConfig(cluster_max_size=500)
+    clusters = find_clusters(hashes, rows, cfg)
+    assert clusters and max(len(c.members) for c in clusters) <= 500
+    assert sum(len(c.members) for c in clusters) <= 3000
+    with pytest.raises(Stopped):
+        find_clusters(hashes, rows, cfg, lambda: True)
+
+
 def _spec(tmp: Path, data: bytes, *, good: bool = True) -> ModelSpec:
     digest = hashlib.sha256(data if good else b"other").hexdigest()
     return ModelSpec("m", 1, (ModelFile("f.bin", "https://example.invalid/f", digest, len(data)),))
@@ -97,6 +111,14 @@ def test_model_download_needs_consent_and_checks_the_hash(tmp_path: Path) -> Non
     download(tmp_path, consent=True, spec=_spec(tmp_path, data), opener=opener)
     assert installed(tmp_path, _spec(tmp_path, data)) and not installed(tmp_path)
     assert CLIP.size > 100_000_000  # the real model's size is shown before the download
+    (tmp_path / "m" / "f.bin").write_bytes(b"x" * len(data))  # same size, wrong bytes
+    assert installed(tmp_path, _spec(tmp_path, data))
+    assert discard_bad(tmp_path, _spec(tmp_path, data)) == ["f.bin"]
+    assert not installed(tmp_path, _spec(tmp_path, data))
+    download(
+        tmp_path, consent=True, spec=_spec(tmp_path, data), opener=opener, should_stop=lambda: True
+    )
+    assert not list((tmp_path / "m").iterdir())  # Stop ends quietly and leaves no part file
 
 
 def test_teach_the_app_and_search_over_the_api(rig) -> None:
@@ -147,6 +169,23 @@ def test_teach_the_app_and_search_over_the_api(rig) -> None:
         assert (
             client.get("/api/cleanup/clusters", headers=H).json()["clusters"][0]["label"] == "junk"
         )
+        # a picture labelled on its own keeps its label when its group is labelled
+        own = members[-1]["content_hash"]
+        client.post("/api/labels", headers=H, json={"hashes": [own], "label": "keep"})
+        client.post("/api/labels", headers=H, json={"cluster_id": card["id"], "label": "junk"})
+        with rig.ctx.db.read() as conn:
+            assert conn.execute(
+                "SELECT label, source FROM label WHERE content_hash = ?", (own,)
+            ).fetchone() == ("keep", "manual")
+        # a rebuild gives new ids; a press on the old card is refused, not sent to another group
+        assert run_clusters(rig.ctx.db, rig.ctx.config.analysis, 1, changed=False) is None
+        assert run_clusters(rig.ctx.db, rig.ctx.config.analysis, FakeModel.version) >= 1
+        fresh = client.get("/api/cleanup/clusters", headers=H).json()["clusters"]
+        assert card["id"] not in {c["id"] for c in fresh}
+        stale = client.post(
+            "/api/labels", headers=H, json={"cluster_id": card["id"], "label": "keep"}
+        )
+        assert stale.status_code == 409
         hits = client.get("/api/cleanup/search?q=good%20morning", headers=H).json()
         assert hits and hits[0]["path"].startswith(base + "IMG-G")
     finally:

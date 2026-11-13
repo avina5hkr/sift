@@ -121,6 +121,8 @@ def run_ocr(
     for digest, root, rel, _d in rows:
         copies.setdefault(digest, []).append(Path(root).expanduser() / rel)
     lang = "+".join(languages()) if reader is recognize else "test"
+    if not lang:  # Vision could not be asked: try again on the next Analyze
+        return 0
     done = 0
     for n, (digest, paths) in enumerate(copies.items(), 1):
         if should_stop():

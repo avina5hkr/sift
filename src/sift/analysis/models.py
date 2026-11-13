@@ -68,6 +68,10 @@ class ConsentNeeded(Exception):
     """The model is downloaded only after the owner agrees."""
 
 
+class DownloadStopped(Exception):
+    """The owner stopped the download; it ends quietly."""
+
+
 class ModelDownloadError(Exception):
     """A model file could not be downloaded, or it was not the file expected."""
 
@@ -82,6 +86,25 @@ def installed(models_dir: Path, spec: ModelSpec = CLIP) -> bool:
     return all(
         (base / f.name).is_file() and (base / f.name).stat().st_size == f.size for f in spec.files
     )
+
+
+def discard_bad(models_dir: Path, spec: ModelSpec = CLIP) -> list[str]:
+    """Remove model files whose SHA-256 is not the pinned one (they are Sift's own files in
+    Application Support, never a backup); returns their names so the owner can download again."""
+    base = folder(models_dir, spec)
+    bad = []
+    for f in spec.files:
+        path = base / f.name
+        if not path.is_file():
+            continue
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            while chunk := fh.read(CHUNK):
+                digest.update(chunk)
+        if digest.hexdigest() != f.sha256:
+            path.unlink()
+            bad.append(f.name)
+    return bad
 
 
 Opener = Callable[[str], object]
@@ -103,7 +126,11 @@ def download(
         )
     base = folder(models_dir, spec)
     base.mkdir(parents=True, exist_ok=True)
-    done = sum(f.size for f in spec.files if (base / f.name).is_file())
+    done = sum(
+        f.size
+        for f in spec.files
+        if (base / f.name).is_file() and (base / f.name).stat().st_size == f.size
+    )
     for f in spec.files:
         final = base / f.name
         if final.is_file() and final.stat().st_size == f.size:
@@ -112,14 +139,21 @@ def download(
         digest = hashlib.sha256()
         try:
             with opener(f.url) as resp, open(part, "wb") as out:  # type: ignore[attr-defined]
+                got = 0
                 while chunk := resp.read(CHUNK):
                     if should_stop():
-                        raise ModelDownloadError("The download was stopped.")
+                        raise DownloadStopped
+                    got += len(chunk)
+                    if got > f.size:
+                        raise ModelDownloadError(f"{f.name} is larger than expected.")
                     out.write(chunk)
                     digest.update(chunk)
                     done += len(chunk)
                     if on_bytes is not None:
                         on_bytes(done, spec.size)
+        except DownloadStopped:
+            part.unlink(missing_ok=True)
+            return
         except ModelDownloadError:
             part.unlink(missing_ok=True)
             raise

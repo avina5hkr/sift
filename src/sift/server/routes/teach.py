@@ -1,6 +1,7 @@
 """The embedding model (status and consented download), Teach the app clusters, text search,
 and labels."""
 
+import logging
 import threading
 import time
 from typing import Any, Literal
@@ -9,7 +10,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from sift.analysis.embed import ClipOnnx, EmbeddingModel, search
-from sift.analysis.models import CLIP, download, installed
+from sift.analysis.models import CLIP, discard_bad, download, installed
 from sift.backup.phonepaths import shown
 from sift.device.tracker import STORED_PHONE_ORDER
 from sift.server.deps import Ctx
@@ -17,10 +18,12 @@ from sift.server.errors import ApiError
 from sift.server.routes.vault import TaskOut, start_task
 from sift.services.tasks import TaskControl
 
+log = logging.getLogger("sift.analysis")
 router = APIRouter()
 
 _models: dict[str, EmbeddingModel] = {}
 _models_lock = threading.Lock()
+_broken: set[str] = set()  # models folders whose intact files would not load
 
 
 def embedding_model(ctx: Ctx) -> EmbeddingModel | None:
@@ -28,15 +31,23 @@ def embedding_model(ctx: Ctx) -> EmbeddingModel | None:
     key = str(ctx.paths.models)
     with _models_lock:
         if key not in _models:
-            if not installed(ctx.paths.models):
+            if key in _broken or not installed(ctx.paths.models):
                 return None
-            _models[key] = ClipOnnx(ctx.paths.models)
+            try:
+                _models[key] = ClipOnnx(ctx.paths.models)
+            except Exception as e:
+                bad = discard_bad(ctx.paths.models)
+                log.warning("The model could not be loaded (%s); damaged files: %s", e, bad)
+                if not bad:
+                    _broken.add(key)  # the files are right but will not load: say so once
+                return None
         return _models[key]
 
 
 def set_model(ctx: Ctx, model: EmbeddingModel | None) -> None:
     """For tests and after a download: use `model` (None forgets the loaded one)."""
     with _models_lock:
+        _broken.discard(str(ctx.paths.models))
         if model is None:
             _models.pop(str(ctx.paths.models), None)
         else:
@@ -51,7 +62,8 @@ class ModelOut(BaseModel):
 
 @router.get("/cleanup/models")
 def model_status(ctx: Ctx) -> ModelOut:
-    return ModelOut(key=CLIP.key, installed=installed(ctx.paths.models), size_bytes=CLIP.size)
+    ok = installed(ctx.paths.models) and str(ctx.paths.models) not in _broken
+    return ModelOut(key=CLIP.key, installed=ok, size_bytes=CLIP.size)
 
 
 class DownloadRequest(BaseModel):
@@ -229,17 +241,20 @@ class LabelOut(BaseModel):
 @router.post("/labels")
 def add_labels(ctx: Ctx, body: LabelRequest) -> LabelOut:
     hashes = list(dict.fromkeys(body.hashes))
-    source = "manual"
+    members: list[str] = []
     if body.cluster_id is not None:
         with ctx.db.read() as conn:
-            hashes += [
+            members = [
                 str(r[0])
                 for r in conn.execute(
                     "SELECT content_hash FROM cluster_member WHERE cluster_id = ?",
                     (body.cluster_id,),
                 )
             ]
-        source = "cluster"
+        if not members:
+            raise ApiError(409, "cluster_gone", "This group changed; reload Teach the app.")
+    manual = set(hashes)
+    hashes += [h for h in members if h not in manual]
     known: set[str] = set()
     with ctx.db.read() as conn:
         for start in range(0, len(hashes), 500):
@@ -254,7 +269,20 @@ def add_labels(ctx: Ctx, body: LabelRequest) -> LabelOut:
             "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (content_hash) DO UPDATE SET "
             "label = excluded.label, tag = excluded.tag, source = excluded.source, "
             "cluster_id = excluded.cluster_id, created_at = excluded.created_at "
-            "WHERE label.label != 'protected'",  # a protected file stays protected
-            [(h, body.label, body.tag, source, body.cluster_id, now) for h in known],
+            # a protected file stays protected; a group label never replaces a picture's own
+            "WHERE label.label != 'protected' AND (excluded.source = 'manual' "
+            "OR label.source != 'manual')",
+            [
+                (
+                    h,
+                    body.label,
+                    body.tag,
+                    "manual" if h in manual else "cluster",
+                    body.cluster_id,
+                    now,
+                )
+                for h in known
+                if h in manual or h in members
+            ],
         )
     return LabelOut(labelled=len(known))

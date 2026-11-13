@@ -8,7 +8,7 @@ default, CLIP ViT-B/32 from the downloaded ONNX towers (int8). Vectors are store
 import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -67,12 +67,18 @@ class ClipOnnx:
         base = folder(models_dir, spec)
         wanted = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
         providers = [p for p in wanted if p in ort.get_available_providers()]
-        self._vision = ort.InferenceSession(
-            str(base / "vision_model_quantized.onnx"), providers=providers
-        )
-        self._text = ort.InferenceSession(
-            str(base / "text_model_quantized.onnx"), providers=providers
-        )
+
+        def session(name: str) -> object:
+            try:
+                return ort.InferenceSession(str(base / name), providers=providers)
+            except Exception as e:  # e.g. CoreML cannot compile the graph: use the CPU
+                if providers == ["CPUExecutionProvider"]:
+                    raise
+                log.info("CoreML could not load %s (%s); using the CPU", name, e)
+                return ort.InferenceSession(str(base / name), providers=["CPUExecutionProvider"])
+
+        self._vision: Any = session("vision_model_quantized.onnx")
+        self._text: Any = session("text_model_quantized.onnx")
         self._tok = Tokenizer.from_file(str(base / "tokenizer.json"))
         self.version = spec.version
 
@@ -84,7 +90,9 @@ class ClipOnnx:
     def encode_text(self, texts: Sequence[str]) -> np.ndarray:
         rows = []
         for text in texts:  # one at a time: no padding, so the end token is the pooled one
-            ids = self._tok.encode(text).ids[:_CONTEXT]
+            ids = self._tok.encode(text).ids
+            if len(ids) > _CONTEXT:  # the tower pools at the end token: keep it last
+                ids = [*ids[: _CONTEXT - 1], ids[-1]]
             (out,) = self._text.run(["text_embeds"], {"input_ids": np.array([ids], dtype=np.int64)})
             rows.append(np.asarray(out, dtype=np.float32)[0])
         return l2(np.stack(rows))
@@ -103,7 +111,10 @@ def _load(path: Path, size: int = 448) -> Image.Image:
         if raw.format == "JPEG":
             raw.draft("RGB", (size, size))
         img = ImageOps.exif_transpose(raw)
-        img.thumbnail((size, size))
+        w, h = img.size
+        scale = size / min(w, h)
+        if scale < 1:  # the short side to `size`; CLIP then crops the centre square
+            img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))))
         return img.convert("RGB")
 
 
@@ -144,7 +155,7 @@ def run_embed(
     for start in range(0, len(items), BATCH):
         if should_stop():
             break
-        hashes, images = [], []
+        hashes, images, failed = [], [], []
         for digest, (kind, paths) in items[start : start + BATCH]:
             source = (
                 thumb_path(cache, digest)
@@ -158,14 +169,25 @@ def run_embed(
                 hashes.append(digest)
             except Exception as e:
                 log.info("Could not embed %s: %s", digest[:12], e)
+                failed.append(digest)
+        found: list[tuple[str, np.ndarray]] = []
         if images:
-            vectors = model.encode_image(images)
-            with db.tx() as conn:
-                conn.executemany(
-                    "UPDATE content SET embedding = ?, embed_version = ? WHERE hash = ?",
-                    [(to_blob(v), model.version, h) for h, v in zip(hashes, vectors, strict=True)],
-                )
-            done += len(hashes)
+            try:
+                found = list(zip(hashes, model.encode_image(images), strict=True))
+            except Exception:
+                for h, img in zip(hashes, images, strict=True):
+                    try:
+                        found.append((h, model.encode_image([img])[0]))
+                    except Exception as e:
+                        log.info("Could not embed %s: %s", h[:12], e)
+                        failed.append(h)
+        with db.tx() as conn:
+            conn.executemany(
+                "UPDATE content SET embedding = ?, embed_version = ? WHERE hash = ?",
+                [(to_blob(v), model.version, h) for h, v in found]
+                + [(None, model.version, h) for h in failed],
+            )
+        done += len(found)
         if on_file is not None:
             on_file(min(start + BATCH, len(items)), len(items))
     return done
