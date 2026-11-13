@@ -236,3 +236,17 @@ Carry-over:
   - Poll `ioreg` every 2 to 3 s instead of every second.
 - **M10:** leave the adb binary bundled in adbutils out of the app.
 - **M12 (accessibility):** a keyboard-reachable USB 2 tooltip; consider making the phone chip a live region.
+
+## 9. Working method from M3 (2026-11-13)
+
+M0 to M2 used a subagent per task, a reviewer per task and fix loops. That cost far more than it
+bought, so from M3 on every milestone follows `CLAUDE.md`:
+
+- One short plan per milestone: features, interfaces, invariants, an Assumptions list. No code in plans.
+- Built in the main session. Tests are written after each feature and only that area's tests run;
+  the full suite, lint, web tests and e2e run once at the end.
+- Assumptions are recorded, not asked. The owner is asked only for irreversible steps, pushes,
+  merges and the end-of-milestone phone session.
+- One whole-branch review per milestone (most capable model), one fix pass. Delete and phone-write
+  code (M8, M11, M12) also gets one focused review when it is written.
+- `docs/CODEMAP.md` (from `make codemap`) replaces exploratory file reading.
