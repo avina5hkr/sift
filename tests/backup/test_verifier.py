@@ -58,8 +58,18 @@ def test_repair_puts_a_good_copy_beside_the_damaged_one(ctx: AppContext, tmp_pat
 
 
 def test_verify_and_problems_over_the_api(ctx: AppContext, tmp_path: Path) -> None:
-    _mac, ssd = setup_pair(ctx, tmp_path)
+    mac, ssd = setup_pair(ctx, tmp_path)
     (ssd.root / "Phone/a.jpg").write_bytes(b"AAAA")
+    ctx.config.backup.mac_root = str(mac.root)
+    ctx.config.backup.ssd_volume_uuid = "uuid-ssd"
+
+    class Plugged:  # the SSD watcher, with this SSD plugged in
+        def state(self):
+            from sift.services.ssd import SsdState
+
+            return SsdState(True, True, "SSD", str(ssd.root.parent), str(ssd.root), None, ssd.id)
+
+    ctx.ssd = Plugged()  # type: ignore[assignment]
     ctx.tasks = TaskRunner(ctx, describe)
     client = client_for(ctx)
     assert client.post("/api/backup/verify", headers=H).status_code == 200
@@ -75,3 +85,20 @@ def test_verify_and_problems_over_the_api(ctx: AppContext, tmp_path: Path) -> No
     assert client.get("/api/backup/problems", headers=H).json() == []
     assert client.post("/api/backup/problems/999/repair", headers=H).status_code == 404
     assert client.post("/api/backup/verify").status_code == 401  # needs the token
+
+
+def test_unplugging_during_verify_drops_nothing(ctx: AppContext, tmp_path: Path) -> None:
+    import shutil
+
+    _mac, ssd = setup_pair(ctx, tmp_path)
+    for i in range(4):
+        put(ctx, ssd, f"Phone/x{i}.jpg", bytes([i]) * 9)
+    before = replicas(ctx, ssd)
+
+    def unplug(done: int, _total: int) -> None:
+        if done == 2 and ssd.root.exists():
+            shutil.move(ssd.root, tmp_path / "away")
+
+    stats = verify_dest(ctx.db, ssd, on_file=unplug)
+    assert stats.skipped and stats.missing == 0
+    assert replicas(ctx, ssd) == before and open_problems(ctx.db) == []

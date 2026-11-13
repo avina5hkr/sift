@@ -1,6 +1,7 @@
 """Backup confirmation on the fake phone: checks 1 to 3, the Markdown report, going stale."""
 
 from sift.backup.confirm import build_report, confirm, latest, required_kinds
+from sift.backup.replicator import Dest
 from sift.backup.run import mac_target
 from sift.core.clock import ManualClock
 from tests.backup.test_run import Rig, finished
@@ -27,7 +28,17 @@ def test_required_destinations_follow_whether_an_ssd_was_chosen(rig: Rig) -> Non
 def test_a_fully_backed_up_set_is_confirmed_with_a_report(rig: Rig) -> None:
     backed_up(rig, ["Camera"])
     clock = ManualClock(1_800_000_000)
-    done = confirm(rig.ctx.db, rig.ctx.config, device_id(rig), "Camera", rig.transport, clock=clock)
+    target = mac_target(rig.ctx.db, rig.ctx.config)
+    mac = Dest(target.dest_id, "mac", target.root)
+    done = confirm(
+        rig.ctx.db,
+        rig.ctx.config,
+        device_id(rig),
+        "Camera",
+        rig.transport,
+        dests=[mac],
+        clock=clock,
+    )
     assert done.confirmed and done.files > 0
     reports = list((mac_target(rig.ctx.db, rig.ctx.config).root / ".sift/reports").glob("*.md"))
     assert len(reports) == 1 and "**Confirmed.**" in reports[0].read_text()
@@ -78,3 +89,20 @@ def test_confirmation_goes_stale(rig: Rig) -> None:
             (dev,),
         )
     assert "changed" in latest(rig.ctx.db, rig.ctx.config, dev, "Camera", clock=clock).stale_reason
+
+
+def test_copies_on_a_retired_ssd_do_not_count(rig: Rig, tmp_path) -> None:
+    from tests.backup.test_run import FakeSsd
+
+    old = FakeSsd(rig, tmp_path / "old-ssd" / "backup")
+    rig.ctx.ssd = old  # type: ignore[assignment]
+    backed_up(rig, ["Camera"])  # copies land on the old SSD too
+    report = build_report(
+        rig.ctx.db, rig.ctx.config, device_id(rig), "Camera", transport=rig.transport
+    )
+    assert report.confirmed
+    rig.ctx.config.backup.ssd_volume_uuid = "a-new-ssd"  # the owner replaced the SSD
+    report = build_report(
+        rig.ctx.db, rig.ctx.config, device_id(rig), "Camera", transport=rig.transport
+    )
+    assert not report.confirmed and report.missing["ssd"] == report.on_phone

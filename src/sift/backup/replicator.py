@@ -10,11 +10,12 @@ file already at the target path is reused if its bytes match, otherwise the copy
 are copied again.
 """
 
+import contextlib
 import fcntl
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,26 @@ NOT_A_FILE = "-"
 
 # One replication at a time, whoever starts it (a backup run or plugging the SSD in).
 REPLICATION_LOCK = threading.Lock()
+
+_writes_lock = threading.Lock()
+_writes = 0
+
+
+@contextlib.contextmanager
+def ssd_writing() -> Iterator[None]:
+    """Mark a write to a backup drive in progress, so "Safe to unplug" and Eject wait for it."""
+    global _writes
+    with _writes_lock:
+        _writes += 1
+    try:
+        yield
+    finally:
+        with _writes_lock:
+            _writes -= 1
+
+
+def writes_in_progress() -> bool:
+    return _writes > 0 or REPLICATION_LOCK.locked()
 
 
 class SourceCorrupt(Exception):
@@ -95,6 +116,8 @@ def self_heal(db: Database, dest: Dest) -> int:
         except OSError:
             pass
         gone.append(str(content_hash))
+    if gone and not dest.root.is_dir():
+        return 0  # the drive went away during the check: nothing was lost, it is unplugged
     if gone:
         with db.tx() as conn:
             conn.executemany(
@@ -226,6 +249,8 @@ class Replicator:
                     )
                 continue
             except FileNotFoundError:
+                if not src.root.is_dir() or not dst.root.is_dir():
+                    break  # a drive was unplugged: its files are not lost, stop here
                 stats.healed += 1
                 with self._db.tx() as conn:
                     conn.execute(
@@ -234,6 +259,8 @@ class Replicator:
                     )
                 continue
             except (OSError, IncompleteCopy, ChecksumMismatch, TargetExists) as e:
+                if not src.root.is_dir() or not dst.root.is_dir():
+                    break  # a drive was unplugged mid-copy; the next run carries on
                 stats.failed += 1
                 stats.errors.append(f"{rel_path}: {e}")
                 log.warning("Could not copy %r to %s: %s", rel_path, dst.kind, e)

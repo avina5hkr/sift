@@ -163,3 +163,27 @@ def test_mtime_is_kept(ctx: AppContext, two: tuple[Dest, Dest]) -> None:
     os.utime(mac.root / "Phone/old.jpg", (1_600_000_000, 1_600_000_000))
     Replicator(ctx.db).replicate(mac, ssd)
     assert int((ssd.root / "Phone/old.jpg").stat().st_mtime) == 1_600_000_000
+
+
+def test_unplugging_the_source_drive_mid_copy_loses_no_rows(
+    ctx: AppContext, two: tuple[Dest, Dest], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    mac, ssd = two
+    for i in range(5):
+        put(ctx, ssd, f"Phone/{i}.jpg", bytes([i]) * 50)
+    hidden = ssd.root.parent / "unplugged"
+    real = Replicator.copy_one
+    count = {"n": 0}
+
+    def unplug_after_two(self: Replicator, *args: object, **kwargs: object) -> tuple[str, bool]:
+        count["n"] += 1
+        if count["n"] == 3:
+            shutil.move(ssd.root, hidden)  # the drive goes away
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Replicator, "copy_one", unplug_after_two)
+    stats = Replicator(ctx.db).replicate(ssd, mac)
+    assert stats.copied == 2 and stats.healed == 0
+    assert len(replicas(ctx, ssd)) == 5  # an unplugged drive's files are not "lost"

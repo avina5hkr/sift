@@ -121,6 +121,20 @@ def ssd_dest(ctx: AppContext) -> Dest | None:
     return load_dest(ctx.db, state.dest_id)
 
 
+def usable_dests(ctx: AppContext) -> list[Dest]:
+    """The destinations to work on now: the Mac folder of `backup.mac_root` when it exists, and
+    the configured SSD only when it is plugged in (found by its volume UUID, never by path)."""
+    found: list[Dest] = []
+    if ctx.config.backup.mac_root:
+        target = mac_target(ctx.db, ctx.config)
+        if target.root.is_dir():
+            found.append(Dest(target.dest_id, "mac", target.root))
+    ssd = ssd_dest(ctx)
+    if ssd is not None and ssd.root.is_dir():
+        found.append(ssd)
+    return found
+
+
 def ssd_pending(ctx: AppContext, mac: Dest) -> int:
     """Files on the Mac with no copy on the configured SSD (all of them if it was never seen)."""
     uuid = ctx.config.backup.ssd_volume_uuid

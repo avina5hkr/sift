@@ -157,4 +157,4 @@ def test_after_a_run_the_database_is_copied_to_the_ssd(ctx: AppContext, tmp_path
         id = 1
 
     afterrun.after_run(ctx, Snap(), notifier=None, closing=lambda: True)  # type: ignore[arg-type]
-    assert list((root / ".sift").glob("state-daily-*.db"))
+    assert list((root / ".sift").glob("state-run-*.db"))

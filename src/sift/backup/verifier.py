@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from sift.backup.problems import add_problem
-from sift.backup.replicator import Dest, Replicator, SourceCorrupt, load_dest
+from sift.backup.replicator import Dest, Replicator, SourceCorrupt, load_dest, ssd_writing
 from sift.backup.staging import regular_file_sha256
 from sift.core.clock import Clock, SystemClock
 from sift.core.db import Database
@@ -72,6 +72,9 @@ def verify_dest(
                     "UPDATE replica SET verified_at = ? WHERE dest_id = ? AND content_hash = ?",
                     (clock.now(), dest.id, digest),
                 )
+        elif found is None and not dest.root.is_dir():
+            stats.skipped = True  # the drive was unplugged during Verify: nothing is lost
+            break
         else:
             kind = "missing_file" if found is None else "hash_mismatch"
             if found is None:
@@ -104,7 +107,9 @@ def verify_dest(
     return stats
 
 
-def repair(db: Database, problem_id: int, *, clock: Clock | None = None) -> str:
+def repair(
+    db: Database, problem_id: int, *, usable: set[int] | None = None, clock: Clock | None = None
+) -> str:
     """Copy a good copy into the damaged destination; returns the repaired copy's rel_path."""
     clock = clock or SystemClock()
     with db.read() as conn:
@@ -120,7 +125,12 @@ def repair(db: Database, problem_id: int, *, clock: Clock | None = None) -> str:
             "SELECT dest_id, rel_path, size FROM replica WHERE content_hash = ? AND dest_id != ?",
             (digest, dest_id),
         ).fetchall()
-    target = load_dest(db, int(dest_id)) if dest_id is not None else None
+
+    def allowed(dest_id: int) -> bool:  # the drive plugged in now, not one with the same name
+        return usable is None or dest_id in usable
+
+    target = load_dest(db, int(dest_id)) if dest_id is not None and allowed(int(dest_id)) else None
+    good = [g for g in good if allowed(int(g[0]))]
     if target is None or not good:
         raise NothingToRepairFrom("No good copy of this file is on another backup drive.")
     replicator = Replicator(db, clock=clock)
@@ -129,9 +139,10 @@ def repair(db: Database, problem_id: int, *, clock: Clock | None = None) -> str:
         if source is None or not source.root.is_dir():
             continue
         try:
-            final, _reused = replicator.copy_one(
-                source, target, str(digest), str(src_rel), int(size)
-            )
+            with ssd_writing():
+                final, _reused = replicator.copy_one(
+                    source, target, str(digest), str(src_rel), int(size)
+                )
         except SourceCorrupt:
             continue
         with db.tx() as conn:

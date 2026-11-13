@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from sift.backup.adopt import adopt
 from sift.backup.confirm import build_report, confirm, latest
 from sift.backup.problems import open_problems
-from sift.backup.replicator import Dest, load_dest
+from sift.backup.replicator import Dest
+from sift.backup.run import usable_dests
 from sift.backup.verifier import NothingToRepairFrom, repair, verify_dest
 from sift.cleanup.analyse import load_analysis, run_analysis
 from sift.server.deps import Ctx
@@ -46,10 +47,8 @@ def start_task(ctx: Ctx, kind: str, work: Any) -> TaskOut:
 
 
 def mounted_dests(ctx: Ctx) -> list[Dest]:
-    with ctx.db.read() as conn:
-        ids = [int(r[0]) for r in conn.execute("SELECT id FROM destination ORDER BY id")]
-    found = [load_dest(ctx.db, i) for i in ids]
-    return [d for d in found if d is not None and d.root.is_dir()]
+    """The current Mac folder and the SSD that is plugged in (by UUID), never a look-alike."""
+    return usable_dests(ctx)
 
 
 @router.post("/backup/verify")
@@ -116,7 +115,8 @@ class RepairOut(BaseModel):
 @router.post("/backup/problems/{problem_id}/repair")
 def repair_problem(ctx: Ctx, problem_id: int) -> RepairOut:
     try:
-        return RepairOut(rel_path=repair(ctx.db, problem_id))
+        usable = {d.id for d in usable_dests(ctx)}
+        return RepairOut(rel_path=repair(ctx.db, problem_id, usable=usable))
     except LookupError as e:
         raise ApiError(404, "not_found", str(e)) from e
     except NothingToRepairFrom as e:
@@ -221,6 +221,7 @@ def start_confirm(ctx: Ctx, body: ConfirmRequest) -> TaskOut:
             device_id,
             body.set,
             session.transport,
+            dests=usable_dests(ctx),
             should_stop=lambda: control.should_stop,
         )
         return {"confirmed": done.confirmed, "files": done.files, "report": done.report}

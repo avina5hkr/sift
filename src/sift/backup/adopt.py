@@ -47,6 +47,8 @@ def _walk(root: Path) -> list[tuple[str, int, int]]:
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         base = Path(dirpath)
         for name in sorted(filenames):
+            if name == ".DS_Store" or name.startswith("._"):
+                continue  # Finder and exFAT metadata, not backed-up files
             path = base / name
             try:
                 st = os.lstat(path)

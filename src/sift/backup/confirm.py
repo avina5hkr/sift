@@ -11,11 +11,12 @@ plugged-in destination. A confirmation goes Stale when the set changes or after
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
-from sift.backup.replicator import load_dest
+from sift.backup.replicator import Dest
 from sift.core.clock import Clock, SystemClock
 from sift.core.config import Config
 from sift.core.db import Database
@@ -31,6 +32,21 @@ def required_kinds(config: Config) -> list[str]:
     if not config.backup.ssd_volume_uuid:
         return ["mac"]
     return list(config.backup.required_destinations)
+
+
+def current_dest_ids(db: Database, config: Config) -> dict[str, int]:
+    """kind -> the destination row that counts now: the Mac folder of `backup.mac_root` and the
+    SSD with `backup.ssd_volume_uuid`. Copies on a retired drive never count (-1: none yet)."""
+    mac_root = str(Path(config.backup.mac_root).expanduser())
+    with db.read() as conn:
+        mac = conn.execute(
+            "SELECT id FROM destination WHERE kind = 'mac' AND root_path = ?", (mac_root,)
+        ).fetchone()
+        ssd = conn.execute(
+            "SELECT id FROM destination WHERE kind = 'ssd' AND volume_uuid = ?",
+            (config.backup.ssd_volume_uuid or "\0",),
+        ).fetchone()
+    return {"mac": int(mac[0]) if mac else -1, "ssd": int(ssd[0]) if ssd else -1}
 
 
 @dataclass
@@ -86,8 +102,8 @@ def build_report(
     clock = clock or SystemClock()
     report = SetReport(set_name, required=required_kinds(config))
     rows = _rows(db, device_id, set_name)
+    kinds = {dest_id: kind for kind, dest_id in current_dest_ids(db, config).items()}
     with db.read() as conn:
-        kinds = {int(r[0]): str(r[1]) for r in conn.execute("SELECT id, kind FROM destination")}
         held: dict[str, set[str]] = {}
         for digest, dest_id in conn.execute(
             "SELECT r.content_hash, r.dest_id FROM replica r JOIN phone_file p "
@@ -95,7 +111,8 @@ def build_report(
             "AND p.present = 1",
             (device_id, set_name),
         ):
-            held.setdefault(str(digest), set()).add(kinds.get(int(dest_id), "?"))
+            if int(dest_id) in kinds:  # only the current Mac folder and SSD count
+                held.setdefault(str(digest), set()).add(kinds[int(dest_id)])
         report.provisional = int(
             conn.execute(
                 "SELECT count(*) FROM adopted_file WHERE state = 'provisional'"
@@ -180,6 +197,7 @@ def confirm(
     set_name: str,
     transport: Transport,
     *,
+    dests: Sequence[Dest] = (),
     clock: Clock | None = None,
     should_stop: Callable[[], bool] = lambda: False,
 ) -> Confirmation:
@@ -192,11 +210,8 @@ def confirm(
     when = datetime.fromtimestamp(now, UTC)
     text = _markdown(report, when)
     written: str | None = None
-    with db.read() as conn:
-        dest_ids = [int(r[0]) for r in conn.execute("SELECT id FROM destination")]
-    for dest_id in dest_ids:
-        dest = load_dest(db, dest_id)
-        if dest is None or not dest.root.is_dir():
+    for dest in dests:  # the drives plugged in now (the caller finds them by UUID)
+        if not dest.root.is_dir():
             continue
         folder = dest.root / ".sift" / "reports"
         safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in set_name).strip() or "set"

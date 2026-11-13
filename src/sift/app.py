@@ -494,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
         if mode == "adb":  # the real app; tests and fake-phone runs never look at real drives
             ssd = SsdWatcher(ctx, on_connect=lambda _state: ssd_connected(ctx))
             ctx.ssd = ssd
-            shutdown.add("ssd", ssd.stop, timeout_s=_TRACKER_STEP_S)
+            shutdown.add("ssd", ssd.stop, timeout_s=40.0)  # waits for its copy to stop
             ssd.start()
         shutdown.add("tasks", tasks.stop, timeout_s=_TRACKER_STEP_S)
         slow = start_test_jobs(ctx)

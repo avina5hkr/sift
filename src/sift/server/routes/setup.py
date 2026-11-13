@@ -486,8 +486,7 @@ class SsdRequest(BaseModel):
 
 @router.post("/ssd")
 def save_ssd(ctx: Ctx, body: SsdRequest, lister: VolumeLister) -> VolumesOut:
-    """Remember which drive is the SSD (or none). Copying to it arrives later; this only stores
-    the choice."""
+    """Remember which drive is the SSD (or none); a plugged-in SSD is picked up at once."""
     wanted = body.volume_uuid or ""
     if wanted and wanted not in {v.uuid for v in lister()}:
         raise ApiError(
@@ -506,6 +505,8 @@ def save_ssd(ctx: Ctx, body: SsdRequest, lister: VolumeLister) -> VolumesOut:
             raise ApiError(
                 500, "save_failed", "Sift could not save the settings. Nothing was changed."
             ) from e
+    if ctx.ssd is not None:  # look now: the chosen drive is usually plugged in already
+        ctx.ssd.poll_once(force=True)
     return list_volumes(ctx, lister)
 
 

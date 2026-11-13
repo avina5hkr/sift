@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from sift.backup.confirm import required_kinds
+from sift.backup.confirm import current_dest_ids, required_kinds
 from sift.backup.scanner import list_roots
 from sift.backup.sets import resolve_roots
 from sift.backup.skiprules import SkipRules
@@ -61,19 +61,20 @@ class Analysis:
 
 
 def _index(
-    db: Database, required: list[str]
+    db: Database, config: Config, required: list[str]
 ) -> tuple[dict[int, set[str]], set[str], set[int], set[str]]:
     """Sizes -> stored hashes; hashes on every required destination; sizes of provisional
     adopted files; hashes with an open problem."""
     with db.read() as conn:
-        kinds = {int(r[0]): str(r[1]) for r in conn.execute("SELECT id, kind FROM destination")}
+        kinds = {dest_id: kind for kind, dest_id in current_dest_ids(db, config).items()}
         where: dict[str, set[str]] = {}
         sizes: dict[int, set[str]] = {}
         for digest, dest_id, size in conn.execute(
             "SELECT r.content_hash, r.dest_id, c.size FROM replica r "
             "JOIN content c ON c.hash = r.content_hash"
         ):
-            where.setdefault(str(digest), set()).add(kinds.get(int(dest_id), "?"))
+            if int(dest_id) in kinds:  # only the current Mac folder and SSD count
+                where.setdefault(str(digest), set()).add(kinds[int(dest_id)])
             sizes.setdefault(int(size), set()).add(str(digest))
         provisional = {
             int(r[0])
@@ -109,7 +110,7 @@ def analyse(
     roots = resolve_roots(config.backup.sets, list(set_names))
     listing = list_roots(transport, roots, SkipRules.from_config(config))
     result.warnings = list(listing.warnings)
-    sizes, full, provisional, problem_hashes = _index(db, required_kinds(config))
+    sizes, full, provisional, problem_hashes = _index(db, config, required_kinds(config))
     candidates: list[tuple[str, int, str]] = []  # (path, size, set)
     for path, (entry, set_name) in sorted(listing.files.items()):
         res = result.sets.setdefault(set_name, SetResult())

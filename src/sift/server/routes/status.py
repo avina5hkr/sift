@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from sift.backup.replicator import REPLICATION_LOCK
+from sift.backup.replicator import writes_in_progress
 from sift.core.jobs import TERMINAL
 from sift.core.migrations import schema_version
 from sift.device.tracker import ConnectionState, NoAdbReason
@@ -82,7 +82,7 @@ def _mac_folder(mac_root: str) -> FolderStatus:
 
 def ssd_busy(ctx: Ctx) -> bool:
     """True while a backup, a long task or a replication may be writing to the SSD."""
-    if REPLICATION_LOCK.locked():
+    if writes_in_progress():
         return True
     if (
         ctx.tasks is not None

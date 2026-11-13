@@ -16,7 +16,7 @@ from tests.backup.test_replicator import add_dest, replicas
 from tests.helpers import make_ctx
 
 NAMES = st.text(alphabet="abcXYZ é_-.0", min_size=1, max_size=8).filter(
-    lambda n: n not in {".", "..", ".staging", ".sift"}
+    lambda n: n not in {".", "..", ".staging", ".sift", ".DS_Store"} and not n.startswith("._")
 )
 TREES = st.dictionaries(
     st.lists(NAMES, min_size=1, max_size=3).map(tuple),
@@ -128,6 +128,7 @@ def test_adopt_over_the_api(ctx: AppContext, tmp_path: Path) -> None:
     root.mkdir()
     (root / "a.jpg").write_bytes(b"a")
     add_dest(ctx, "mac", root)
+    ctx.config.backup.mac_root = str(root)
     ctx.tasks = TaskRunner(ctx, describe)
     client = client_for(ctx)
     assert (
