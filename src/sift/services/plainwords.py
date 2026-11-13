@@ -11,6 +11,7 @@ from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
 from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
+from sift.backup.verifier import NothingToRepairFrom
 from sift.core.db import (
     DatabaseBusyError,
     DatabaseCorruptError,
@@ -37,6 +38,7 @@ from sift.device.transport import (
     TransportError,
 )
 from sift.server.errors import ApiError
+from sift.services.tasks import TaskBusy
 
 GENERIC = "Something went wrong. Details are in Logs."
 FILE_NOT_FOUND = "A file or folder on the phone was not found."
@@ -54,6 +56,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (IncompleteCopy, "A file was not copied completely, so it was not kept."),
     (ChecksumMismatch, "A copied file did not read back correctly, so it was discarded."),
     (TargetExists, "A file with that name already exists, so it was left alone."),
+    (NothingToRepairFrom, "No good copy of this file is on another backup drive."),
     (SourceCorrupt, "A backed-up file no longer matches its checksum, so it was not copied."),
     (ScanNotPending, "That scan is no longer waiting for your confirmation."),
     (UnstorablePath, "A file name on the phone cannot be saved, so that file was left out."),
@@ -64,6 +67,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (AdbError, "There is a problem with adb."),
     (AdbPortBusy, "Another program is using adb's port and is not answering."),
     (AlreadyRunningError, "Sift is already running."),
+    (TaskBusy, "Sift is busy with another task. Try again when it has finished."),
     (BusClosed, "Sift is closing."),
     (NoPhone, "Connect your phone to start a backup."),
     (PhoneNotAttached, "That phone is not connected any more."),

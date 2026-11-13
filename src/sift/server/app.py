@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from sift.core import testhooks
 from sift.core.context import AppContext
 from sift.server.errors import install_error_handlers
-from sift.server.routes import backup, devices, events, setup, status, testphone
+from sift.server.routes import backup, devices, events, setup, status, testphone, vault
 from sift.server.security import SecurityMiddleware
 from sift.server.static import mount_web
 
@@ -19,6 +19,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.include_router(devices.router, prefix="/api")
     app.include_router(backup.router, prefix="/api")
     app.include_router(setup.router, prefix="/api")
+    app.include_router(vault.router, prefix="/api")
     if testhooks.flag("SIFT_TEST_PHONE_CONTROL"):
         app.include_router(testphone.router, prefix="/api")  # the browser tests only
     mount_web(app, ctx.web_dist)

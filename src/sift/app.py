@@ -49,6 +49,7 @@ from sift.services.afterrun import after_run
 from sift.services.notify import MacNotifier, Notifier, NullNotifier
 from sift.services.plainwords import describe
 from sift.services.ssd import SsdWatcher
+from sift.services.tasks import TaskRunner
 from sift.window_quit import WindowQuit
 
 _HOST = "127.0.0.1"
@@ -481,6 +482,8 @@ def main(argv: list[str] | None = None) -> int:
         # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
         jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())
         ctx.jobs = jobs
+        tasks = TaskRunner(ctx, describe)
+        ctx.tasks = tasks
         handle = start_server(ctx, sock)
         shutdown.add("server", handle.stop, timeout_s=_SERVER_STEP_S)
         tracker = build_tracker(mode, ctx, os.environ)
@@ -493,6 +496,7 @@ def main(argv: list[str] | None = None) -> int:
             ctx.ssd = ssd
             shutdown.add("ssd", ssd.stop, timeout_s=_TRACKER_STEP_S)
             ssd.start()
+        shutdown.add("tasks", tasks.stop, timeout_s=_TRACKER_STEP_S)
         slow = start_test_jobs(ctx)
         # Added last, so it runs first: jobs stop before the tracker, server and database.
         shutdown.add("jobs", lambda: _stop_jobs(jobs, slow), timeout_s=_JOBS_STOP_TIMEOUT_S + 5)

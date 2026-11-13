@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.backup.layout import rel_key, resolve_collision
+from sift.backup.problems import add_problem
 from sift.backup.staging import (
     ChecksumMismatch,
     IncompleteCopy,
@@ -145,18 +146,7 @@ class Replicator:
         return None if row is None else str(row[0])
 
     def _problem(self, kind: str, dest: Dest, rel_path: str, digest: str, detail: str) -> None:
-        with self._db.tx() as conn:
-            open_row = conn.execute(
-                "SELECT 1 FROM problem WHERE kind = ? AND dest_id = ? AND rel_path = ? "
-                "AND resolved_at IS NULL",
-                (kind, dest.id, rel_path),
-            ).fetchone()
-            if open_row is None:
-                conn.execute(
-                    "INSERT INTO problem (kind, dest_id, rel_path, content_hash, detail, "
-                    "created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (kind, dest.id, rel_path, digest, detail, self._clock.now()),
-                )
+        add_problem(self._db, self._clock, kind, dest.id, rel_path, digest, detail)
 
     def _commit(
         self, staged: StagedFile, dst: Dest, base: str, digest: str, mtime: int
