@@ -67,6 +67,7 @@ from sift.backup.layout import (
     resolve_collision,
 )
 from sift.backup.phonepaths import from_db, shown
+from sift.backup.problems import add_problem
 from sift.backup.staging import (
     ChecksumMismatch,
     IncompleteCopy,
@@ -93,6 +94,7 @@ log = logging.getLogger(__name__)
 
 CHUNK = 1 << 20  # 1 MiB reads, hashed as they arrive
 STAGING_DIR = ".staging"
+SHA_BATCH = 40  # phone hashes asked for at once (spec: batches of 40)
 CRASH_POINT = "puller.after_rename_before_rows"
 # The sets the `by_date` layout applies to (compared case-folded); every other set is mirrored.
 BY_DATE_SETS = frozenset({"camera", "pictures and movies"})
@@ -280,6 +282,12 @@ class Puller:
         self._decide = threading.Lock()
         self._copied_by_stamp: dict[tuple[int, int], str] = {}
         self._unrecorded: dict[int, list[str]] = {}  # file size -> paths with no replica row
+        # Size-then-hash match (adopted or earlier backups): sizes of content stored here, and
+        # the phone's own hashes of candidate files, asked for in batches.
+        self._sizes_here: dict[int, set[str]] = {}
+        self._candidates: list[str] = []
+        self._phone_hashes: dict[str, str | None] = {}
+        self._sha_lock = threading.Lock()
 
     # -- the coordinator (the job's own thread) -----------------------------------------------
 
@@ -297,6 +305,7 @@ class Puller:
         self._target.staging.mkdir(parents=True, exist_ok=True)
         self._load_copied_by_stamp()
         self._load_unrecorded()
+        self._load_sizes_here(items)
         pending = deque(items)
         inflight: dict[int, PullItem] = {}
         results: queue.Queue[tuple[PullItem, Outcome, BaseException | None]] = queue.Queue()
@@ -473,6 +482,14 @@ class Puller:
                     if self._has_copy(known):
                         self._record_alias(item, known)
                         return Outcome.linked
+        elif item.size in self._sizes_here:
+            # Same size as content stored here: the phone's hash decides (names never do).
+            on_phone = self._phone_hash(transport, item.path)
+            if on_phone is not None and on_phone in self._sizes_here[item.size]:
+                with self._decide:
+                    if self._has_copy(on_phone):
+                        self._record_alias(item, on_phone)
+                        return Outcome.linked
         progress(0)
         with StagedFile(self._target.staging, expected_size=item.size) as staged:
             try:
@@ -557,6 +574,16 @@ class Puller:
             rel_path = resolve_collision(
                 base, hash8=digest[:8], owner_of=owner_of, content_hash=digest
             )
+            if attempt == 0 and rel_path != base and self._owner_of(rel_key(base)) is not None:
+                add_problem(
+                    self._db,
+                    self._clock,
+                    "older_copy_differs",
+                    self._target.dest_id,
+                    base,
+                    digest,
+                    f"The phone's current file was saved beside it as {rel_path}.",
+                )
             final = self._target.root / rel_path
             final.parent.mkdir(parents=True, exist_ok=True)
             if rel_path != base:  # stored too, so a crash after the rename leaves it findable
@@ -607,6 +634,42 @@ class Puller:
                 (self._target.dest_id, self._device_id),
             ).fetchall()
         self._copied_by_stamp = {(int(r[0]), int(r[1])): str(r[2]) for r in rows}
+
+    def _load_sizes_here(self, items: Sequence[PullItem]) -> None:
+        """Sizes of content with a replica here, and which pending files could match one."""
+        wanted = {i.size for i in items if i.size > 0}
+        if not wanted:
+            return
+        with self._db.read() as conn:
+            rows = conn.execute(
+                "SELECT c.size, c.hash FROM replica r JOIN content c ON c.hash = r.content_hash "
+                "WHERE r.dest_id = ?",
+                (self._target.dest_id,),
+            ).fetchall()
+        sizes: dict[int, set[str]] = {}
+        for size, digest in rows:
+            if int(size) in wanted:
+                sizes.setdefault(int(size), set()).add(str(digest))
+        self._sizes_here = sizes
+        self._candidates = [
+            i.path for i in items if i.size in sizes and self._known_content(i) is None
+        ]
+
+    def _phone_hash(self, transport: Transport, path: str) -> str | None:
+        """The phone's SHA-256 of `path`, asked for with up to SHA_BATCH other candidates."""
+        with self._sha_lock:
+            if path not in self._phone_hashes:
+                try:
+                    start = self._candidates.index(path)
+                except ValueError:
+                    start = len(self._candidates)
+                batch = [path] + [
+                    p
+                    for p in self._candidates[start + 1 : start + SHA_BATCH]
+                    if p not in self._phone_hashes
+                ]
+                self._phone_hashes.update(transport.sha256(batch))
+            return self._phone_hashes.pop(path, None)
 
     def _load_unrecorded(self) -> None:
         """The paths stored on rows that no replica row here owns, by the size of their file.

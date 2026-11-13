@@ -1,7 +1,8 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, test, vi } from 'vitest'
-import type { ConnectionState, DeviceStatus, StatusResponse } from '../lib/types'
+import { afterEach, expect, test, vi } from 'vitest'
+import { useEventStore } from '../lib/events'
+import type { ConnectionState, DeviceStatus, SsdStatus, StatusResponse } from '../lib/types'
 import { StatusBar } from './StatusBar'
 
 const status: StatusResponse = {
@@ -116,9 +117,70 @@ test('a phone held by another tool has a Retry button', async () => {
   expect(onRetry).toHaveBeenCalledTimes(1)
 })
 
-test('the SSD chip stays "SSD not connected"', () => {
+const ssd = (extra: Partial<SsdStatus> = {}): StatusResponse => ({
+  ...status,
+  ssd: {
+    configured: true,
+    connected: true,
+    name: 'Backup SSD',
+    mount: '/Volumes/Backup SSD',
+    root: '/Volumes/Backup SSD/PhoneBackup',
+    free_bytes: 400_000_000_000,
+    dest_id: 2,
+    safe_to_unplug: true,
+    ...extra,
+  },
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  useEventStore.setState({ replication: null, job: null })
+})
+
+test('the SSD chip says not connected without an SSD, or when it is configured but away', () => {
   render(<StatusBar status={device('connected_usb', connected)} />)
   expect(screen.getByText('SSD not connected')).toBeInTheDocument()
+  render(<StatusBar status={ssd({ connected: false, name: null, free_bytes: null })} />)
+  expect(screen.getAllByText('SSD not connected')).toHaveLength(2)
+})
+
+test('a connected SSD shows its name and free space, with Eject when it is safe', () => {
+  render(<StatusBar status={ssd()} />)
+  expect(screen.getByText('Backup SSD · 400.0 GB free')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Eject' })).toBeInTheDocument()
+})
+
+test('no Eject until the SSD is safe to unplug', () => {
+  render(<StatusBar status={ssd({ safe_to_unplug: false })} />)
+  expect(screen.queryByRole('button', { name: 'Eject' })).not.toBeInTheDocument()
+})
+
+test('while copying to the SSD it says Writing and offers no Eject', () => {
+  useEventStore.setState({ replication: { state: 'running', copied: 3, bytes: 10, problems: 0, failed: 0 } })
+  render(<StatusBar status={ssd()} />)
+  expect(screen.getByText('Writing…')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Eject' })).not.toBeInTheDocument()
+})
+
+test('Eject posts to the engine and then asks the page to refresh', async () => {
+  const fetchMock = vi.fn(() => Promise.resolve(new Response(JSON.stringify(ssd().ssd), { status: 200 })))
+  vi.stubGlobal('fetch', fetchMock)
+  const onEjected = vi.fn()
+  render(<StatusBar status={ssd()} onEjected={onEjected} />)
+  await userEvent.click(screen.getByRole('button', { name: 'Eject' }))
+  await waitFor(() => expect(onEjected).toHaveBeenCalled())
+  expect(fetchMock).toHaveBeenCalledWith('/api/ssd/eject', expect.objectContaining({ method: 'POST' }))
+})
+
+test('when Eject is refused the plain message is shown', async () => {
+  const body = { code: 'busy', message: 'The SSD is still being written to.', detail: null }
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(JSON.stringify(body), { status: 409 }))))
+  const onEjected = vi.fn()
+  render(<StatusBar status={ssd()} onEjected={onEjected} />)
+  await userEvent.click(screen.getByRole('button', { name: 'Eject' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('The SSD is still being written to.')
+  expect(onEjected).not.toHaveBeenCalled()
+  act(() => useEventStore.setState({ replication: null }))
 })
 
 test('the chip Retry is disabled while a request is pending', () => {

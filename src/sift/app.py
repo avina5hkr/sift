@@ -21,7 +21,7 @@ import uvicorn
 from sift import __version__
 from sift.backup.readers import stored_read_speed
 from sift.backup.recovery import recover
-from sift.backup.run import run_backup
+from sift.backup.run import replicate_now, run_backup
 from sift.core import testhooks
 from sift.core.clock import SystemClock
 from sift.core.config import BackupConfig, Config, load_config
@@ -48,6 +48,8 @@ from sift.server.app import create_app
 from sift.services.afterrun import after_run
 from sift.services.notify import MacNotifier, Notifier, NullNotifier
 from sift.services.plainwords import describe
+from sift.services.ssd import SsdWatcher
+from sift.services.tasks import TaskRunner
 from sift.window_quit import WindowQuit
 
 _HOST = "127.0.0.1"
@@ -197,6 +199,12 @@ def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
             raise RuntimeError("The Sift server did not start.")
         time.sleep(0.01)
     return handle
+
+
+def ssd_connected(ctx: AppContext) -> None:
+    """The backup SSD was plugged in: copy across what one destination has and the other lacks."""
+    ssd = ctx.ssd
+    replicate_now(ctx, should_stop=lambda: ssd is not None and ssd.stopping)
 
 
 def tracker_mode(*, fake_phone: bool, no_window: bool, env: Mapping[str, str]) -> str:
@@ -474,6 +482,8 @@ def main(argv: list[str] | None = None) -> int:
         # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
         jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())
         ctx.jobs = jobs
+        tasks = TaskRunner(ctx, describe)
+        ctx.tasks = tasks
         handle = start_server(ctx, sock)
         shutdown.add("server", handle.stop, timeout_s=_SERVER_STEP_S)
         tracker = build_tracker(mode, ctx, os.environ)
@@ -481,6 +491,12 @@ def main(argv: list[str] | None = None) -> int:
             ctx.tracker = tracker
             shutdown.add("tracker", tracker.stop, timeout_s=_TRACKER_STEP_S)  # before the DB closes
             tracker.start()
+        if mode == "adb":  # the real app; tests and fake-phone runs never look at real drives
+            ssd = SsdWatcher(ctx, on_connect=lambda _state: ssd_connected(ctx))
+            ctx.ssd = ssd
+            shutdown.add("ssd", ssd.stop, timeout_s=40.0)  # waits for its copy to stop
+            ssd.start()
+        shutdown.add("tasks", tasks.stop, timeout_s=_TRACKER_STEP_S)
         slow = start_test_jobs(ctx)
         # Added last, so it runs first: jobs stop before the tracker, server and database.
         shutdown.add("jobs", lambda: _stop_jobs(jobs, slow), timeout_s=_JOBS_STOP_TIMEOUT_S + 5)

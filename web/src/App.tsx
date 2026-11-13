@@ -54,7 +54,9 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col">
-      <StatusBar status={status.data} onOpenSettings={() => navigate('/settings')} onRetry={onRetry} retrying={retry.isPending} />
+      <StatusBar status={status.data} onOpenSettings={() => navigate('/settings')} onRetry={onRetry} retrying={retry.isPending}
+        onEjected={() => void qc.invalidateQueries({ queryKey: ['status'] })}
+      />
       <DeviceBanner device={status.data?.device} onRetry={onRetry} retrying={retry.isPending} error={retryError} />
       <ConfigWarnings warnings={status.data?.app.config_warnings} />
       {errorMessage && (

@@ -13,7 +13,7 @@ import os
 import re
 import sqlite3
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from sift.core.db import Database
@@ -93,3 +93,38 @@ def _rotate(folder: Path, keep: int) -> None:
             old.unlink()
         except OSError:
             log.warning("Could not remove the old database copy %s", old.name)
+
+
+_RUN_NAME = re.compile(r"^state-run-\d{8}-\d{6}\.db$")
+
+
+def run_copy(db: Database, folder: Path, when: datetime, *, keep: int = 5) -> Path | None:
+    """A copy of the database named for this moment (`state-run-YYYYMMDD-HHMMSS.db`), then all
+    but the newest `keep` of these copies are dropped. Only Sift's own database copies in its
+    own folder are ever removed (plan assumption A9). None when a copy of that second exists."""
+    with _LOCK:
+        folder.mkdir(parents=True, exist_ok=True)
+        _sweep_partials(folder)
+        final = folder / f"state-run-{when:%Y%m%d-%H%M%S}.db"
+        if final.exists():
+            return None
+        partial = final.with_name(final.name + ".partial")
+        source = sqlite3.connect(f"{db.path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            dest = sqlite3.connect(partial)
+            try:
+                source.backup(dest)
+            finally:
+                dest.close()
+            os.replace(partial, final)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                partial.unlink()
+            raise
+        finally:
+            source.close()
+        copies = sorted((p for p in folder.iterdir() if _RUN_NAME.match(p.name)), reverse=True)
+        for old in copies[max(1, keep) :]:
+            with contextlib.suppress(OSError):
+                old.unlink()
+        return final

@@ -10,8 +10,10 @@ from hypothesis import strategies as st
 import sift
 from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
+from sift.backup.replicator import SourceCorrupt
 from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
+from sift.backup.verifier import NothingToRepairFrom
 from sift.core.db import (
     DatabaseBusyError,
     DatabaseCorruptError,
@@ -40,6 +42,7 @@ from sift.device.transport import (
 from sift.server.errors import ApiError
 from sift.services import plainwords
 from sift.services.plainwords import describe
+from sift.services.tasks import TaskBusy
 
 # One way to build each Sift error type from a message.
 MAKERS: dict[str, Callable[[str], BaseException]] = {
@@ -54,6 +57,9 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "IncompleteCopy": IncompleteCopy,
     "ChecksumMismatch": ChecksumMismatch,
     "TargetExists": TargetExists,
+    "SourceCorrupt": SourceCorrupt,
+    "NothingToRepairFrom": NothingToRepairFrom,
+    "TaskBusy": TaskBusy,
     "ScanNotPending": ScanNotPending,
     "UnstorablePath": UnstorablePath,
     "ReaderTestCancelled": ReaderTestCancelled,

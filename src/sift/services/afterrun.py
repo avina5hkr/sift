@@ -7,15 +7,18 @@ and nothing here raises.
 
 import logging
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
+from sift.backup.replicator import ssd_writing
 from sift.backup.summary import latest_summary
 from sift.core.context import AppContext
-from sift.core.dbbackup import daily_copy
+from sift.core.dbbackup import daily_copy, run_copy
 from sift.core.jobs import JobSnapshot, JobState
 from sift.services.notify import Notifier, announce
 
+SSD_KEEP = 5  # database copies kept on the SSD
 log = logging.getLogger(__name__)
 
 
@@ -62,6 +65,13 @@ def after_run(
         daily_copy(ctx.db, ctx.paths.db_backups, today())
     except Exception:
         log.exception("Could not make the daily copy of the database")
+    ssd = ctx.ssd.state() if ctx.ssd is not None else None
+    if ssd is not None and ssd.connected and ssd.root:
+        try:  # a copy beside the backups after every run, so the SSD alone can rebuild
+            with ssd_writing():
+                run_copy(ctx.db, Path(ssd.root) / ".sift", datetime.now(), keep=SSD_KEEP)
+        except Exception:
+            log.exception("Could not copy the database to the SSD")
     if closing():
         return
     try:

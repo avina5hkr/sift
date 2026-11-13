@@ -1,10 +1,13 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from sift.core.migrations import bundled_migrations
 from sift.server.app import create_app
 from sift.server.errors import install_error_handlers
 from sift.server.security import SecurityMiddleware
 from tests.helpers import H, make_client
+
+LATEST = bundled_migrations()[-1].version
 
 
 def test_status_requires_token(client):
@@ -19,7 +22,7 @@ def test_status_requires_token(client):
 
 def test_status_ok(client):
     body = client.get("/api/status", headers=H).json()
-    assert body["app"]["version"] == "0.1.0" and body["app"]["schema_version"] == 4
+    assert body["app"]["version"] == "0.1.0" and body["app"]["schema_version"] == LATEST
     assert body["device"] is None and body["ssd"] is None
     assert body["mac_folder"]["path"].endswith("PhoneBackup")
     assert body["mac_folder"]["free_bytes"] > 0

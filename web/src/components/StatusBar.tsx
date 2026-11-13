@@ -1,6 +1,9 @@
+import { useState } from 'react'
+import { ApiError, apiFetch } from '../lib/api'
+import { isRunning } from '../lib/backupState'
 import { formatBytes } from '../lib/format'
 import { useEventStore } from '../lib/events'
-import type { DeviceStatus, StatusResponse } from '../lib/types'
+import type { DeviceStatus, SsdStatus, StatusResponse } from '../lib/types'
 import { Chip } from './Chip'
 
 type Props = {
@@ -11,6 +14,8 @@ type Props = {
   onRetry?: () => void
   /** A Retry request is in flight: the button is disabled. */
   retrying?: boolean
+  /** The SSD was ejected; refresh what depends on it. */
+  onEjected?: () => void
 }
 
 const USB2_TIP = 'Use a USB 3 cable in a direct port for faster backups.'
@@ -57,7 +62,56 @@ function macFolderLabel(folder: StatusResponse['mac_folder']): string {
   return folder.free_bytes == null ? name : `${name} · ${formatBytes(folder.free_bytes)} free`
 }
 
-export function StatusBar({ status, onOpenSettings, onRetry, retrying = false }: Props) {
+function ssdLabel(ssd: SsdStatus | null | undefined): string {
+  if (!ssd?.connected) return 'SSD not connected'
+  const name = ssd.name ?? 'SSD'
+  return ssd.free_bytes == null ? name : `${name} · ${formatBytes(ssd.free_bytes)} free`
+}
+
+function SsdChip({ ssd, onOpenSettings, onEjected }: Pick<Props, 'onOpenSettings' | 'onEjected'> & { ssd: SsdStatus | null | undefined }) {
+  // Busy while a run copies to the SSD, so it is not offered for eject then.
+  const busy = useEventStore((s) => s.replication?.state === 'running' || (isRunning(s.job) && s.job.state === 'replicating'))
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const eject = async () => {
+    setPending(true)
+    setError(null)
+    try {
+      await apiFetch<SsdStatus>('/api/ssd/eject', { method: 'POST' })
+      onEjected?.()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Sift could not eject the SSD just now. Try again in a moment.')
+    } finally {
+      setPending(false)
+    }
+  }
+  const connected = ssd?.connected === true
+  return (
+    <>
+      <Chip onClick={onOpenSettings} tone={connected ? 'ok' : 'neutral'}>
+        {ssdLabel(ssd)}
+      </Chip>
+      {connected && busy && <span className="text-sm text-neutral-600 dark:text-neutral-400">Writing…</span>}
+      {connected && !busy && ssd.safe_to_unplug && (
+        <button
+          type="button"
+          onClick={() => void eject()}
+          disabled={pending}
+          className="rounded-full border border-neutral-300 px-3 py-1 text-sm hover:bg-neutral-100 disabled:opacity-60 dark:border-neutral-700 dark:hover:bg-neutral-800"
+        >
+          Eject
+        </button>
+      )}
+      {error && (
+        <span role="alert" className="text-sm text-amber-900 dark:text-amber-300">
+          {error}
+        </span>
+      )}
+    </>
+  )
+}
+
+export function StatusBar({ status, onOpenSettings, onRetry, retrying = false, onEjected }: Props) {
   const connected = useEventStore((s) => s.connected)
   const folder = status?.mac_folder
   const phone = phoneChip(status?.device)
@@ -92,7 +146,7 @@ export function StatusBar({ status, onOpenSettings, onRetry, retrying = false }:
           Retry
         </button>
       )}
-      <Chip onClick={onOpenSettings}>{status?.ssd ? 'SSD connected' : 'SSD not connected'}</Chip>
+      <SsdChip ssd={status?.ssd} onOpenSettings={onOpenSettings} onEjected={onEjected} />
       <Chip onClick={onOpenSettings} title={folder?.path}>
         {folder ? macFolderLabel(folder) : 'Mac folder: checking'}
       </Chip>

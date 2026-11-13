@@ -142,3 +142,18 @@ test('hello forgets the job the stream last reported, so the server answer repla
   es.emit('hello', { version: '0.1.0' })
   expect(useEventStore.getState().job).toBeNull()
 })
+
+test('task events are stored; a finished analyse run remembers its id; the SSD refetches status', () => {
+  const qc = new QueryClient()
+  const spy = vi.spyOn(qc, 'invalidateQueries')
+  startEventStream(qc)
+  const es = FakeEventSource.instances[0]
+  es.emit('task', { kind: 'verify', state: 'running', done: 1, total: 4, message: '', result: null })
+  expect(useEventStore.getState().task?.done).toBe(1)
+  es.emit('task', { kind: 'analyse', state: 'done', done: 4, total: 4, message: '', result: { analysis_id: 9 } })
+  expect(useEventStore.getState().analysisId).toBe(9)
+  expect(spy).toHaveBeenCalledWith({ queryKey: ['backup'] })
+  spy.mockClear()
+  es.emit('ssd', { configured: true, connected: false })
+  expect(spy).toHaveBeenCalledWith({ queryKey: ['status'] })
+})

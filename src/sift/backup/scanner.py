@@ -618,3 +618,7 @@ def space_check(bytes_needed: int, dest: Path, headroom_pct: float) -> str | Non
         f"The Mac needs {_size(need - free)} more free space for this backup: it needs "
         f"{_size(need)}, with {headroom_pct:g}% to spare, and {_size(free)} is free."
     )
+
+
+# The walk without staging, for read-only uses (Analyse phone).
+list_roots = _list_roots
