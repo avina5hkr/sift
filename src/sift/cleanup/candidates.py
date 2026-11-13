@@ -19,10 +19,16 @@ _OTHER = 4
 
 
 def keeper_rank(path: str, mtime: int) -> tuple[int, int, str]:
+    """Lower is kept first: DCIM/Camera, then Pictures (and other DCIM folders), WhatsApp
+    received, WhatsApp Sent, other folders; ties to the earlier mtime."""
+    key = phone_path_key(path)
     origin = classify_origin(path)
-    rank = _PRIORITY.get(origin, _OTHER)
-    if origin != "camera" and phone_path_key(path).startswith("/sdcard/pictures/"):
+    if key.startswith("/sdcard/dcim/camera/"):
+        rank = _PRIORITY["camera"]
+    elif key.startswith(("/sdcard/pictures/", "/sdcard/dcim/")):
         rank = _PRIORITY["pictures"]
+    else:
+        rank = _PRIORITY.get(origin, _OTHER)
     return rank, mtime, path
 
 
@@ -69,10 +75,6 @@ def rebuild_exact(db: Database, device_id: int) -> int:
             "DELETE FROM candidate WHERE tab = 'exact' AND phone_file_id IN "
             "(SELECT id FROM phone_file WHERE device_id = ?)",
             (device_id,),
-        )
-        conn.executemany(  # a file that became a keeper loses any old tick
-            "DELETE FROM selection WHERE phone_file_id = ?",
-            [(g.keeper,) for g in groups],
         )
         conn.executemany(
             "INSERT INTO candidate (phone_file_id, tab, tier, reasons, group_id, role, "

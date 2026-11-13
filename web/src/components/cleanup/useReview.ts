@@ -3,7 +3,7 @@ import { apiFetch } from '../../lib/api'
 import type { CandidatesPage, ReviewGroup, ReviewItem, ReviewSort } from '../../lib/types'
 import { plain, post } from '../../pages/Wizard/request'
 
-const TAB = 'exact'
+export type ReviewTab = 'exact' | 'near' | 'similar'
 
 type Position = { group: number; copy: number } // copy -1 is the keeper
 
@@ -12,7 +12,7 @@ type Position = { group: number; copy: number } // copy -1 is the keeper
  * and the changes to the ticks. Every change is shown at once and saved through POST
  * /api/selection; if the save fails the change is undone and a message is set.
  */
-export function useReview(sort: ReviewSort) {
+export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact') {
   const [groups, setGroups] = useState<ReviewGroup[]>([])
   const [total, setTotal] = useState(0)
   const [more, setMore] = useState(true)
@@ -61,7 +61,7 @@ export function useReview(sort: ReviewSort) {
     })()
     inflight.current = run
     return run
-  }, [sort, commit])
+  }, [sort, commit, TAB])
 
   // Each sort is its own mount (the page keys it by sort), so this only ever loads the first page.
   useEffect(() => {
@@ -117,7 +117,7 @@ export function useReview(sort: ReviewSort) {
           setError(plain(e))
         })
     },
-    [commit, loadMore],
+    [commit, loadMore, TAB],
   )
 
   /** Every item in reading order (a group's keeper, then its copies) and where each one sits. */

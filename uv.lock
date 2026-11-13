@@ -599,6 +599,23 @@ wheels = [
 ]
 
 [[package]]
+name = "pyobjc-framework-avfoundation"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-framework-coreaudio" },
+    { name = "pyobjc-framework-coremedia" },
+    { name = "pyobjc-framework-quartz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/64/2d/7dcc52c5f64bb653514667d1ea6e12dc5afb5f8a3bc0e5fc720b3f2dea85/pyobjc_framework_avfoundation-13.0.tar.gz", hash = "sha256:1b41ae09c8a66d7a7d18566983a97bf754bc07084334dd63b70540777c2ee847", size = 423426, upload-time = "2026-10-30T10:45:52.734Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/05/d6/5134104037b4628e0615461a07b7e72edc089b81e5e56fb51f909481ce1b/pyobjc_framework_avfoundation-13.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:a504d15d672424240fb052571eeed97e069796296c36d2144e0734c6e22bb55c", size = 87600, upload-time = "2026-10-30T10:34:18.629Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/9d/e104d0c12afcf05165f368cc542953f805d57edf2e9ce2931aaf6f6e31d6/pyobjc_framework_avfoundation-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:3591f4b479067b9c593a3f0ec2c0b2a7a215efc241178bc96c8267cd36e72aef", size = 88121, upload-time = "2026-10-30T10:34:19.716Z" },
+]
+
+[[package]]
 name = "pyobjc-framework-cocoa"
 version = "13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -609,6 +626,34 @@ sdist = { url = "https://files.pythonhosted.org/packages/30/50/55a8779d35f1f86d7
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/bb/f683ec329180e1931c8d592c882defebca8810e019cf4bc8727fa36b7d89/pyobjc_framework_cocoa-13.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:88be6d452e7531f695ce6d41428aa74bcaade9ddbc50af592419b9f2fbb7c879", size = 391936, upload-time = "2026-10-30T10:35:20.154Z" },
     { url = "https://files.pythonhosted.org/packages/c5/3e/1b24b56d3710a594dc2350ed6b321aaf0ee12fca3dafa6034bccffc8ac08/pyobjc_framework_cocoa-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:1a6b9f9e0ab123e51fa7df43bbc6c0414a444facd2225ad4f221a0d842c49ad6", size = 395844, upload-time = "2026-10-30T10:35:21.319Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-coreaudio"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/9d/168d845146eff0c73a2b2e53168e461f008fd406724900e6c4f15184bd84/pyobjc_framework_coreaudio-13.0.tar.gz", hash = "sha256:3581dcaa3c3b760c09bec782f5d4bc9cc5abc9ef96d9bead4d0d7a838d0d28d2", size = 80684, upload-time = "2026-10-30T10:46:09.666Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/35/fb/aba1198e4cc510b59c687da8a04f2fe9df0c30b27914b2c759496a93c449/pyobjc_framework_coreaudio-13.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:a4f7d3660e8bb6810a945e7db87b6d872a0febe8e7a611804039d78d62511016", size = 36411, upload-time = "2026-10-30T10:35:45.722Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/01/857226a9ae221b9aaefd95b553cdff131908819d5531cea443e4644aeab2/pyobjc_framework_coreaudio-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:d18c1a89b1a8722813bc272adefc54bc31cead9044a3ac6ca94d9724b3f4c953", size = 38002, upload-time = "2026-10-30T10:35:46.504Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-coremedia"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/10/f6/3ccdac27fd6a2a94ae122b807a6f0512076614b85265559a9055996b5839/pyobjc_framework_coremedia-13.0.tar.gz", hash = "sha256:d95ef87f6f33ec98347439284f0add1f7d1d019b88cb8e218e81b39aec14d324", size = 99534, upload-time = "2026-10-30T10:46:14.941Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a2/28/69678235fab189e621d60d713951fa4ef49d99eb397ac2db5271d5a36378/pyobjc_framework_coremedia-13.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:1668ca595246713f8d31fe60eca2ba639b8e01ded44564d046c4a4d86dd5ba1b", size = 29267, upload-time = "2026-10-30T10:36:21.154Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/bb/8eda9f3dc2fde51e8e6987057c28ed635a6c275027f1484212af6ef768cc/pyobjc_framework_coremedia-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:7e221a24cfbfa8148481abdef8bb8139821dd5a45d6cc288c1c4900072ca20eb", size = 29318, upload-time = "2026-10-30T10:36:22.167Z" },
 ]
 
 [[package]]
@@ -788,6 +833,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pillow-heif" },
     { name = "pydantic" },
+    { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-usernotifications", marker = "sys_platform == 'darwin'" },
     { name = "pywebview" },
     { name = "tomlkit" },
@@ -811,6 +857,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=13.0.0" },
     { name = "pillow-heif", specifier = ">=1.8.1" },
     { name = "pydantic", specifier = ">=2.14.3" },
+    { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'", specifier = "==13.0" },
     { name = "pyobjc-framework-usernotifications", marker = "sys_platform == 'darwin'", specifier = "==13.0" },
     { name = "pywebview", specifier = ">=6.2.1" },
     { name = "tomlkit", specifier = ">=0.15.2" },

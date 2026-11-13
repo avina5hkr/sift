@@ -6,6 +6,7 @@ error, and a 256 px JPEG thumbnail in the cache folder. Backup files are only op
 reading. Resumable: a content is done once its `analysis_version` reaches `VERSION`.
 """
 
+import json
 import logging
 import mimetypes
 import re
@@ -17,11 +18,13 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from sift.analysis.phash import hashes
+from sift.analysis.video import probe
 from sift.core.db import Database
 
 log = logging.getLogger("sift.analysis")
 
-VERSION = 1
+VERSION = 2  # 1: index (stage A); 2: perceptual hashes and video fingerprints (C, E)
 THUMB_PX = 256
 Image.MAX_IMAGE_PIXELS = 400_000_000  # big panoramas are real photos, not decompression bombs
 
@@ -64,10 +67,13 @@ _RENDERS = threading.BoundedSemaphore(2)  # big images decode at most two at a t
 _ROTATED = {5, 6, 7, 8}  # EXIF orientations that swap width and height
 
 
-def render_jpeg(source: Path, target: Path, size: int) -> tuple[int, int, str | None]:
+def render_jpeg(
+    source: Path, target: Path, size: int, *, with_hashes: bool = False
+) -> tuple[int, int, str | None, tuple[int, int] | None]:
     """Write a JPEG of `source` at most `size` px on its long edge to `target` (in the cache).
 
-    Returns the image's true width and height (after EXIF orientation) and its format. JPEGs
+    Returns the image's true width and height (after EXIF orientation), its format and, when
+    asked, its (dHash, pHash) taken from the oriented, reduced image. JPEGs
     are decoded at a reduced scale (draft mode), so a 100-megapixel photo costs a few MB. The
     file is written under a unique temporary name and renamed, so concurrent renders of the same
     content never collide. `source` is only read.
@@ -84,6 +90,7 @@ def render_jpeg(source: Path, target: Path, size: int) -> tuple[int, int, str | 
         img.thumbnail((size, size))
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
+        found = hashes(img) if with_hashes else None
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -91,7 +98,7 @@ def render_jpeg(source: Path, target: Path, size: int) -> tuple[int, int, str | 
             tmp.replace(target)
         finally:
             tmp.unlink(missing_ok=True)
-    return width, height, fmt
+    return width, height, fmt, found
 
 
 def index_file(
@@ -115,8 +122,12 @@ def index_file(
         with Image.open(path) as raw:
             exif = raw.getexif()
             out["has_camera_exif"] = int(bool(exif.get(_EXIF_MAKE) or exif.get(_EXIF_MODEL)))
-        width, height, fmt = render_jpeg(path, thumb_path(cache, digest), THUMB_PX)
+        width, height, fmt, found = render_jpeg(
+            path, thumb_path(cache, digest), THUMB_PX, with_hashes=True
+        )
         out["width"], out["height"] = width, height
+        if found is not None:
+            out["dhash"], out["phash"] = found
         out["mime"] = Image.MIME.get(fmt or "", mime)
     except Exception as e:  # truncated, corrupt or not an image after all
         log.info("Could not read image %s: %s", path.name, e)
@@ -125,6 +136,47 @@ def index_file(
     if not out["is_screenshot"] and not out["has_camera_exif"]:
         out["is_screenshot"] = int(screenshot_by_size(width, height, screens))
     return out
+
+
+_EMPTY: dict[str, object] = {
+    "mime": None,
+    "width": None,
+    "height": None,
+    "has_camera_exif": 0,
+    "is_screenshot": 0,
+    "unreadable": 0,
+    "dhash": None,
+    "phash": None,
+    "duration_ms": None,
+    "vframes": None,
+}
+
+
+def index_video(path: Path, digest: str, cache: Path) -> dict[str, object]:
+    """Duration, size and the five-frame fingerprint; the 50 % frame becomes the thumbnail."""
+    mime = mimetypes.guess_type(path.name, strict=False)[0]
+    info = probe(path)
+    if info is None:
+        return {"mime": mime, "unreadable": 1}
+    if info.poster is not None:
+        target = thumb_path(cache, digest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        thumb = info.poster.copy()
+        thumb.thumbnail((THUMB_PX, THUMB_PX))
+        tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            thumb.convert("RGB").save(tmp, "JPEG", quality=82)
+            tmp.replace(target)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return {
+        "mime": mime,
+        "width": info.width,
+        "height": info.height,
+        "duration_ms": info.duration_ms,
+        "vframes": json.dumps(list(info.frames)),
+        "dhash": info.frames[len(info.frames) // 2],  # the middle frame stands for the video
+    }
 
 
 def pending(db: Database, dest_ids: set[int] | None = None) -> list[tuple[str, str, str, str]]:
@@ -177,28 +229,29 @@ def run_index(
             ]
         if kinds[digest] == "image":
             cols = index_file(path, digest, phone_paths, screens, cache)
+        elif kinds[digest] == "video":
+            cols = index_video(path, digest, cache)
         else:
-            cols = {
-                "mime": mimetypes.guess_type(path.name, strict=False)[0],
-                "unreadable": 0,
-                "width": None,
-                "height": None,
-                "has_camera_exif": 0,
-                "is_screenshot": 0,
-            }
+            cols = {"mime": mimetypes.guess_type(path.name, strict=False)[0], "unreadable": 0}
         stats.indexed += 1
-        stats.unreadable += cols["unreadable"] == 1
+        stats.unreadable += cols.get("unreadable") == 1
+        values = {**_EMPTY, **cols}
         with db.tx() as conn:
             conn.execute(
                 "UPDATE content SET mime = ?, width = ?, height = ?, has_camera_exif = ?, "
-                "is_screenshot = ?, unreadable = ?, analysis_version = ? WHERE hash = ?",
+                "is_screenshot = ?, unreadable = ?, dhash = ?, phash = ?, duration_ms = ?, "
+                "vframes = ?, analysis_version = ? WHERE hash = ?",
                 (
-                    cols["mime"],
-                    cols["width"],
-                    cols["height"],
-                    cols["has_camera_exif"],
-                    cols["is_screenshot"],
-                    cols["unreadable"],
+                    values["mime"],
+                    values["width"],
+                    values["height"],
+                    values["has_camera_exif"],
+                    values["is_screenshot"],
+                    values["unreadable"],
+                    values["dhash"],
+                    values["phash"],
+                    values["duration_ms"],
+                    values["vframes"],
                     VERSION,
                     digest,
                 ),

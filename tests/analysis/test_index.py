@@ -197,7 +197,7 @@ def test_big_jpegs_render_small_and_report_their_true_size(tmp_path) -> None:
 
     src = tmp_path / "big.jpg"
     Image.new("RGB", (6000, 4000), (1, 2, 3)).save(src, "JPEG")
-    w, h, fmt = render_jpeg(src, tmp_path / "out.jpg", 256)
+    w, h, fmt, _hashes = render_jpeg(src, tmp_path / "out.jpg", 256)
     assert (w, h, fmt) == (6000, 4000, "JPEG")
     with Image.open(tmp_path / "out.jpg") as out:
         assert max(out.size) <= 256

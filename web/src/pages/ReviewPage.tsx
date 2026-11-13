@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { ReasonButton } from '../components/backup/ReasonButton'
 import { GroupRow } from '../components/cleanup/GroupRow'
 import { Lightbox } from '../components/cleanup/Lightbox'
@@ -9,7 +9,7 @@ import {
   ESTIMATED_ROW_H,
   rowHeight,
 } from '../components/cleanup/layout'
-import { useReview } from '../components/cleanup/useReview'
+import { type ReviewTab, useReview } from '../components/cleanup/useReview'
 import { formatBytes, formatCount } from '../lib/format'
 import type { ReviewGroup, ReviewItem, ReviewSort } from '../lib/types'
 import { buildOffsets, visibleRange } from '../lib/windowing'
@@ -19,18 +19,44 @@ const SORTS: { value: ReviewSort; label: string }[] = [
   { value: 'date', label: 'Newest first' },
   { value: 'group', label: 'Most copies first' },
 ]
-const COMING_SOON = ['Near-duplicates', 'Junk', 'Similar shots']
+const COMING_SOON = ['Junk']
+const TABS: { value: ReviewTab; label: string }[] = [
+  { value: 'exact', label: 'Exact duplicates' },
+  { value: 'near', label: 'Near-duplicates' },
+  { value: 'similar', label: 'Similar shots' },
+]
 const FALLBACK_W = 1000
 const FALLBACK_H = 700
 
 export default function ReviewPage() {
+  const [params, setParams] = useSearchParams()
+  const wanted = params.get('tab')
+  const tab: ReviewTab = wanted === 'near' || wanted === 'similar' ? wanted : 'exact'
   const [sort, setSort] = useState<ReviewSort>('size')
-  return <Review key={sort} sort={sort} onSort={setSort} />
+  return (
+    <Review
+      key={`${tab}-${sort}`}
+      tab={tab}
+      onTab={(t) => setParams(t === 'exact' ? {} : { tab: t })}
+      sort={sort}
+      onSort={setSort}
+    />
+  )
 }
 
-function Review({ sort, onSort }: { sort: ReviewSort; onSort: (s: ReviewSort) => void }) {
+function Review({
+  tab,
+  onTab,
+  sort,
+  onSort,
+}: {
+  tab: ReviewTab
+  onTab: (t: ReviewTab) => void
+  sort: ReviewSort
+  onSort: (s: ReviewSort) => void
+}) {
   const navigate = useNavigate()
-  const review = useReview(sort)
+  const review = useReview(sort, tab)
   const { groups, flat, copies, isChecked, setChecked, setAll, loadMore } = review
 
   // -- the window: which rows are drawn
@@ -212,9 +238,20 @@ function Review({ sort, onSort }: { sort: ReviewSort; onSort: (s: ReviewSort) =>
           ‹ Cleanup
         </button>
         <div role="tablist" aria-label="What to review" className="flex gap-1">
-          <button role="tab" aria-selected="true" type="button" className="rounded-md bg-neutral-200 px-3 py-1.5 text-sm font-medium dark:bg-neutral-800">
-            Exact duplicates
-          </button>
+          {TABS.map((t) => (
+            <button
+              key={t.value}
+              role="tab"
+              aria-selected={t.value === tab}
+              type="button"
+              onClick={() => onTab(t.value)}
+              className={`rounded-md px-3 py-1.5 text-sm ${
+                t.value === tab ? 'bg-neutral-200 font-medium dark:bg-neutral-800' : 'hover:bg-neutral-100 dark:hover:bg-neutral-800'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
           {COMING_SOON.map((t) => (
             <button
               key={t}
