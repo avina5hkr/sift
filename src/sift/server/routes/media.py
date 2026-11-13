@@ -10,9 +10,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse
-from PIL import Image, ImageOps
 
-from sift.analysis.index import THUMB_PX, thumb_path
+from sift.analysis.index import THUMB_PX, render_jpeg, thumb_path
+from sift.backup.run import usable_dests
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 
@@ -25,29 +25,20 @@ def _source(ctx: Ctx, phone_file_id: int) -> tuple[str, Path, str | None]:
     """(content hash, a readable backup copy, mime) for a phone file."""
     with ctx.db.read() as conn:
         rows = conn.execute(
-            "SELECT p.content_hash, d.root_path, r.rel_path, c.mime FROM phone_file p "
+            "SELECT p.content_hash, d.id, r.rel_path, c.mime FROM phone_file p "
             "JOIN replica r ON r.content_hash = p.content_hash "
             "JOIN destination d ON d.id = r.dest_id JOIN content c ON c.hash = p.content_hash "
             "WHERE p.id = ? ORDER BY CASE d.kind WHEN 'mac' THEN 0 ELSE 1 END",
             (phone_file_id,),
         ).fetchall()
-    for digest, root, rel, mime in rows:
-        path = Path(root).expanduser() / rel
+    usable = {d.id: d.root for d in usable_dests(ctx)}  # drives found by UUID, plugged in now
+    for digest, dest_id, rel, mime in rows:
+        if dest_id not in usable:
+            continue
+        path = usable[dest_id] / rel
         if path.is_file():
             return str(digest), path, mime
     raise ApiError(404, "not_found", "There is no backed-up copy of this file to show.")
-
-
-def _render(source: Path, target: Path, size: int) -> None:
-    with Image.open(source) as raw:
-        img = ImageOps.exif_transpose(raw)
-        img.thumbnail((size, size))
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".tmp")
-        img.save(tmp, "JPEG", quality=85)
-        tmp.replace(target)
 
 
 def _image(ctx: Ctx, phone_file_id: int, target_of: str, size: int) -> FileResponse:
@@ -59,7 +50,7 @@ def _image(ctx: Ctx, phone_file_id: int, target_of: str, size: int) -> FileRespo
     )
     if not target.is_file():
         try:
-            _render(path, target, size)
+            render_jpeg(path, target, size)
         except Exception as e:  # not an image, or a damaged one
             raise ApiError(415, "no_preview", "Sift cannot show a preview of this file.") from e
     return FileResponse(target, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})

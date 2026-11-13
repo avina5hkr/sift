@@ -70,6 +70,10 @@ def rebuild_exact(db: Database, device_id: int) -> int:
             "(SELECT id FROM phone_file WHERE device_id = ?)",
             (device_id,),
         )
+        conn.executemany(  # a file that became a keeper loses any old tick
+            "DELETE FROM selection WHERE phone_file_id = ?",
+            [(g.keeper,) for g in groups],
+        )
         conn.executemany(
             "INSERT INTO candidate (phone_file_id, tab, tier, reasons, group_id, role, "
             "default_checked) VALUES (?, ?, ?, ?, ?, ?, ?) "
@@ -103,7 +107,8 @@ def select_all_in_tab(db: Database, device_id: int, tab: str, checked: bool) -> 
             for r in conn.execute(
                 "SELECT c.phone_file_id FROM candidate c "
                 "JOIN phone_file p ON p.id = c.phone_file_id "
-                "WHERE c.tab = ? AND p.device_id = ? AND IFNULL(c.role, '') != 'keeper'",
+                "WHERE c.tab = ? AND p.device_id = ? AND p.present = 1 "
+                "AND IFNULL(c.role, '') != 'keeper'",
                 (tab, device_id),
             )
         ]

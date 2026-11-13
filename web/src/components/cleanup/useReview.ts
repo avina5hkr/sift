@@ -100,6 +100,11 @@ export function useReview(sort: ReviewSort) {
       post('/api/selection', { all_in_tab: TAB, checked })
         .then(async () => {
           epoch.current += 1
+          // The server now holds `checked` for every copy, including any page that loaded while
+          // the request was on its way with the old values.
+          const done = new Map(selRef.current)
+          for (const id of done.keys()) done.set(id, checked)
+          commit(done)
           let last: number | null
           do {
             last = cursor.current

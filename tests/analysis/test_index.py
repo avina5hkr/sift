@@ -139,3 +139,89 @@ def test_cleanup_and_media_api_end_to_end(rig: Rig) -> None:
     assert client.get(f"/api/media/{copy_id}/thumb?token=wrong").status_code == 401
     assert client.get("/api/media/999999/thumb", headers=H).status_code == 404
     assert client.get("/api/media/..%2F..%2Fetc/thumb", headers=H).status_code in (404, 422)
+
+
+def test_a_keeper_gone_from_the_phone_never_breaks_review(rig: Rig) -> None:
+    add_photos(rig)
+    backed_up(rig, ["Camera", "WhatsApp media"])
+    rig.ctx.tasks = TaskRunner(rig.ctx, describe)
+    client = client_for(rig.ctx)
+    client.post("/api/cleanup/analyze", headers=H)
+    assert rig.ctx.tasks.wait(30)
+    rig.transport.phone.modify(CAM, b"changed bytes", 1_700_000_100)  # the keeper changed
+    rig.transport.phone.remove(WA_RECV)
+    backed_up(rig, ["Camera", "WhatsApp media"])  # the backup rebuilds the groups
+    page = client.get("/api/cleanup/candidates?tab=exact", headers=H)
+    assert page.status_code == 200
+    paths = {c["path"] for g in page.json()["groups"] for c in [g["keeper"], *g["copies"]]}
+    assert WA_RECV not in paths and CAM not in paths  # nothing stale; SENT has no copy left
+    card = client.get("/api/cleanup/summary", headers=H).json()["cards"][0]
+    assert card["files"] == sum(len(g["copies"]) for g in page.json()["groups"])
+
+
+def test_concurrent_thumbnail_requests_for_one_content_all_succeed(rig: Rig) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    add_photos(rig)
+    backed_up(rig, ["Camera", "WhatsApp media"])
+    client = client_for(rig.ctx)
+    with rig.ctx.db.read() as conn:
+        ids = [
+            r[0]
+            for r in conn.execute(
+                "SELECT id FROM phone_file WHERE remote_path IN (?, ?, ?)", (CAM, WA_SENT, WA_RECV)
+            )
+        ]
+    with ThreadPoolExecutor(8) as pool:
+        codes = list(
+            pool.map(lambda i: client.get(f"/api/media/{i}/thumb", headers=H).status_code, ids * 10)
+        )
+    assert set(codes) == {200}
+
+
+def test_media_needs_the_host_and_never_takes_the_query_token_elsewhere(rig: Rig) -> None:
+    add_photos(rig)
+    backed_up(rig, ["Camera"])
+    client = client_for(rig.ctx)
+    with rig.ctx.db.read() as conn:
+        pid = conn.execute("SELECT id FROM phone_file WHERE remote_path = ?", (CAM,)).fetchone()[0]
+    assert client.get(
+        f"/api/media/{pid}/thumb", headers={**H, "Host": "evil.example"}
+    ).status_code in (400, 403)
+    assert client.get("/api/cleanup/summary?token=t0k").status_code == 401
+    assert client.head(f"/api/media/{pid}/thumb?token=t0k").status_code == 401  # HEAD: header only
+
+
+def test_big_jpegs_render_small_and_report_their_true_size(tmp_path) -> None:
+    from sift.analysis.index import render_jpeg
+
+    src = tmp_path / "big.jpg"
+    Image.new("RGB", (6000, 4000), (1, 2, 3)).save(src, "JPEG")
+    w, h, fmt = render_jpeg(src, tmp_path / "out.jpg", 256)
+    assert (w, h, fmt) == (6000, 4000, "JPEG")
+    with Image.open(tmp_path / "out.jpg") as out:
+        assert max(out.size) <= 256
+
+
+def test_a_drive_not_found_by_uuid_is_never_read(rig: Rig, tmp_path) -> None:
+    from sift.backup.replicator import Dest, Replicator
+    from tests.backup.test_run import FakeSsd
+
+    add_photos(rig)
+    backed_up(rig, ["Camera"])
+    ssd = FakeSsd(rig, tmp_path / "ssd" / "backup")
+    from sift.backup.run import mac_target
+
+    mac = mac_target(rig.ctx.db, rig.ctx.config)
+    Replicator(rig.ctx.db).replicate(
+        Dest(mac.dest_id, "mac", mac.root),
+        Dest(ssd._on.dest_id, "ssd", tmp_path / "ssd" / "backup"),
+    )
+    import shutil
+
+    shutil.rmtree(mac.root)  # only the SSD copy is left, and that SSD is not plugged in
+    ssd.connected = False
+    rig.ctx.ssd = ssd  # type: ignore[assignment]
+    with rig.ctx.db.read() as conn:
+        pid = conn.execute("SELECT id FROM phone_file WHERE remote_path = ?", (CAM,)).fetchone()[0]
+    assert client_for(rig.ctx).get(f"/api/media/{pid}/thumb", headers=H).status_code == 404

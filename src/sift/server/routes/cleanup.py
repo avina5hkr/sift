@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from sift.analysis.index import run_index
 from sift.backup.phonepaths import shown
+from sift.backup.run import usable_dests
 from sift.cleanup.candidates import (
     is_checked,
     rebuild_exact,
@@ -75,6 +76,7 @@ def analyze(ctx: Ctx) -> TaskOut:
             ctx.db,
             ctx.paths.cache,
             screens,
+            dest_ids={d.id for d in usable_dests(ctx)},
             should_stop=lambda: control.should_stop,
             on_file=control.progress,
         )
@@ -152,12 +154,7 @@ def summary(ctx: Ctx) -> CleanupSummary:
                 "AND hash IN (SELECT content_hash FROM replica)"
             ).fetchone()[0]
         )
-        exact = conn.execute(
-            "SELECT count(DISTINCT c.group_id), count(*), IFNULL(sum(p.size), 0) FROM candidate c "
-            "JOIN phone_file p ON p.id = c.phone_file_id WHERE c.tab = 'exact' AND c.role = 'copy' "
-            "AND p.device_id = ?",
-            (device_id or -1,),
-        ).fetchone()
+    groups = exact_groups_now(ctx, device_id) if device_id is not None else []
     for path, size, kind in rows:
         storage[category(shown(str(path)), str(kind))] += int(size)
     return CleanupSummary(
@@ -165,7 +162,14 @@ def summary(ctx: Ctx) -> CleanupSummary:
         analyzed_at=int(at[0]) if at else None,
         new_since=new_since,
         storage=storage,
-        cards=[Card(tab="exact", groups=int(exact[0]), files=int(exact[1]), bytes=int(exact[2]))],
+        cards=[
+            Card(
+                tab="exact",
+                groups=len(groups),
+                files=sum(len(g.copies) for g in groups),
+                bytes=sum(g.reclaimable for g in groups),
+            )
+        ],
     )
 
 
@@ -197,11 +201,10 @@ class CandidatesOut(BaseModel):
     next_cursor: int | None
 
 
-@router.get("/cleanup/candidates")
-def candidates(ctx: Ctx, tab: str = "exact", sort: str = "size", cursor: int = 0) -> CandidatesOut:
-    if tab != "exact":
-        return CandidatesOut(tab=tab, groups=[], total_groups=0, next_cursor=None)
-    device_id = _device(ctx)
+def exact_groups_now(ctx: Ctx, device_id: int) -> list[GroupOut]:
+    """The exact-duplicate groups as the phone is now: only present files whose content is
+    still the keeper's; a group whose keeper is gone or changed is left out until the next
+    rebuild (every backup run rebuilds them)."""
     with ctx.db.read() as conn:
         rows = conn.execute(
             "SELECT c.group_id, p.id, p.remote_path, p.size, p.mtime, p.content_hash, c.role, "
@@ -209,7 +212,8 @@ def candidates(ctx: Ctx, tab: str = "exact", sort: str = "size", cursor: int = 0
             "FROM candidate c JOIN phone_file p ON p.id = c.phone_file_id "
             "LEFT JOIN selection s ON s.phone_file_id = p.id "
             "LEFT JOIN content t ON t.hash = p.content_hash "
-            "WHERE c.tab = 'exact' AND p.device_id = ? ORDER BY c.group_id, c.role DESC, p.id",
+            "WHERE c.tab = 'exact' AND p.device_id = ? AND p.present = 1 "
+            "AND p.content_hash IS NOT NULL ORDER BY c.group_id, c.role DESC, p.id",
             (device_id,),
         ).fetchall()
     groups: dict[int, GroupOut] = {}
@@ -230,10 +234,18 @@ def candidates(ctx: Ctx, tab: str = "exact", sort: str = "size", cursor: int = 0
             groups[gid] = GroupOut(
                 group_id=gid, content_hash=digest, keeper=item, copies=[], reclaimable=0
             )
-        elif gid in groups:
+        elif gid in groups and digest == groups[gid].content_hash:
             groups[gid].copies.append(item)
             groups[gid].reclaimable += size
-    ordered = list(groups.values())
+    return [g for g in groups.values() if g.copies]
+
+
+@router.get("/cleanup/candidates")
+def candidates(ctx: Ctx, tab: str = "exact", sort: str = "size", cursor: int = 0) -> CandidatesOut:
+    if tab != "exact":
+        return CandidatesOut(tab=tab, groups=[], total_groups=0, next_cursor=None)
+    device_id = _device(ctx)
+    ordered = exact_groups_now(ctx, device_id)
     if sort == "date":
         ordered.sort(key=lambda g: -g.keeper.mtime)
     elif sort == "group":

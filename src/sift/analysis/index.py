@@ -9,6 +9,8 @@ reading. Resumable: a content is done once its `analysis_version` reaches `VERSI
 import logging
 import mimetypes
 import re
+import threading
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,15 +60,38 @@ def screenshot_by_size(width: int, height: int, screens: Sequence[tuple[int, int
     return any({width, height} == {w, h} for w, h in screens)
 
 
-def _write_thumb(img: Image.Image, target: Path) -> None:
-    thumb = img.copy()
-    thumb.thumbnail((THUMB_PX, THUMB_PX))
-    if thumb.mode not in ("RGB", "L"):
-        thumb = thumb.convert("RGB")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
-    thumb.save(tmp, "JPEG", quality=82)
-    tmp.replace(target)
+_RENDERS = threading.BoundedSemaphore(2)  # big images decode at most two at a time
+_ROTATED = {5, 6, 7, 8}  # EXIF orientations that swap width and height
+
+
+def render_jpeg(source: Path, target: Path, size: int) -> tuple[int, int, str | None]:
+    """Write a JPEG of `source` at most `size` px on its long edge to `target` (in the cache).
+
+    Returns the image's true width and height (after EXIF orientation) and its format. JPEGs
+    are decoded at a reduced scale (draft mode), so a 100-megapixel photo costs a few MB. The
+    file is written under a unique temporary name and renamed, so concurrent renders of the same
+    content never collide. `source` is only read.
+    """
+    with _RENDERS, Image.open(source) as raw:
+        width, height = raw.size
+        orientation = raw.getexif().get(0x0112, 1)
+        if orientation in _ROTATED:
+            width, height = height, width
+        fmt = raw.format
+        if fmt == "JPEG":
+            raw.draft("RGB", (size, size))
+        img = ImageOps.exif_transpose(raw)
+        img.thumbnail((size, size))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            img.save(tmp, "JPEG", quality=82)
+            tmp.replace(target)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return width, height, fmt
 
 
 def index_file(
@@ -90,12 +115,9 @@ def index_file(
         with Image.open(path) as raw:
             exif = raw.getexif()
             out["has_camera_exif"] = int(bool(exif.get(_EXIF_MAKE) or exif.get(_EXIF_MODEL)))
-            img = ImageOps.exif_transpose(raw)
-            img.load()
-            width, height = img.size
-            out["width"], out["height"] = width, height
-            out["mime"] = Image.MIME.get(raw.format or "", mime)
-            _write_thumb(img, thumb_path(cache, digest))
+        width, height, fmt = render_jpeg(path, thumb_path(cache, digest), THUMB_PX)
+        out["width"], out["height"] = width, height
+        out["mime"] = Image.MIME.get(fmt or "", mime)
     except Exception as e:  # truncated, corrupt or not an image after all
         log.info("Could not read image %s: %s", path.name, e)
         out["unreadable"] = 1
@@ -105,18 +127,19 @@ def index_file(
     return out
 
 
-def pending(db: Database) -> list[tuple[str, str, str, str]]:
+def pending(db: Database, dest_ids: set[int] | None = None) -> list[tuple[str, str, str, str]]:
     """(hash, kind, root, rel_path) for contents not indexed yet, the Mac copy first."""
     with db.read() as conn:
         return [
             (str(r[0]), str(r[1]), str(r[2]), str(r[3]))
             for r in conn.execute(
-                "SELECT c.hash, c.kind, d.root_path, r.rel_path FROM content c "
+                "SELECT c.hash, c.kind, d.root_path, r.rel_path, d.id FROM content c "
                 "JOIN replica r ON r.content_hash = c.hash JOIN destination d ON d.id = r.dest_id "
                 "WHERE c.analysis_version < ? "
                 "ORDER BY c.hash, CASE d.kind WHEN 'mac' THEN 0 ELSE 1 END",
                 (VERSION,),
             )
+            if dest_ids is None or int(r[4]) in dest_ids  # only drives found by UUID now
         ]
 
 
@@ -125,12 +148,13 @@ def run_index(
     cache: Path,
     screens: Sequence[tuple[int, int]] = (),
     *,
+    dest_ids: set[int] | None = None,
     should_stop: Callable[[], bool] = lambda: False,
     on_file: Callable[[int, int], None] | None = None,
 ) -> IndexStats:
     """Index every content not indexed yet. Images are decoded; other kinds are recorded as is."""
     stats = IndexStats()
-    rows = pending(db)
+    rows = pending(db, dest_ids)
     hashes = list(dict.fromkeys(r[0] for r in rows))
     copies: dict[str, list[Path]] = {}
     kinds: dict[str, str] = {}
