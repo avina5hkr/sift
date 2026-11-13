@@ -94,15 +94,8 @@ def image_pairs(items: Sequence[Item], cfg: AnalysisConfig) -> set[tuple[str, st
     for members in buckets.values():
         if len(members) < 2:
             continue
-        if len(members) > BUCKET_MAX:  # a second pass on pHash bands keeps big buckets cheap
-            sub: dict[int, list[Item]] = {}
-            for m in members:
-                if m.phash is not None:
-                    sub.setdefault(to_unsigned(m.phash) >> 56, []).append(m)
-            groups = list(sub.values())
-        else:
-            groups = [members]
-        for group in groups:
+        # Every pair in a bucket is compared; in a big bucket the cheap pHash test runs first.
+        for group in [members]:
             for i, a in enumerate(group):
                 for b in group[i + 1 :]:
                     if a.hash == b.hash or a.kind != b.kind:
@@ -110,9 +103,9 @@ def image_pairs(items: Sequence[Item], cfg: AnalysisConfig) -> set[tuple[str, st
                     key = (a.hash, b.hash) if a.hash < b.hash else (b.hash, a.hash)
                     if key in pairs or not _aspect_ok(a, b, cfg.neardup_aspect_tol):
                         continue
-                    if distance(a.dhash, b.dhash) > dhash_max:
-                        continue
                     if a.phash is None or b.phash is None or distance(a.phash, b.phash) > phash_max:
+                        continue
+                    if distance(a.dhash, b.dhash) > dhash_max:
                         continue
                     pairs.add(key)
     return pairs
@@ -210,26 +203,38 @@ def find_groups(items: Sequence[Item], cfg: AnalysisConfig) -> list[NearGroup]:
     by_hash = {i.hash: i for i in items}
     images = [i for i in items if i.kind == "image"]
     videos = [i for i in items if i.kind == "video" and i.frames]
+    pairs = image_pairs(images, cfg) | video_pairs(videos, cfg)
     uf = UnionFind()
-    for a, b in image_pairs(images, cfg) | video_pairs(videos, cfg):
+    for a, b in pairs:
         uf.union(a, b)
     clusters: dict[str, list[Item]] = {}
     for digest in list(uf.parent):
         clusters.setdefault(uf.find(digest), []).append(by_hash[digest])
     groups = []
     for members in clusters.values():
-        if len(members) < 2:
-            continue
-        ranked = sorted(members, key=keeper_score, reverse=True)
-        groups.append(
-            NearGroup(
-                ranked[0].kind,
-                group_type(members),
-                ranked[0].hash,
-                tuple(m.hash for m in ranked[1:]),
-            )
-        )
+        # A star around each keeper: a member joins only when it matches the keeper itself, so
+        # a chain A~B~C never puts two unlike pictures (A and C) in one group.
+        left = sorted(members, key=lambda m: (keeper_score(m), m.hash), reverse=True)
+        while len(left) >= 2:
+            keeper, rest = left[0], left[1:]
+            close = [m for m in rest if _pair(keeper.hash, m.hash) in pairs]
+            if close:
+                group = [keeper, *close]
+                groups.append(
+                    NearGroup(
+                        keeper.kind,
+                        group_type(group),
+                        keeper.hash,
+                        tuple(m.hash for m in close),
+                    )
+                )
+            taken = {keeper.hash, *(m.hash for m in close)}
+            left = [m for m in rest if m.hash not in taken]
     return groups
+
+
+def _pair(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
 
 
 def store_groups(db: Database, groups: Sequence[NearGroup]) -> list[int]:

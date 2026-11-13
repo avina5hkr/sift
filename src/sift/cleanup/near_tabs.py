@@ -63,8 +63,9 @@ def tab_groups(db: Database, device_id: int, tab: str) -> list[TabGroup]:
         keeper = _item(best, checked=False)
         items = []
         for r in copies.get(gid, []):
-            camera_video = r[3] == "video" and keeper_rank(str(r[8]), 0)[0] == 0
-            if camera_video:
+            if tab == "near" and keeper_rank(str(r[8]), 0)[0] <= 1:
+                continue  # camera, Pictures and DCIM originals are never suggested in Near
+            if r[3] == "video" and keeper_rank(str(r[8]), 0)[0] == 0:
                 continue  # camera-origin videos are never suggested
             close = (
                 tab == "near"

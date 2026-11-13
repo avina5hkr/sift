@@ -342,6 +342,10 @@ class SelectionOut(BaseModel):
 @router.post("/selection")
 def selection(ctx: Ctx, body: SelectionRequest) -> SelectionOut:
     device_id = _device(ctx)
+    if body.all_in_tab in ("near", "similar"):
+        ids = selectable_ids(ctx.db, device_id, body.all_in_tab)
+        set_selection(ctx.db, ids, body.checked)
+        return SelectionOut(changed=len(ids))
     if body.all_in_tab is not None:
         return SelectionOut(
             changed=select_all_in_tab(ctx.db, device_id, body.all_in_tab, body.checked)

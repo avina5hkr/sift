@@ -188,7 +188,7 @@ Migrations: 0001_init.sql, 0002_backup.sql, 0003_run_summary.sql, 0004_run_summa
 - `web/src/components/cleanup/StorageBar.tsx`: StorageBar
 - `web/src/components/cleanup/Tile.tsx`: Tile
 - `web/src/components/cleanup/layout.ts`: HEADER_H, PAD, KEEPER_W, KEEPER_BLOCK_H, TILE, GAP, COLUMN_GAP, BORDER, ESTIMATED_ROW_H, columnsFor, rowHeight, copyTop
-- `web/src/components/cleanup/useReview.ts`: useReview
+- `web/src/components/cleanup/useReview.ts`: ReviewTab, useReview
 - `web/src/lib/api.ts`: ApiError, apiFetch, withToken
 - `web/src/lib/backupState.ts`: ScreenState, MIN_MAC_FREE_BYTES, isConnected, isRunning, screenState, disabledReason
 - `web/src/lib/events.ts`: Toast, useEventStore, dismissToast, startEventStream

@@ -46,6 +46,15 @@ def _to_pil(cg: object) -> Image.Image:
 
 def probe(path: Path) -> VideoInfo | None:
     try:
+        import objc  # type: ignore[import-not-found,import-untyped,unused-ignore]
+    except ImportError:  # pragma: no cover - installed on macOS
+        return None
+    with objc.autorelease_pool():  # frees each video's frames at once, not at thread exit
+        return _probe(path)
+
+
+def _probe(path: Path) -> VideoInfo | None:
+    try:
         import AVFoundation  # type: ignore[import-not-found,import-untyped,unused-ignore]
         import CoreMedia  # type: ignore[import-not-found,import-untyped,unused-ignore]
         import Quartz  # type: ignore[import-not-found,import-untyped,unused-ignore]  # noqa: F401  (first: bridges CGImageRef)

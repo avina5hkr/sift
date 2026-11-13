@@ -137,6 +137,7 @@ def test_near_and_similar_tabs_over_the_api(rig) -> None:
     assert similar and not any(
         c["checked"] for g in similar for c in g["copies"]
     )  # never pre-ticked
+    assert all(not c["path"].startswith("/sdcard/DCIM/") for g in near for c in g["copies"])
     wa_id = next(c["id"] for c in group["copies"] if c["path"] == wa)
     assert (
         client.post("/api/selection", headers=H, json={"ids": [wa_id], "checked": True}).json()[
@@ -153,3 +154,37 @@ def test_near_and_similar_tabs_over_the_api(rig) -> None:
     )
     cards = {c["tab"]: c for c in client.get("/api/cleanup/summary", headers=H).json()["cards"]}
     assert cards["near"]["files"] >= 1 and cards["similar"]["groups"] >= 1
+
+    # Select none / all on the Near tab reach the server and survive a reload.
+    none = client.post("/api/selection", headers=H, json={"all_in_tab": "near", "checked": False})
+    assert none.json()["changed"] >= 1
+    again = client.get("/api/cleanup/candidates?tab=near", headers=H).json()["groups"]
+    assert not any(c["checked"] for g in again for c in g["copies"])
+    # Analyze again keeps the owner's choices.
+    client.post("/api/cleanup/analyze", headers=H)
+    assert rig.ctx.tasks.wait(60)
+    again = client.get("/api/cleanup/candidates?tab=near", headers=H).json()["groups"]
+    assert not any(c["checked"] for g in again for c in g["copies"])
+
+
+def _img(h: str, dh: int, ph: int) -> Item:
+    return Item(h, "image", 100, 100, 1000, dh, ph, False, origins={"whatsapp_received"})
+
+
+def test_a_chain_never_joins_two_unlike_pictures() -> None:
+    a = _img("a", 0, 0)
+    b = _img("b", 0b111111, 0)  # 6 from a
+    c = _img("c", 0b111111_111111, 0)  # 6 from b, 12 from a
+    by = {i.hash: i for i in (a, b, c)}
+    for order in ([a, b, c], [c, b, a], [b, a, c]):
+        for g in find_groups(order, AnalysisConfig()):
+            for copy in g.copies:  # every copy matches its keeper itself, never via a chain
+                assert distance(by[g.keeper].dhash, by[copy].dhash) <= 6
+
+
+def test_big_buckets_keep_true_pairs() -> None:
+    crowd = [_img(f"x{i:04d}", i << 40, (1 << 63) - 1 - i) for i in range(600)]  # same low band
+    near_a = _img("pa", 0, 0b1)
+    near_b = _img("pb", 0b111111, 0b11)  # dHash 6, pHash 1 apart
+    groups = find_groups([*crowd, near_a, near_b], AnalysisConfig())
+    assert any({g.keeper, *g.copies} >= {"pa", "pb"} for g in groups)
