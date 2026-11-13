@@ -35,3 +35,163 @@ export type StatusResponse = {
 
 // Shape of every API error body.
 export type ApiErrorBody = { code: string; message: string; detail: unknown }
+
+export type JobStateName =
+  | 'queued'
+  | 'scanning'
+  | 'awaiting_confirmation'
+  | 'pulling'
+  | 'paused'
+  | 'waiting_for_phone'
+  | 'stopping'
+  | 'done'
+  | 'failed'
+
+export type CurrentFile = { path: string; size: number; done: number }
+
+// Mirrors JobSnapshot.as_event (src/sift/core/jobs.py): the body of every `progress` event.
+export type JobEvent = {
+  job_id: number
+  type: string
+  state: JobStateName
+  sets: string[]
+  dry_run: boolean
+  files_done: number
+  bytes_done: number
+  files_total: number | null
+  bytes_total: number | null
+  duplicates_skipped: number
+  failed: number
+  current: string | null
+  current_files: CurrentFile[] // up to 3 files being copied now
+  speed_bps: number | null
+  eta_s: number | null
+  eta_basis: 'measured' | 'stored' | 'reference'
+  pause_requested: boolean
+  stopped: boolean
+  error: string | null
+  started_at: number | null
+  finished_at: number | null
+}
+
+export type ToastLevel = 'info' | 'warning' | 'error'
+export type ToastEvent = { level: ToastLevel; title: string; message: string }
+
+// Mirrors GET /api/backup/summary (src/sift/server/routes/backup.py).
+export type BackupSummary = {
+  job_id: number
+  sets: string[]
+  outcome: 'done' | 'stopped' | 'failed' | 'discarded'
+  started_at: number
+  finished_at: number
+  duration_s: number
+  new_files: number
+  duplicates_skipped: number
+  failed: number
+  moved_links: number
+  changed_files: number
+  bytes: number
+  warnings: string[]
+  error: string | null
+}
+
+export type FailedFile = {
+  id: number
+  path: string
+  size: number
+  set_name: string | null
+  attempts: number
+  reason: string
+}
+export type FailuresResponse = { count: number; files: FailedFile[] }
+
+export type ScanInfo = {
+  id: number
+  device_id: number | null
+  state: string
+  sets: string[]
+  started_at: number | null
+  finished_at: number | null
+  warnings: string[]
+  disappearance: Record<string, unknown>[]
+}
+
+export type SetStatus = {
+  name: string
+  enabled: boolean
+  on_phone: number
+  backed_up: number
+  pending: number
+}
+export type RecentFile = { path: string; size: number; at: number }
+
+// Mirrors GET /api/backup/overview.
+export type BackupOverview = {
+  phone_connected: boolean // false: the counts are empty because no phone is connected
+  sets: SetStatus[]
+  recent: RecentFile[]
+  pending_scan: ScanInfo | null
+  job: JobEvent | null
+}
+
+// First-run wizard: mirrors src/sift/server/routes/setup.py.
+export type SetupPhone = { uuid: string; model: string | null; last4: string | null; label: string | null }
+export type SetupState = {
+  complete: boolean
+  phone: SetupPhone | null
+  mac_root: string
+  device_label: string
+  suggested_label: string
+  ssd_volume_uuid: string
+}
+export type AdbState = {
+  status: 'ready' | 'missing' | 'broken'
+  version: string | null
+  message: string
+  download_bytes: number
+  download_host: string
+}
+export type AttachedPhone = {
+  ref: string // opaque; the serial number never reaches the window, only its last 4 characters
+  model: string | null
+  last4: string
+  ready: boolean
+  waiting_for_allow: boolean
+  stored: boolean
+}
+export type FolderCheck = {
+  path: string
+  ok: boolean
+  problem: string | null
+  exists: boolean
+  free_bytes: number | null
+}
+export type FolderSaved = { mac_root: string; device_label: string; free_bytes: number | null }
+export type SsdVolume = {
+  name: string
+  file_system: string
+  uuid: string
+  free_bytes: number | null
+  total_bytes: number | null
+  suitable: boolean
+  warning: string | null
+}
+export type SetNode = {
+  name: string
+  enabled: boolean
+  paths: string[]
+  files: number | null // null until a scan has seen the set
+  bytes: number | null
+}
+export type SetsTree = {
+  phone_connected: boolean
+  scanning: boolean
+  scan_job_id: number | null
+  sets: SetNode[]
+}
+export type ReaderTestResult = {
+  tested: boolean
+  readers: number | null
+  speed_bps: number | null
+  message: string
+}

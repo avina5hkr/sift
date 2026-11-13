@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from hypothesis import settings
 
+from sift.core import crashpoints
 from sift.core.context import AppContext
 from sift.core.db import Database
 from sift.core.events import EventBus
@@ -67,6 +68,13 @@ def anyio_backend() -> str:
 @pytest.fixture
 def bus() -> EventBus:
     return EventBus()
+
+
+@pytest.fixture(autouse=True)
+def _no_crashpoint_hook() -> Iterator[None]:
+    """A test that installs a crash-point hook never leaks it into the next test."""
+    yield
+    crashpoints.install(None)
 
 
 @pytest.fixture(autouse=True)

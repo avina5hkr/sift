@@ -29,12 +29,16 @@ from urllib.request import urlopen
 from sift.core.config import PhoneConfig
 from sift.core.paths import AppPaths
 from sift.core.proc import Runner, subprocess_runner
-from sift.device.adbutils_guard import install_no_spawn_guard
+from sift.device import adbwire
+from sift.device.transport import TransportError
 
 logger = logging.getLogger("sift.device")
 
 PLATFORM_TOOLS_URL = "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip"
 ADB_SERVER_HOST = "127.0.0.1"
+CODESIGN = "/usr/bin/codesign"
+GOOGLE_TEAM_ID = "EQHXZ8M8AV"  # Developer ID Application: Google LLC
+_CODESIGN_TIMEOUT = 30
 
 _VERSION_TIMEOUT = 10
 _START_SERVER_TIMEOUT = 10
@@ -47,6 +51,10 @@ _MAX_MEMBERS = 2000
 
 # One download at a time, however many requests arrive.
 _download_lock = threading.Lock()
+# Held while the managed platform-tools folder is swept or swapped, and while `locate` looks at
+# it (and may restore a set-aside copy), so `locate` never sees a swap half done. Unlike
+# `_download_lock` it is never held across the network fetch.
+_swap_lock = threading.Lock()
 
 MISSING_MESSAGE = (
     "adb was not found. Install Android platform-tools, or set phone.adb_path in config.toml."
@@ -109,8 +117,7 @@ def adb_server_version(
       trickles, sends something else, or hangs up mid-reply. Starting a server then could
       disturb another program's server, so callers must not run any adb program.
 
-    Speaks the adb host protocol directly over a socket and never starts anything: adbutils
-    would run an adb command line program when the connection fails.
+    Speaks the adb host protocol directly over a socket (`adbwire`) and never starts anything.
     """
     deadline = time.monotonic() + deadline_s
     try:
@@ -121,36 +128,13 @@ def adb_server_version(
         raise AdbPortBusy(f"connecting to {host}:{port} failed: {e!r}") from e
     with s:
         try:
-            _left(s, deadline)
-            s.sendall(b"000chost:version")
-            status = _recv_exact(s, 4, deadline)
-            if status != b"OKAY":
-                raise AdbPortBusy(f"answered {status!r} instead of OKAY")
-            size = int(_recv_exact(s, 4, deadline), 16)
-            if not 0 < size <= 16:
-                raise AdbPortBusy(f"announced a {size}-byte version")
-            return str(int(_recv_exact(s, size, deadline), 16))
-        except (OSError, ValueError) as e:
+            adbwire.host_request(s, b"host:version", deadline=deadline)
+            size = adbwire.read_hex_length(s, max_bytes=16, deadline=deadline)
+            if size == 0:
+                raise AdbPortBusy("announced a 0-byte version")
+            return str(int(adbwire.recv_exact(s, size, deadline=deadline), 16))
+        except (TransportError, ValueError) as e:
             raise AdbPortBusy(f"did not answer like adb: {e!r}") from e
-
-
-def _left(s: socket.socket, deadline: float) -> None:
-    """Let the next socket call wait only for what is left of the probe's deadline."""
-    left = deadline - time.monotonic()
-    if left <= 0:
-        raise TimeoutError("the adb server did not answer in time")
-    s.settimeout(left)
-
-
-def _recv_exact(s: socket.socket, n: int, deadline: float) -> bytes:
-    data = b""
-    while len(data) < n:
-        _left(s, deadline)
-        chunk = s.recv(n - len(data))
-        if not chunk:
-            raise OSError("adb server closed the connection")
-        data += chunk
-    return data
 
 
 def _default_opener(url: str) -> IO[bytes]:
@@ -177,7 +161,6 @@ class AdbManager:
     ) -> None:
         """`server_probe` behaves like `adb_server_version`: a version, None when nothing
         listens, or `AdbPortBusy` when something listens but does not answer like adb."""
-        install_no_spawn_guard()
         self._paths = paths
         self._config = config
         self._runner = runner
@@ -194,27 +177,44 @@ class AdbManager:
                 return _broken(path, configured=True)
             return self._verify(path, configured=True)
         managed = self._paths.platform_tools / "adb"
-        if not _is_executable(managed):
-            self._restore_previous_install()
-        if not _is_executable(managed):
-            return AdbLocation(None, None, AdbStatus.missing, MISSING_MESSAGE)
-        return self._verify(managed)
+        with _swap_lock:  # a download's swap is either not begun or finished
+            found = self._verify(managed) if _is_executable(managed) else None
+            if found is not None and found.status is AdbStatus.ready:
+                return found
+            # Missing or broken: an interrupted install may have left a working copy set aside.
+            if self._restore_previous_install():
+                return self._verify(managed)
+            return found or AdbLocation(None, None, AdbStatus.missing, MISSING_MESSAGE)
 
-    def _restore_previous_install(self) -> None:
-        """Put back the copy set aside by an install that was interrupted half way."""
+    def _restore_previous_install(self) -> bool:
+        """Put back the copy set aside by an install that was interrupted half way.
+
+        Only a copy that runs is put back. A live folder that is empty is replaced; one that
+        holds something broken is set aside as `.platform-tools.broken`, never deleted here.
+        """
         dest = self._paths.platform_tools
         old = _old_dir(dest)
         if not _is_executable(old / "adb") or self._verify(old / "adb").status is not (
             AdbStatus.ready
         ):
-            return
+            return False
+        broken = _broken_dir(dest)
         try:
             if dest.exists():
-                dest.rmdir()  # only an empty folder; never remove someone's files
+                try:
+                    dest.rmdir()  # an empty folder is nothing to keep
+                except OSError:
+                    shutil.rmtree(broken, ignore_errors=True)
+                    dest.rename(broken)
             old.rename(dest)
-            logger.warning("Restored the previous platform-tools after an interrupted install")
         except OSError as e:
             logger.warning("Could not restore the previous platform-tools: %s", e)
+            if not dest.exists() and broken.exists():
+                with contextlib.suppress(OSError):
+                    broken.rename(dest)
+            return False
+        logger.warning("Restored the previous platform-tools after an interrupted install")
+        return True
 
     def _verify(self, adb: Path, *, configured: bool = False) -> AdbLocation:
         try:
@@ -299,7 +299,12 @@ class AdbManager:
     def _download(self, opener: Opener) -> AdbLocation:
         support = self._paths.support
         support.mkdir(parents=True, exist_ok=True)
-        _sweep_leftovers(support, self._paths.platform_tools)
+        live = self._paths.platform_tools
+        with _swap_lock:
+            live_works = _is_executable(live / "adb") and (
+                self._verify(live / "adb").status is AdbStatus.ready
+            )
+            _sweep_leftovers(support, live, live_works=live_works)
         archive: Path | None = None
         staging: Path | None = None
         try:
@@ -315,7 +320,13 @@ class AdbManager:
                     "Google's platform-tools downloaded, but adb did not run, so it was not "
                     "installed. Try again, or set phone.adb_path in config.toml."
                 )
-            _replace_dir(staging / "platform-tools", self._paths.platform_tools)
+            self._check_signature(staging / "platform-tools" / "adb")
+            with _swap_lock:
+                # Looked at again: `locate` may have restored a set-aside copy meanwhile.
+                live_works = _is_executable(live / "adb") and (
+                    self._verify(live / "adb").status is AdbStatus.ready
+                )
+                _replace_dir(staging / "platform-tools", live, live_works=live_works)
         finally:
             if archive is not None:
                 archive.unlink(missing_ok=True)
@@ -323,6 +334,36 @@ class AdbManager:
                 shutil.rmtree(staging, ignore_errors=True)
         final = self._paths.platform_tools / "adb"
         return AdbLocation(final, loc.version, AdbStatus.ready, loc.message)
+
+    def _check_signature(self, adb: Path) -> None:
+        """The downloaded adb must be validly signed by Google (`codesign`, no shell).
+
+        Checked before it replaces anything; on failure the download is discarded and the
+        installed copy is left alone.
+        """
+        refused = AdbDownloadError(
+            "The downloaded platform-tools could not be verified as coming from Google, so "
+            "nothing was installed."
+        )
+        try:
+            verify = self._runner([CODESIGN, "--verify", "--strict", str(adb)], _CODESIGN_TIMEOUT)
+            shown = self._runner(
+                [CODESIGN, "--display", "--verbose=2", str(adb)], _CODESIGN_TIMEOUT
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("codesign could not run: %r", e)
+            raise refused from e
+        if verify.returncode != 0:
+            logger.warning(
+                "platform-tools adb failed the signature check (exit %s)", verify.returncode
+            )
+            raise refused
+        teams = re.findall(
+            r"^TeamIdentifier=(\S+)", f"{shown.stdout}\n{shown.stderr}", re.MULTILINE
+        )
+        if shown.returncode != 0 or teams != [GOOGLE_TEAM_ID]:
+            logger.warning("platform-tools adb is not signed by the expected team: %s", teams)
+            raise refused
 
     def _fetch(self, opener: Opener, dest: Path) -> None:
         try:
@@ -348,16 +389,25 @@ def _old_dir(dest: Path) -> Path:
     return dest.with_name(f".{dest.name}.old")
 
 
-def _sweep_leftovers(support: Path, dest: Path) -> None:
-    """Remove temp files and folders an earlier, interrupted install left behind."""
+def _broken_dir(dest: Path) -> Path:
+    return dest.with_name(f".{dest.name}.broken")
+
+
+def _sweep_leftovers(support: Path, dest: Path, *, live_works: bool) -> None:
+    """Remove temp files and folders an earlier, interrupted install left behind.
+
+    The set-aside copies (`.old`, `.broken`) go only when the live copy runs: otherwise the old
+    one may be the only working adb, and a failed download must never take it away.
+    """
     for p in support.glob(".platform-tools-*"):
         if p.suffix in (".zip", ".new"):
             if p.is_dir():
                 shutil.rmtree(p, ignore_errors=True)
             else:
                 p.unlink(missing_ok=True)
-    if dest.exists():  # otherwise the old copy may be the only working one
+    if live_works:
         shutil.rmtree(_old_dir(dest), ignore_errors=True)
+        shutil.rmtree(_broken_dir(dest), ignore_errors=True)
 
 
 def _is_executable(path: Path) -> bool:
@@ -433,18 +483,28 @@ def _unpack(archive: Path, staging: Path) -> None:
         (root / "platform-tools" / "adb").chmod(0o755)
 
 
-def _replace_dir(new: Path, dest: Path) -> None:
-    """Swap `dest` for `new` so a reader sees the old folder or the new one, never half of it."""
-    old = _old_dir(dest)
-    shutil.rmtree(old, ignore_errors=True)
-    had_old = dest.exists()
-    if had_old:
-        dest.rename(old)
+def _replace_dir(new: Path, dest: Path, *, live_works: bool) -> None:
+    """Swap `dest` for `new` so a reader sees the old folder or the new one, never half of it.
+
+    A live copy that works is kept as `.old` until `new` is in place. One that is empty or
+    broken is set aside as `.broken` instead, and an earlier `.old` stays untouched: it may be
+    the only copy that runs. Once `new` (already checked to run) is in place, both go.
+    """
+    old, broken = _old_dir(dest), _broken_dir(dest)
+    aside = old if live_works else broken
+    if live_works:
+        shutil.rmtree(old, ignore_errors=True)  # stale: the live copy works
+    else:
+        shutil.rmtree(broken, ignore_errors=True)
+    had_live = dest.exists()
+    if had_live:
+        dest.rename(aside)
     try:
         new.rename(dest)
     except OSError:
-        if had_old:
+        if had_live:
             with contextlib.suppress(OSError):
-                old.rename(dest)
+                aside.rename(dest)
         raise
     shutil.rmtree(old, ignore_errors=True)
+    shutil.rmtree(broken, ignore_errors=True)

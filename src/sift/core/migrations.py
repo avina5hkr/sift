@@ -95,7 +95,7 @@ def _apply(db: Database, migration: Migration) -> None:
         f"VALUES ({int(migration.version)}, {int(time.time())});\n"
         "COMMIT;"
     )
-    with db.write_connection() as conn:
+    with db._write_connection() as conn:
         try:
             conn.executescript(script)
         except sqlite3.Error as e:
@@ -110,7 +110,7 @@ def _backup(db: Database, backup_dir: Path, version: int) -> Path:
     final = backup_dir / f"state-v{version}-{stamp}.db"
     partial = final.with_name(final.name + ".partial")
     try:
-        with db.write_connection() as src:
+        with db._write_connection() as src:
             dest = sqlite3.connect(partial)
             try:
                 src.backup(dest)

@@ -39,16 +39,38 @@ VERSION_OUT = (
 )
 
 
-class FakeRunner:
-    """Records every call; answers `version` and `start-server` unless told otherwise."""
+GOOGLE_DISPLAY = (
+    "Executable=/x/adb\nIdentifier=adb\nAuthority=Developer ID Application: Google LLC "
+    "(EQHXZ8M8AV)\nTeamIdentifier=EQHXZ8M8AV\n"
+)
 
-    def __init__(self, *, version_rc: int = 0, start_rc: int = 0) -> None:
+
+class FakeRunner:
+    """Records every call; answers `version` and `start-server` unless told otherwise.
+
+    `codesign` is answered too (signed by Google unless told otherwise): no real codesign runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        version_rc: int = 0,
+        start_rc: int = 0,
+        verify_rc: int = 0,
+        display: str = GOOGLE_DISPLAY,
+    ) -> None:
         self.calls: list[tuple[list[str], float]] = []
         self.version_rc = version_rc
         self.start_rc = start_rc
+        self.verify_rc = verify_rc
+        self.display = display
 
     def __call__(self, args: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(args), timeout))
+        if args[0] == "/usr/bin/codesign":
+            if "--verify" in args:
+                return subprocess.CompletedProcess(list(args), self.verify_rc, "", "")
+            return subprocess.CompletedProcess(list(args), 0, "", self.display)
         if "version" in args:
             rc = self.version_rc
             return subprocess.CompletedProcess(list(args), rc, VERSION_OUT if rc == 0 else "", "")
@@ -216,7 +238,7 @@ def test_download_installs_and_verifies(paths):
     assert loc == AdbLocation(adb, "35.0.2-12147458", AdbStatus.ready, loc.message)
     assert adb.read_bytes() == b"#!/bin/sh\n" and os.access(adb, os.X_OK)
     assert (paths.platform_tools / "NOTICE.txt").read_bytes() == b"n"
-    assert [c[0][1:] for c in runner.calls] == [["version"]]  # verified once, before installing
+    assert [c[0][1:] for c in runner.calls if c[0][0] != "/usr/bin/codesign"] == [["version"]]
     # No leftovers next to the install.
     assert sorted(
         p.name for p in paths.support.iterdir() if "platform" in p.name or ".tmp" in p.name
@@ -424,6 +446,125 @@ def test_locate_does_not_restore_a_broken_old_copy(paths):
     loc = manager(paths, FakeRunner(version_rc=1)).locate()
     assert loc.status == AdbStatus.missing
     assert (paths.support / ".platform-tools.old" / "adb").exists()
+
+
+def test_download_checks_the_signature_before_installing(paths):
+    runner = FakeRunner()
+    manager(paths, runner).download(consent=True, opener=Opener(GOOD_ZIP))
+    codesign = [c for c, _ in runner.calls if c[0] == "/usr/bin/codesign"]
+    assert [c[1] for c in codesign] == ["--verify", "--display"]
+    assert codesign[0][:3] == ["/usr/bin/codesign", "--verify", "--strict"]
+    assert all(".new" in c[-1] for c in codesign)  # the staged copy, not the installed one
+    assert all(t > 0 for _, t in runner.calls)
+
+
+@pytest.mark.parametrize(
+    "runner",
+    [
+        FakeRunner(verify_rc=3),  # unsigned or tampered
+        FakeRunner(display="TeamIdentifier=AAAAAAAAAA\n"),  # signed by someone else
+        FakeRunner(display="TeamIdentifier=not set\n"),
+        FakeRunner(display=""),
+        FakeRunner(display="TeamIdentifier=AAAAAAAAAA\nTeamIdentifier=EQHXZ8M8AV\n"),
+    ],
+    ids=["unsigned", "wrong-team", "no-team", "no-output", "two-teams"],
+)
+def test_a_download_that_is_not_signed_by_google_is_discarded(paths, runner):
+    old = make_exe(paths.platform_tools / "adb")
+    (paths.platform_tools / "keep.txt").write_text("keep")
+    with pytest.raises(AdbDownloadError) as e:
+        manager(paths, runner).download(consent=True, opener=Opener(GOOD_ZIP))
+    assert "verified" in e.value.message
+    assert old.exists() and (paths.platform_tools / "keep.txt").read_text() == "keep"
+    assert [p.name for p in paths.support.iterdir() if p.name.startswith(".platform")] == []
+
+
+def test_a_codesign_that_cannot_run_discards_the_download(paths):
+    class Missing(FakeRunner):
+        def __call__(self, args, timeout):
+            if args[0] == "/usr/bin/codesign":
+                raise subprocess.TimeoutExpired(list(args), timeout)
+            return super().__call__(args, timeout)
+
+    with pytest.raises(AdbDownloadError):
+        manager(paths, Missing()).download(consent=True, opener=Opener(GOOD_ZIP))
+    assert not (paths.platform_tools / "adb").exists()
+
+
+class BrokenAdbRunner(FakeRunner):
+    """`adb version` fails for an adb whose file says BROKEN, and works for every other."""
+
+    def __call__(self, args: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+        if "BROKEN" in Path(args[0]).read_text():
+            self.calls.append((list(args), timeout))
+            return subprocess.CompletedProcess(list(args), 1, "", "")
+        return super().__call__(args, timeout)
+
+
+def make_broken(path: Path) -> Path:
+    make_exe(path).write_text("#!/bin/sh\n# BROKEN\n")
+    return path
+
+
+def test_a_failed_download_keeps_the_only_working_copy(paths):
+    """The set-aside copy is the only working adb (the live folder is empty): a download that
+    fails must not sweep it away."""
+    make_exe(
+        paths.support / ".platform-tools.old" / "adb"
+    )  # paths.ensure() left the live one empty
+
+    class Down(Opener):
+        def __call__(self, url: str) -> io.BytesIO:
+            raise OSError("offline")
+
+    m = manager(paths)
+    with pytest.raises(AdbDownloadError):
+        m.download(consent=True, opener=Down(b""))
+    assert (paths.support / ".platform-tools.old" / "adb").exists()
+    assert m.locate().status == AdbStatus.ready
+
+
+def test_a_download_that_fails_verification_keeps_the_only_working_copy(paths):
+    old = make_exe(paths.support / ".platform-tools.old" / "adb")
+
+    class NewBroken(FakeRunner):
+        def __call__(self, args, timeout):
+            if "platform-tools" in str(args[0]) and ".new" in str(args[0]):
+                return subprocess.CompletedProcess(list(args), 1, "", "")
+            return super().__call__(args, timeout)
+
+    m = manager(paths, NewBroken())
+    with pytest.raises(AdbDownloadError):
+        m.download(consent=True, opener=Opener(GOOD_ZIP))
+    assert old.exists()
+    assert m.locate().status == AdbStatus.ready
+
+
+def test_a_download_over_an_empty_folder_keeps_the_old_copy_until_the_new_one_is_in(paths):
+    make_exe(paths.support / ".platform-tools.old" / "adb")
+    m = manager(paths)
+    loc = m.download(consent=True, opener=Opener(GOOD_ZIP))
+    assert loc.status == AdbStatus.ready
+    assert (paths.platform_tools / "adb").exists()
+    assert not (paths.support / ".platform-tools.old").exists()  # swept once the new one works
+
+
+def test_locate_restores_the_previous_copy_when_the_current_one_is_broken(paths):
+    make_broken(paths.platform_tools / "adb")
+    make_exe(paths.support / ".platform-tools.old" / "adb")
+    loc = manager(paths, BrokenAdbRunner()).locate()
+    assert loc.status == AdbStatus.ready
+    assert not (paths.support / ".platform-tools.old").exists()
+    # the broken copy is set aside, not deleted
+    assert (paths.support / ".platform-tools.broken" / "adb").exists()
+
+
+def test_a_broken_copy_set_aside_is_swept_once_a_working_one_is_in_place(paths):
+    make_broken(paths.platform_tools / "adb")
+    make_exe(paths.support / ".platform-tools.old" / "adb")
+    manager(paths, BrokenAdbRunner()).locate()
+    manager(paths).download(consent=True, opener=Opener(GOOD_ZIP))
+    assert [p.name for p in paths.support.iterdir() if p.name.startswith(".platform")] == []
 
 
 # --- ensure_server --------------------------------------------------------------------------
@@ -703,3 +844,96 @@ def test_api_download_failure_uses_the_error_shape(api):
 def test_api_download_requires_token(api):
     client, _ = api
     assert client.post("/api/devices/adb/download", json={"consent": True}).status_code == 401
+
+
+def test_api_a_second_download_while_one_runs_is_refused(paths):
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(FakeManager):
+        def download(self, *, consent: bool, **_: object) -> AdbLocation:
+            started.set()
+            assert release.wait(10)
+            return super().download(consent=consent)
+
+    client = client_for(make_ctx(paths))
+    slow = Slow()
+    client.app.dependency_overrides[get_adb_manager] = lambda: slow
+    first: list[int] = []
+    t = threading.Thread(
+        target=lambda: first.append(
+            client.post("/api/devices/adb/download", headers=H, json={"consent": True}).status_code
+        )
+    )
+    t.start()
+    assert started.wait(10)
+    r = client.post("/api/devices/adb/download", headers=H, json={"consent": True})
+    assert r.status_code == 409
+    assert r.json()["code"] == "download_running"
+    release.set()
+    t.join(10)
+    assert first == [200]
+    assert slow.consents == [True]  # the second request never reached the manager
+    # once finished, a new download is allowed again
+    assert (
+        client.post("/api/devices/adb/download", headers=H, json={"consent": True}).status_code
+        == 200
+    )
+
+
+def test_api_download_makes_the_tracker_look_again(paths):
+    ctx = make_ctx(paths)
+    retried: list[bool] = []
+
+    class T:
+        def retry(self) -> None:
+            retried.append(True)
+
+    ctx.tracker = T()  # type: ignore[assignment]
+    client = client_for(ctx)
+    client.app.dependency_overrides[get_adb_manager] = lambda: FakeManager()
+    assert (
+        client.post("/api/devices/adb/download", headers=H, json={"consent": True}).status_code
+        == 200
+    )
+    assert retried == [True]
+
+
+def test_locate_never_sees_a_download_half_way_through_its_swap(paths, monkeypatch):
+    """A status check landing between "set the old copy aside" and "move the new one in" must
+    wait for the swap, not restore the old copy over it."""
+    old = make_exe(paths.platform_tools / "adb")
+    old.write_text("#!/bin/sh\n# OLD\n")
+    mid, go = threading.Event(), threading.Event()
+    real_rename = Path.rename
+
+    def slow_rename(self: Path, target):  # type: ignore[no-untyped-def]
+        if self.name == "platform-tools" and self.parent.name.endswith(".new"):
+            mid.set()  # the old copy is aside now, the new one not yet in
+            assert go.wait(10)
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", slow_rename)
+    errors: list[BaseException] = []
+
+    def download() -> None:
+        try:
+            manager(paths).download(consent=True, opener=Opener(GOOD_ZIP))
+        except BaseException as e:
+            errors.append(e)
+
+    found: list[AdbLocation] = []
+    downloader = threading.Thread(target=download)
+    downloader.start()
+    assert mid.wait(10)
+    checker = threading.Thread(target=lambda: found.append(manager(paths).locate()))
+    checker.start()
+    checker.join(0.3)
+    assert checker.is_alive()  # it waits for the swap
+    go.set()
+    downloader.join(10)
+    checker.join(10)
+    assert errors == []
+    assert found and found[0].status is AdbStatus.ready
+    assert (paths.platform_tools / "adb").read_text() == "#!/bin/sh\n"  # the new copy
+    assert not (paths.support / ".platform-tools.old").exists()
+    assert not (paths.support / ".platform-tools.broken").exists()

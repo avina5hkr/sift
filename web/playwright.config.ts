@@ -1,14 +1,10 @@
 import { defineConfig, devices } from '@playwright/test'
 
+// No shared web server: each test starts its own Sift (own data folder, backup folder and port)
+// through the `sift` fixture in e2e/fixtures.ts, so no test depends on another.
 export default defineConfig({
   testDir: './e2e',
   reporter: 'list',
-  use: { baseURL: 'http://127.0.0.1:8766' },
+  timeout: 60_000,
   projects: [{ name: 'webkit', use: { ...devices['Desktop Safari'] } }],
-  webServer: {
-    command:
-      'rm -rf .e2e-home && SIFT_HOME=.e2e-home SIFT_DEV_TOKEN=e2e SIFT_WEB_DIST=dist SIFT_TRACKER=fake SIFT_FAKE_PHONE_DELAY_S=3600 uv run sift --no-window --fake-phone --port 8766',
-    url: 'http://127.0.0.1:8766/',
-    reuseExistingServer: false,
-  },
 })

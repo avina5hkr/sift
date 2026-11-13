@@ -56,10 +56,13 @@ Rules that follow:
 
 1. **SQLite access** (`sift.core.db.Database`): thread-local read connections; all writes through `Database.tx()` = `BEGIN IMMEDIATE` with busy retry, serialised by a process-wide lock. Worker processes (spawn pool) never open the DB. Pragmas are set per connection in `Database.open()`, not inside migrations.
 2. **Migrations:** `src/sift/resources/migrations/NNNN_name.sql`. `0001_init.sql` holds the full spec section 5 schema. Later migrations, each designed in its milestone plan:
-   - `0002_adopt` (M3): `adopted_file` (files found in an existing backup folder, provisional until hashed), plus the set-confirmation and phone-analysis result tables.
-   - `0003_delete_runs` (M8): preflight job, selection hash, manifest path, source (`cleanup | browse | slate | analysis`).
-   - `0004_slate` (M12).
-   - `0005_apps_health` (M13/M14): unlock records, checklist ticks.
+   - `0002_backup` (M2): backup scan staging (`scan_entry`, `folder_count`, scan `sets`/`state`/`warnings`), `phone_file.set_name`/`rel_path`, `device.android_id`.
+   - `0003_run_summary` (M2): the `run_summary` table (what each backup run did).
+   - `0004_run_summary_discarded` (M2): `run_summary.discarded` (a run whose held scan was discarded).
+   - `0005_adopt` (M3): `adopted_file` (files found in an existing backup folder, provisional until hashed), plus the set-confirmation and phone-analysis result tables.
+   - `0006_delete_runs` (M8): preflight job, selection hash, manifest path, source (`cleanup | browse | slate | analysis`).
+   - `0007_slate` (M12).
+   - `0008_apps_health` (M13/M14): unlock records, checklist ticks.
 3. **Auth token transport:** `X-Sift-Token` header on every `/api` call; `?token=` accepted **only** on `GET /api/events` and `GET /api/media/*` (spec 12). Static UI files need no token. The token never appears in any log (uvicorn access log off; request logging records method and path only).
 4. **Events:** `sift.core.events.EventBus` is thread-safe and never blocks a publisher; each SSE subscriber has a bounded drop-oldest buffer and at most one pending wake-up. Event names: `hello`, `device`, `job`, `progress`, `log`, `toast`. Progress is throttled to one event per 500 ms per job.
 5. **Jobs** (M2): `sift.core.jobs.JobManager` persists to the `job` table; I/O jobs on threads, CPU work on a spawn `ProcessPoolExecutor`; one backup and one delete job at a time; pause/stop at file boundaries; `waiting_for_phone` and "waiting for SSD" are pauses, never failures. `multiprocessing.freeze_support()` runs first in `sift.app.main`.
@@ -110,7 +113,7 @@ Repo, uv project, paths, config (all spec 13 keys including `[[backup.sets]]` an
 
 ### M3 SSD, verify, adoption, confirmation, Analyse phone (read-only) [7, 10E]
 - `services/volumes.py` (owner decision: live SSD detection lands here, not in M1): find the SSD by volume UUID with `diskutil info -plist`, require a real mount point (`os.path.ismount`), watch plug/eject (poll `/Volumes` every 2 s or DiskArbitration) and publish `ssd` events; the status chip goes live in this milestone (until then it reads "SSD not connected"). `backup/replicator.py` (both directions: each destination ends with the union), self-heal, `backup/verifier.py` + Problems/Repair, `backup/rebuild.py`, `core/dbbackup.py`, eject, "Safe to unplug".
-- Migration `0002_adopt`. `backup/adopt.py`: walk a chosen existing folder **without modifying, moving or renaming anything**; create `adopted_file` rows (provisional), hash in the background (F_NOCACHE), and only then create `content` + `replica` rows that keep the existing relative paths; extra copies listed as duplicates; "older copy differs" listed under Problems; nothing deleted. `backup/match.py`: size lookup, then batched phone-side SHA-256; a match links with no transfer. `POST /backup/adopt`.
+- Migration `0005_adopt`. `backup/adopt.py`: walk a chosen existing folder **without modifying, moving or renaming anything**; create `adopted_file` rows (provisional), hash in the background (F_NOCACHE), and only then create `content` + `replica` rows that keep the existing relative paths; extra copies listed as duplicates; "older copy differs" listed under Problems; nothing deleted. `backup/match.py`: size lookup, then batched phone-side SHA-256; a match links with no transfer. `POST /backup/adopt`.
 - `backup/confirm.py`: per-set report = preflight checks 1–3 read-only; Markdown to `DEST_ROOT/.sift/reports/`; Stale on set change or after `confirmation_valid_days` (30). `GET /backup/confirmation?set=`, `POST /backup/confirm`.
 - `cleanup/analyse.py`: Analyse phone, read-only: scan without pulling, size-then-hash match, verify matches (backup hash vs phone sha256, batches per section 2), groups **Backed up and verified / Backed up, not verified yet / Not backed up / Problems** per set. `POST /analyse/phone` (body: sets), `GET /analyse/phone/{id}`. UI: summary screen with counts and sizes only (lists wait for M4; no delete button until M8).
 - Tests:
@@ -137,7 +140,7 @@ OCR providers + Vision Hindi check, consented model download with pinned SHA-256
 Features, lexicons, kNN + LR, tiers, cold start, reasons, calibration flow. Files from the **Recordings** set are never classified or suggested as junk (owner rule; test `test_recordings_never_junk`). **Exit:** tier tests and P5 pass; calibration stores its row. **→ Gate B**.
 
 ### M8 Delete, quarantine, Delete later, Delete only [10, 10E, 11 dialogs]
-- Migration `0003_delete_runs`. `cleanup/preflight.py` (six checks; phone hash re-read **in this run** for every file; keeper-still-present check; source `cleanup | browse | slate | analysis`), `cleanup/manifest.py` (written before the first delete; missing required destination blocks), `cleanup/deleter.py`, `cleanup/mediascan.py`, `cleanup/quarantine.py` (restore checks phone free space: selection + 2 GB must fit).
+- Migration `0006_delete_runs`. `cleanup/preflight.py` (six checks; phone hash re-read **in this run** for every file; keeper-still-present check; source `cleanup | browse | slate | analysis`), `cleanup/manifest.py` (written before the first delete; missing required destination blocks), `cleanup/deleter.py`, `cleanup/mediascan.py`, `cleanup/quarantine.py` (restore checks phone free space: selection + 2 GB must fit).
 - `/delete/execute` refuses unless the preflight finished < 10 min ago for the same selection hash and `confirm` is true; typed count when required.
 - **Delete only:** the Analyse phone screen gets **Delete the backed-up files (X GB)** (selection = the verified group of deletable sets only), **Back up the N new files first**, **Not now**; Choose files arrives with M11/M12. Disposition defaults to **archive** for source `analysis`. If a required destination (e.g. the SSD) is unmounted, the delete step waits for it ("Waiting for SSD"); no per-run override exists.
 - **Ready to free card + Delete later** on backup results and Cleanup home ("Ready to free: 40 GB in Camera (confirmed 7 Nov)", Review and delete / Not now); only confirmed, deletable sets; `cleanup.delete_reminder_days` (0 = off) drives an optional notification that only opens the app.
@@ -154,16 +157,16 @@ Features, lexicons, kNN + LR, tiers, cold start, reasons, calibration flow. File
 Storage explorer, smart lists, folder-selection expansion that skips and lists un-backed-up files, typed confirmation (outside delete roots or > 200 files), disposition (default quarantine), empty-folder removal, Archive browser + restore (free-space check), **Choose files** from Analyse phone opens Browse filtered to the verified group. P8, P9.
 
 ### M12 Clean slate [10A]
-Migration `0004_slate`. Keep rules, plan tree, backup-gap step, adjust, disposition, manifest + typed count, chunked execute (500), resume; **Choose files** from Analyse phone opens Clean slate filtered to the verified group. P7 over random trees and rules; 50k-file plan on the fake phone. **→ Gate D**.
+Migration `0007_slate`. Keep rules, plan tree, backup-gap step, adjust, disposition, manifest + typed count, chunked execute (500), resume; **Choose files** from Analyse phone opens Clean slate filtered to the verified group. P7 over random trees and rules; 50k-file plan on the fake phone. **→ Gate D**.
 
 ### M13 Apps tab [10C]
-Migration `0005_apps_health`. Probes, actions, server-side protection and unlock rules, FakeTransport app registry, P10. Any `dumpsys diskstats` capture used as a fixture has package names redacted before commit.
+Migration `0008_apps_health`. Probes, actions, server-side protection and unlock rules, FakeTransport app registry, P10. Any `dumpsys diskstats` capture used as a fixture has package names redacted before commit.
 
 ### M14 Health report and pre-reset checklist [10D]
 Optional probes, verdict rules, export, bugreport, checklist, restore helper. Parser fixtures include **Android 16** output (redacted as in M13).
 
 ### M9 Wi-Fi and hardening [6 Wi-Fi, 15, 16 perf]
-Pairing, reconnect, heartbeat, Wi-Fi reader count, private-port option (decision 10), full fault-injection sweep, benchmarks, Logs screen, diagnostics.
+Pairing, reconnect, heartbeat, Wi-Fi reader count, private-port option (decision 10), full fault-injection sweep, benchmarks, Logs screen, Settings screens, diagnostics.
 
 ### M10 Package and polish [14]
 PyInstaller spec, Info.plist, ad-hoc signing, dmg, THIRD_PARTY.md, README, crash dialog, accessibility pass. **Exit:** a fresh Mac installs from the dmg; all acceptance criteria met.
@@ -189,7 +192,7 @@ Carry-over, by milestone (from the final review triage):
 - **M2 (start):** serialise event payloads to JSON once at publish time, outside the bus lock (freezes payloads; a bad payload fails at the publisher).
 - **M2:** decide the `never_delete` semantics. Effective list = built-in floor ∪ `cleanup.never_delete` ∪ `browse.never_delete_extra`; the floor (Android/data, Android/obb, WhatsApp and WhatsApp Business Databases/Backups) cannot be removed; warn on omission. Validate and normalise every config path list (`never_delete`, `delete_roots`, `slate.keep_folders`, `browse.never_delete_extra`) with the set-path rules, and require an absolute `backup.mac_root`.
 - **M2:** `save_config` must handle a non-table section; set-aside file names need sub-second uniqueness; `DEFAULT_SETS` becomes immutable; set names trimmed and case-folded for uniqueness; phone paths compared case-insensitively. Per-thread read connections must be released when job threads end. Make `Database.write_connection()` private or migration-only. Harden `ServerHandle.stop()` and `main()`'s `finally`. Name the Settings milestone in the UI. Add regression tests for bus cancellation, closed-loop publish and multi-thread publish.
-- **M3:** migration-runner hardening: catch BaseException in `_apply`, verify the WAL mode result, retry on busy, narrow "damaged" to real corruption, add `tx()`-after-failed-migration and duplicate-version tests. Migrations cannot rebuild FK tables (pragmas are banned), so design 0002+ accordingly.
+- **M3:** migration-runner hardening: catch BaseException in `_apply`, verify the WAL mode result, retry on busy, narrow "damaged" to real corruption, add `tx()`-after-failed-migration and duplicate-version tests. Migrations cannot rebuild FK tables (pragmas are banned), so design 0005+ accordingly.
 - **M4:** security tests with `/api/media` (missing Host, empty/wrong header + query token, HEAD, `/api/media` without slash, raw-ASGI traversal).
 - **M8 (Gate C blocker):** `test_user_never_delete_cannot_drop_builtin_protection`; pin `delete_roots`/`never_delete` defaults in tests; `required_destinations = []` must never satisfy I3(a).
 - **M9:** argparse range check for `--port`; uvicorn double-logging; accurate bind-error messages.
@@ -233,3 +236,45 @@ Carry-over:
   - Poll `ioreg` every 2 to 3 s instead of every second.
 - **M10:** leave the adb binary bundled in adbutils out of the app.
 - **M12 (accessibility):** a keyboard-reachable USB 2 tooltip; consider making the phone chip a live region.
+
+## 9. Working method from M3 (2026-11-13)
+
+M0 to M2 used a subagent per task, a reviewer per task and fix loops. That cost far more than it
+bought, so from M3 on every milestone follows `CLAUDE.md`:
+
+- One short plan per milestone: features, interfaces, invariants, an Assumptions list. No code in plans.
+- Built in the main session. Tests are written after each feature and only that area's tests run;
+  the full suite, lint, web tests and e2e run once at the end.
+- Assumptions are recorded, not asked. The owner is asked only for irreversible steps, pushes,
+  merges and the end-of-milestone phone session.
+- One whole-branch review per milestone (most capable model), one fix pass. Delete and phone-write
+  code (M8, M11, M12) also gets one focused review when it is written.
+- `docs/CODEMAP.md` (from `make codemap`) replaces exploratory file reading.
+
+## 10. M2 outcome and carry-over (2026-11-13)
+
+M2 is complete on branch `m2-backup`: 18 tasks, each reviewed, then a whole-branch review and one
+fix wave. Suites: 1499 pytest, 138 vitest, 11 Playwright e2e, P1/P2/P6 under the `ci` profile,
+ruff + mypy strict clean. Records: `docs/spikes/m2-quit.md` (four quit routes, mid-job),
+`docs/spikes/m2-backup.md` (75 real files, all SHA-256 equal, second run 0 bytes, reader test
+40.6 MB/s), and the contract re-run after removing adbutils in `docs/spikes/m1-device.md`.
+
+Decisions later milestones must respect:
+- adbutils is gone; `sift.device.adbwire` is the only adb socket code. The downloaded adb must
+  pass `codesign --verify --strict` with team `EQHXZ8M8AV`.
+- Phone paths that are not UTF-8 are stored through `sift.backup.phonepaths` (valid UTF-8
+  unchanged). Every read of `phone_file.remote_path` for the UI must use its display form.
+- Each phone has its own folder label under one locked `mac_root`; switching needs typed SWITCH.
+- A set folder missing on the phone counts as empty; the mass-disappearance guard is the net.
+- Notifications post only from a packaged `.app` (from source the center aborts the process).
+- Migrations in use: 0002 backup, 0003 run_summary, 0004 run_summary.discarded.
+
+Carry-over:
+- **M3:** exFAT behaviour of `renamex_np`, folder `F_FULLFSYNC` and mtime across rename on the
+  real SSD; decide `required_destinations` when the SSD step was skipped (still mac+ssd);
+  reconcile runs only at startup and its requeue is not scoped per destination.
+- **M3+:** the puller holds its path lock across commit I/O (needs a per-hash claim to lift);
+  overview queries are unindexed (about 0.2 s at 300k rows); the "no space" hint is a 100 MB
+  heuristic; the window-mode quit check used the test job (headless covers the real one).
+- **M9:** full Settings, per-phone folder renaming after a switch, the adb download size is a
+  constant.

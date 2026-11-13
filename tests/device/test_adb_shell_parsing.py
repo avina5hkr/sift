@@ -4,7 +4,9 @@ The fixtures in `fixtures/` are synthetic: output in the shape Android 11+ print
 `df`, `wm size`, `dumpsys battery`) with made-up values. Nothing comes from a real phone.
 """
 
+import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,10 +14,13 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from sift.device.shell import (
+    INFO_SCRIPT,
     build_sha256_script,
     encode_command,
     parse_battery,
     parse_df,
+    parse_info,
+    parse_sections,
     parse_sha256_output,
     parse_wm_size,
     tail_command,
@@ -191,3 +196,118 @@ def test_every_shell_path_is_quoted(name: str, offset: int) -> None:
     raw = path.encode("utf-8", "surrogateescape")
     if "'" not in name:
         assert raw in encode_command(tail_command(path, offset))
+
+
+# -- the one-request info script ----------------------------------------------------------------
+
+
+def sectioned(**sections: str) -> str:
+    return "".join(f"\n@@sift:{name}@@\n{text}" for name, text in sections.items())
+
+
+FULL = sectioned(
+    model="Pretend Phone\n",
+    release="16\n",
+    serial="FAKESERIAL\n",
+    android_id="0000fake000000aa\n",
+    epoch="1700000123\n",
+    df=fixture("df_sdcard.txt"),
+    wm=fixture("wm_size_override.txt"),
+    battery=fixture("dumpsys_battery.txt"),
+)
+
+
+def test_info_script_has_one_marked_section_per_probe() -> None:
+    names = re.findall(r"@@sift:([a-z_]+)@@", INFO_SCRIPT)
+    assert names == ["model", "release", "serial", "android_id", "epoch", "df", "wm", "battery"]
+    assert all(line.endswith("2>/dev/null") for line in INFO_SCRIPT.splitlines())
+
+
+def test_info_script_runs_in_a_posix_shell_and_prints_the_sections() -> None:
+    """Run it for real with the probes stubbed out as shell functions: markers and quoting."""
+    stubs = (
+        "getprop() { case $1 in ro.product.model) echo M;; ro.build.version.release) echo 16;; "
+        "ro.serialno) echo S1;; esac; }; "
+        "settings() { printf 'abc123'; }; df() { echo DF; }; wm() { echo WM; }; "
+        "dumpsys() { echo BAT; }; "
+    )
+    out = subprocess.run(
+        ["/bin/sh", "-c", stubs + INFO_SCRIPT], capture_output=True, text=True, check=True
+    ).stdout
+    sections = parse_sections(out)
+    assert sections["model"].strip() == "M"
+    assert sections["serial"].strip() == "S1"
+    assert sections["android_id"] == "abc123"  # no trailing newline: the next marker still parses
+    assert sections["epoch"].strip().isdigit()
+    assert [sections[k].strip() for k in ("df", "wm", "battery")] == ["DF", "WM", "BAT"]
+
+
+def test_parse_info_reads_every_field() -> None:
+    probe = parse_info(FULL)
+    assert (probe.model, probe.release) == ("Pretend Phone", "16")
+    assert (probe.serial, probe.android_id) == ("FAKESERIAL", "0000fake000000aa")
+    assert probe.phone_time == 1_700_000_123
+    assert probe.storage == (132115952 * 1024, 231011768 * 1024)
+    assert probe.screen_sizes == ((1080, 2400), (720, 1600))
+    assert probe.battery_pct == 87
+
+
+def test_parse_info_tolerates_crlf_and_noise_before_the_first_marker() -> None:
+    probe = parse_info("warning: something\r\n" + FULL.replace("\n", "\r\n"))
+    assert (probe.model, probe.serial, probe.phone_time) == (
+        "Pretend Phone",
+        "FAKESERIAL",
+        1_700_000_123,
+    )
+
+
+@pytest.mark.parametrize("missing", ["serial", "android_id", "epoch", "df", "wm", "battery"])
+def test_a_missing_section_is_none_never_a_crash(missing: str) -> None:
+    sections = {
+        "model": "M\n",
+        "release": "16\n",
+        "serial": "S1\n",
+        "android_id": "abc123\n",
+        "epoch": "1700000000\n",
+        "df": fixture("df_sdcard.txt"),
+        "wm": fixture("wm_size.txt"),
+        "battery": fixture("dumpsys_battery.txt"),
+    }
+    del sections[missing]
+    probe = parse_info(sectioned(**sections))
+    field = {
+        "serial": probe.serial,
+        "android_id": probe.android_id,
+        "epoch": probe.phone_time,
+        "df": probe.storage,
+        "wm": probe.screen_sizes or None,
+        "battery": probe.battery_pct,
+    }[missing]
+    assert field is None
+    assert probe.model == "M"
+
+
+@pytest.mark.parametrize("raw", ["", "\n", "null\n", "unknown\n", "UNKNOWN\n", "two words\n"])
+def test_no_serial_values(raw: str) -> None:
+    assert parse_info(sectioned(serial=raw)).serial is None
+
+
+@pytest.mark.parametrize("raw", ["", "null\n", "cmd: Can't find service: settings\n", "a/b\n"])
+def test_no_android_id_values(raw: str) -> None:
+    assert parse_info(sectioned(android_id=raw)).android_id is None
+
+
+@pytest.mark.parametrize("raw", ["", "abc\n", "-5\n", "12.5\n", "1" * 40 + "\n"])
+def test_bad_epochs_are_none(raw: str) -> None:
+    assert parse_info(sectioned(epoch=raw)).phone_time is None
+
+
+def test_the_first_of_a_repeated_section_wins() -> None:
+    sections = parse_sections(sectioned(model="first\n") + sectioned(model="second\n"))
+    assert sections["model"].strip() == "first"
+
+
+@given(st.text())
+def test_parse_info_never_raises(out: str) -> None:
+    parse_info(out)
+    parse_info(FULL + out)

@@ -1,11 +1,25 @@
-import { expect, test, type Page } from '@playwright/test'
+import type { Page } from '@playwright/test'
+import { expect, test } from './fixtures'
 
 // The status chips also render when /api/status fails, so only trust them once the
 // API has answered 200 (i.e. the token really reached the backend).
 const statusOk = (page: Page) =>
   page.waitForResponse((r) => r.url().endsWith('/api/status') && r.status() === 200)
 
-test('shell loads status and connects to live events', async ({ page }) => {
+// Each test has its own Sift. The fake phone stays away until Retry, so "No phone" is there to see.
+test.use({ phoneDelayS: 3600 })
+
+test('a fresh install opens the setup wizard', async ({ page }) => {
+  await page.goto('/?t=e2e')
+  await expect(page).toHaveURL(/\/setup$/)
+  await expect(page.getByRole('heading', { level: 2, name: 'Welcome to Sift' })).toBeVisible()
+  await expect(page.getByText(/Everything stays on this Mac/)).toBeVisible()
+  await page.getByRole('button', { name: 'Get started' }).click()
+  await expect(page.getByRole('heading', { level: 2, name: 'Turn on USB debugging' })).toBeVisible()
+})
+
+test('shell loads status and connects to live events', async ({ page, sift }) => {
+  await sift.complete()
   const ok = statusOk(page)
   await page.goto('/?t=e2e')
   await ok
@@ -17,7 +31,8 @@ test('shell loads status and connects to live events', async ({ page }) => {
   await expect(page.getByTestId('events-status')).toHaveAttribute('data-connected', 'true')
 })
 
-test('reload works after the token left the URL', async ({ page }) => {
+test('reload works after the token left the URL', async ({ page, sift }) => {
+  await sift.complete()
   await page.goto('/?t=e2e'); await expect(page).toHaveURL(/\/backup$/)
   const ok = statusOk(page)
   await page.reload()
@@ -32,10 +47,9 @@ test('API refuses requests without the token', async ({ request }) => {
   expect((await r.json()).code).toBe('bad_token')
 })
 
-// Keep this test last: the server is shared, and once the fake phone has appeared the earlier
-// tests' "No phone" no longer holds. The server holds the phone back (SIFT_FAKE_PHONE_DELAY_S,
-// see playwright.config.ts) until Retry, so "No phone" is there to see first.
-test('the phone chip changes from No phone to the fake phone without a reload', async ({ page, request }) => {
+// The server holds the phone back (SIFT_FAKE_PHONE_DELAY_S) until Retry.
+test('the phone chip changes from No phone to the fake phone without a reload', async ({ page, request, sift }) => {
+  await sift.complete()
   const ok = statusOk(page)
   await page.goto('/?t=e2e')
   await ok

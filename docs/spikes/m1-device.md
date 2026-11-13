@@ -8,6 +8,15 @@ The owner allowed one hands-on step, unplug and replug. Revoking and re-allowing
 
 `SIFT_REALPHONE_SERIAL=… uv run pytest tests/contract -m realphone`: **15 passed, 4 skipped**. The skips are the fake-only cases, which need a symlink, a zero-byte file, odd names, or a file that shrinks mid-read. Sift never creates any of these on a phone.
 
+### After removing adbutils (M2)
+
+The same read-only run after adbutils was replaced by Sift's own `adbwire` socket code:
+**22 passed, 5 skipped**. The suite has grown since M1 (walk errors and pruning, the single-exec
+`info()`, sessions and identity). Four skips are the same fake-only cases as above. The fifth,
+the walk-prune case, skips when the sample folder has no subfolder; run again with
+`SIFT_REALPHONE_SAMPLE_DIR=/sdcard/DCIM` it passed. The adb server's process id was the same
+before and after, and nothing was written to the phone.
+
 ## Protocol and tool checks
 
 | # | Check | Result |

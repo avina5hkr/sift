@@ -10,6 +10,8 @@ from sift.core.migrations import (
     schema_version,
 )
 
+LATEST = bundled_migrations()[-1].version
+
 SPEC_TABLES = {
     "device", "destination", "content", "phone_file", "replica", "scan", "job",
     "near_group", "near_member", "cluster", "cluster_member", "label", "calibration",
@@ -29,7 +31,7 @@ def test_fresh_db_gets_spec_schema(paths):
     db.open()
     try:
         assert schema_version(db) == 0
-        assert apply_migrations(db, paths.db_backups) == 1
+        assert apply_migrations(db, paths.db_backups) == LATEST
         with db.read() as c:
             names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert names >= SPEC_TABLES
@@ -39,9 +41,9 @@ def test_fresh_db_gets_spec_schema(paths):
 
 
 def test_idempotent(db, paths):
-    assert apply_migrations(db, paths.db_backups) == 1
+    assert apply_migrations(db, paths.db_backups) == LATEST
     with db.read() as c:
-        assert c.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == 1
+        assert c.execute("SELECT count(*) FROM schema_migration").fetchone()[0] == LATEST
 
 
 def test_refuses_newer_db(db, paths):
@@ -52,15 +54,18 @@ def test_refuses_newer_db(db, paths):
 
 
 def test_copies_before_migrating(db, paths):
-    extra = [*bundled_migrations(), Migration(2, "add_t", "CREATE TABLE t (x INTEGER);")]
-    assert apply_migrations(db, paths.db_backups, extra) == 2
-    assert [p.name.startswith("state-v1-") for p in paths.db_backups.iterdir()] == [True]
+    extra = [*bundled_migrations(), Migration(LATEST + 1, "add_t", "CREATE TABLE t (x INTEGER);")]
+    assert apply_migrations(db, paths.db_backups, extra) == LATEST + 1
+    assert [p.name.startswith(f"state-v{LATEST}-") for p in paths.db_backups.iterdir()] == [True]
 
 
 def test_failed_migration_leaves_no_partial_state(db, paths):
-    bad = [*bundled_migrations(), Migration(2, "bad", "CREATE TABLE t (x); SELECT * FROM nope;")]
+    bad = [
+        *bundled_migrations(),
+        Migration(LATEST + 1, "bad", "CREATE TABLE t (x); SELECT * FROM nope;"),
+    ]
     with pytest.raises(MigrationError):
         apply_migrations(db, paths.db_backups, bad)
-    assert schema_version(db) == 1
+    assert schema_version(db) == LATEST
     with db.read() as c:
         assert c.execute("SELECT count(*) FROM sqlite_master WHERE name='t'").fetchone()[0] == 0

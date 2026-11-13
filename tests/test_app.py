@@ -2,10 +2,11 @@ import itertools
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -13,21 +14,25 @@ import httpx
 import pytest
 
 from sift.app import (
-    _close_windows_on_signal,
+    ServerHandle,
+    _signals_request_shutdown,
     bind_socket,
     build_context,
-    close_windows,
     fake_announce_delay,
+    keep_fake_backups_at_home,
     main,
     start_server,
     tracker_mode,
 )
+from sift.core.config import Config
+from sift.core.context import AppContext
 from sift.core.db import Database, DatabaseBusyError
 from sift.core.events import EventBus
 from sift.core.instance import SingleInstanceLock
 from sift.core.logging import setup_logging
 from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
+from sift.core.shutdown import Shutdown
 
 
 def test_live_server_serves_status_and_sse(paths: AppPaths) -> None:
@@ -241,14 +246,6 @@ def test_server_never_enables_uvicorn_access_log(
     assert seen["log_config"] is None
 
 
-class _FakeWindow:
-    def __init__(self) -> None:
-        self.destroyed = 0
-
-    def destroy(self) -> None:
-        self.destroyed += 1
-
-
 def test_quiet_pywebview_logger_pins_info() -> None:
     from sift.app import _quiet_pywebview_logger
 
@@ -262,22 +259,16 @@ def test_quiet_pywebview_logger_pins_info() -> None:
         logger.setLevel(saved)
 
 
-def test_close_windows_destroys_every_window() -> None:
-    windows = [_FakeWindow(), _FakeWindow()]
-    close_windows(windows)
-    assert [w.destroyed for w in windows] == [1, 1]
-
-
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
-def test_signal_in_window_mode_closes_windows(sig: signal.Signals) -> None:
-    windows = [_FakeWindow(), _FakeWindow()]
+def test_headless_signal_requests_shutdown(sig: signal.Signals) -> None:
+    shutdown = Shutdown()
     before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
-    with _close_windows_on_signal(lambda: windows):
+    with _signals_request_shutdown(shutdown):
         os.kill(os.getpid(), sig)
-        deadline = time.monotonic() + 2
-        while not all(w.destroyed for w in windows) and time.monotonic() < deadline:
-            time.sleep(0.01)
-    assert [w.destroyed for w in windows] == [1, 1]
+        assert shutdown.wait_requested(timeout=2)
+        os.kill(os.getpid(), sig)  # a second one during cleanup is absorbed
+        time.sleep(0.05)
+    assert shutdown.reason == f"signal {sig.name}"
     assert {s: signal.getsignal(s) for s in before} == before  # handlers restored
 
 
@@ -422,3 +413,155 @@ def test_fake_phone_without_sift_home_is_refused(
     assert main(argv) == 2
     assert capsys.readouterr().out == _NEEDS_HOME
     assert list(fake_user.iterdir()) == []  # no folder, lock or database was created
+
+
+def test_server_handle_stop_is_idempotent_and_never_raises(paths: AppPaths) -> None:
+    sock = bind_socket(0)
+    ctx = build_context(paths, token="t0k", port=sock.getsockname()[1], web_dist=None)
+    handle = start_server(ctx, sock)
+    try:
+        handle.stop()
+        handle.stop()  # a second call (shutdown plus an error path) is harmless
+        assert sock.fileno() == -1
+    finally:
+        ctx.db.close()
+
+
+def test_server_handle_stop_logs_instead_of_raising(
+    paths: AppPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    sock = bind_socket(0)
+    ctx = build_context(paths, token="t0k", port=sock.getsockname()[1], web_dist=None)
+    handle = start_server(ctx, sock)
+
+    def explode() -> None:
+        raise OSError("close failed")
+
+    real_close = sock.close
+    handle.sock = _ExplodingSock(sock, explode)  # type: ignore[assignment]
+    try:
+        with caplog.at_level(logging.WARNING, logger="sift.app"):
+            handle.stop()  # must not raise
+        assert any(r.exc_info for r in caplog.records)
+    finally:
+        real_close()
+        ctx.db.close()
+
+
+class _ExplodingSock:
+    def __init__(self, real: socket.socket, boom: Callable[[], None]) -> None:
+        self._real, self._boom = real, boom
+
+    def close(self) -> None:
+        self._boom()
+
+
+def test_main_frees_the_socket_through_shutdown(
+    paths: AppPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No cleanup in main() runs outside Shutdown: the listening socket is a step too."""
+    steps: list[str] = []
+    real_add = Shutdown.add
+
+    def spy(self: Shutdown, name: str, step: Callable[[], None], *, timeout_s: float) -> None:
+        steps.append(name)
+        real_add(self, name, step, timeout_s=timeout_s)
+
+    def failing_start(ctx: AppContext, sock: socket.socket) -> ServerHandle:
+        raise RuntimeError("server did not start")
+
+    monkeypatch.setattr(Shutdown, "add", spy)
+    monkeypatch.setattr("sift.app.start_server", failing_start)
+    with pytest.raises(RuntimeError, match="did not start"):
+        main(["--no-window"])
+    assert "socket" in steps
+    assert steps.index("socket") < steps.index("db")  # added early, so it runs late
+
+
+def test_stop_with_an_open_event_stream_is_quick_and_logs_no_error(
+    paths: AppPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    import threading as _threading
+
+    sock = bind_socket(0)
+    ctx = build_context(paths, token="t0k", port=sock.getsockname()[1], web_dist=None)
+    handle = start_server(ctx, sock)
+    opened = _threading.Event()
+
+    def listen() -> None:
+        try:
+            with httpx.stream("GET", f"{handle.url}/api/events?token=t0k", timeout=10) as s:
+                for line in s.iter_lines():
+                    if line == "event: hello":
+                        opened.set()
+        except httpx.HTTPError:
+            pass
+
+    client = _threading.Thread(target=listen, daemon=True)
+    client.start()
+    try:
+        assert opened.wait(5)
+        caplog.set_level(logging.WARNING)
+        started = time.monotonic()
+        handle.stop()
+        assert time.monotonic() - started < 1.5  # no 2 s graceful-shutdown timeout
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    finally:
+        handle.stop()
+        ctx.db.close()
+        client.join(5)
+
+
+def test_fake_phone_backups_default_under_sift_home(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    config = Config()
+    keep_fake_backups_at_home(config, str(tmp_path / "sift"), home=home)
+    assert config.backup.mac_root == str((tmp_path / "sift").resolve() / "PhoneBackup")
+    spelled = Config()
+    spelled.backup.mac_root = f"{home}/PhoneBackup/"
+    keep_fake_backups_at_home(spelled, str(tmp_path / "sift"), home=home)
+    assert spelled.backup.mac_root == config.backup.mac_root
+
+
+def test_fake_phone_keeps_a_backup_folder_chosen_elsewhere(tmp_path: Path) -> None:
+    config = Config()
+    config.backup.mac_root = str(tmp_path / "chosen")
+    keep_fake_backups_at_home(config, str(tmp_path / "sift"), home=tmp_path / "home")
+    assert config.backup.mac_root == str(tmp_path / "chosen")
+
+
+def test_a_fake_phone_run_never_offers_the_real_home_folder(
+    paths: AppPaths, tmp_path: Path
+) -> None:
+    sift_home = os.environ["SIFT_HOME"]
+    env = {
+        **os.environ,
+        "SIFT_DEV_TOKEN": "dev-tok",
+        "HOME": str(tmp_path / "fake-home"),
+        "SIFT_FAKE_PHONE_DELAY_S": "1000",
+    }
+    env.pop("SIFT_TRACKER", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "sift", "--no-window", "--fake-phone", "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().strip()
+        base, _, token = line.removeprefix("Sift running at ").partition("/?t=")
+        r = httpx.get(f"{base}/api/setup/state", headers={"X-Sift-Token": token})
+        assert r.status_code == 200, r.text
+        root = Path(r.json()["mac_root"])
+        assert root.is_relative_to(Path(sift_home).resolve())
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()

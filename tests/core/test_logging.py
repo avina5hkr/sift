@@ -87,3 +87,14 @@ def test_restore_fixture_part_2_sees_clean_state() -> None:  # runs after part 1
     assert getattr(sys.excepthook, "__module__", "") != "sift.core.logging"
     assert getattr(threading.excepthook, "__module__", "") != "sift.core.logging"
     assert logging.getLogger("sift").handlers == []
+
+
+def test_a_phone_name_that_is_not_utf8_is_logged_escaped(
+    paths: AppPaths, bus: EventBus, capsys: pytest.CaptureFixture[str]
+) -> None:
+    setup_logging(paths, bus)
+    bad = b"/sdcard/DCIM/caf\xe9.jpg".decode("utf-8", "surrogateescape")
+    logging.getLogger("sift.backup").warning("could not copy %s", bad)
+    line = (paths.logs / "sift.log").read_text().splitlines()[-1]
+    assert "caf\\udce9.jpg" in line
+    assert "Logging error" not in capsys.readouterr().err

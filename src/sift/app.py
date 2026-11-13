@@ -10,17 +10,21 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
-from typing import Any
 
 import uvicorn
 
 from sift import __version__
-from sift.core.config import load_config
+from sift.backup.readers import stored_read_speed
+from sift.backup.recovery import recover
+from sift.backup.run import run_backup
+from sift.core import testhooks
+from sift.core.clock import SystemClock
+from sift.core.config import BackupConfig, Config, load_config
 from sift.core.context import AppContext
 from sift.core.db import (
     Database,
@@ -31,21 +35,57 @@ from sift.core.db import (
 )
 from sift.core.events import EventBus
 from sift.core.instance import AlreadyRunningError, SingleInstanceLock
+from sift.core.jobs import JobControl, JobError, JobManager
 from sift.core.logging import install_crash_handler, setup_logging, teardown_logging
 from sift.core.migrations import apply_migrations
 from sift.core.paths import AppPaths
-from sift.device.fake_tracker import FAKE_ANNOUNCE_AFTER_S, fake_tracker
+from sift.core.shutdown import Shutdown
+from sift.core.slow_job import SlowJob
+from sift.device.fake_tracker import FAKE_ANNOUNCE_AFTER_S, FakePhoneControl, fake_tracker
+from sift.device.fake_transport import FaultPlan
 from sift.device.tracker import DeviceTracker, adb_tracker
 from sift.server.app import create_app
+from sift.services.afterrun import after_run
+from sift.services.notify import MacNotifier, Notifier, NullNotifier
+from sift.services.plainwords import describe
+from sift.window_quit import WindowQuit
 
 _HOST = "127.0.0.1"
 _START_TIMEOUT_S = 10.0
 _STOP_TIMEOUT_S = 10.0
+# Time budgets for the shutdown steps (seconds). The jobs step waits for a file boundary.
+_JOBS_STOP_TIMEOUT_S = 30.0
+_TRACKER_STEP_S = 10.0
+_SERVER_STEP_S = _STOP_TIMEOUT_S + 5
+_LOGGING_STEP_S = 5.0
+_DB_STEP_S = 10.0
+_LOCK_STEP_S = 5.0
+_SOCKET_STEP_S = 5.0
+# SIFT_TEST_SLOW_PHONE=1: the fake phone serves this many bytes per second (quit-path tests).
+SLOW_PHONE_BPS = 2_000
+_AUTO_BACKUP_WAIT_S = 30.0
 _log = logging.getLogger("sift.app")
 FAKE_NEEDS_HOME_MESSAGE = (
     "Fake-phone mode needs a separate data folder. "
     "Set SIFT_HOME to a test folder (make dev does this)."
 )
+
+
+def keep_fake_backups_at_home(config: Config, sift_home: str, *, home: Path | None = None) -> None:
+    """Fake-phone runs never back up into the real `~/PhoneBackup`.
+
+    When the backup folder is the default one in the real home, it becomes
+    `$SIFT_HOME/PhoneBackup` instead (in memory; the wizard saves whatever it shows). A folder
+    chosen in config.toml elsewhere is kept.
+    """
+    home = home if home is not None else Path.home()
+
+    def expand(text: str) -> Path:
+        text = text.strip()
+        return home / text[2:] if text == "~" or text.startswith("~/") else Path(text)
+
+    if expand(config.backup.mac_root) == expand(BackupConfig().mac_root):
+        config.backup.mac_root = str(Path(sift_home).expanduser().resolve() / "PhoneBackup")
 
 
 def bind_socket(port: int = 0) -> socket.socket:
@@ -98,13 +138,38 @@ class ServerHandle:
     thread: threading.Thread
     sock: socket.socket
     _forwarder: logging.Handler
+    _bus: EventBus | None = None
+    _stopped: bool = field(default=False, init=False)
 
     def stop(self) -> None:
-        """Ask the server to exit, wait for its thread (bounded) and free the socket."""
+        """Ask the server to exit, wait for its thread (bounded) and free the socket.
+
+        Idempotent, and never raises: a failure is logged and the remaining parts still run, so
+        one bad part cannot leave the socket open or the log handler attached.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
+        if self._bus is not None:
+            # End open event streams first, so uvicorn's graceful shutdown has nothing to cancel.
+            try:
+                self._bus.close()
+            except Exception:
+                _log.exception("Could not close the event bus")
         self.server.should_exit = True
-        self.thread.join(_STOP_TIMEOUT_S)
-        logging.getLogger("uvicorn.error").removeHandler(self._forwarder)
-        self.sock.close()
+        parts: list[tuple[str, Callable[[], object]]] = [
+            ("wait for the server thread", lambda: self.thread.join(_STOP_TIMEOUT_S)),
+            (
+                "detach the log forwarder",
+                lambda: logging.getLogger("uvicorn.error").removeHandler(self._forwarder),
+            ),
+            ("close the server socket", self.sock.close),
+        ]
+        for part, action in parts:
+            try:
+                action()
+            except Exception:
+                _log.exception("Could not %s", part)
 
 
 def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
@@ -123,7 +188,7 @@ def start_server(ctx: AppContext, sock: socket.socket) -> ServerHandle:
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [sock]}, name="sift-server", daemon=True
     )
-    handle = ServerHandle(f"http://{_HOST}:{port}", server, thread, sock, forwarder)
+    handle = ServerHandle(f"http://{_HOST}:{port}", server, thread, sock, forwarder, ctx.bus)
     thread.start()
     deadline = time.monotonic() + _START_TIMEOUT_S
     while not server.started:
@@ -164,7 +229,15 @@ def build_tracker(mode: str, ctx: AppContext, env: Mapping[str, str]) -> DeviceT
     if mode == "off":
         return None
     if mode == "fake":
-        return fake_tracker(ctx, announce_after_s=fake_announce_delay(env))
+        slow = testhooks.flag("SIFT_TEST_SLOW_PHONE")
+        faults = FaultPlan(slow_read_bps=SLOW_PHONE_BPS) if slow else None
+        control = None
+        if testhooks.flag("SIFT_TEST_PHONE_CONTROL"):
+            # The browser tests unplug the phone and change what is on it (routes/testphone.py).
+            control = ctx.phone_control = FakePhoneControl(faults)
+        return fake_tracker(
+            ctx, announce_after_s=fake_announce_delay(env), faults=faults, control=control
+        )
     return adb_tracker(ctx)
 
 
@@ -181,35 +254,106 @@ def find_web_dist() -> Path | None:
     return next((c for c in candidates if c.is_dir()), None)
 
 
-def _wait_for_signal() -> None:
-    stop = threading.Event()
+def recover_at_startup(ctx: AppContext) -> None:
+    """Undo what a crash left half done (`sift.backup.recovery`), before anything else runs.
 
-    def on_signal(signum: int, frame: FrameType | None) -> None:
-        stop.set()
-
-    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    A failure is logged, not raised: Sift still starts, and the next start tries again.
+    """
     try:
-        stop.wait()
-    finally:
-        for s, handler in previous.items():
-            signal.signal(s, handler)
+        recover(ctx.db)
+    except Exception:
+        _log.exception("Recovery at startup failed")
 
 
-def close_windows(windows: Iterable[Any]) -> None:
-    """Destroy every window, so the GUI loop ends and `main` can clean up."""
-    for window in list(windows):
-        window.destroy()
+def build_jobs(ctx: AppContext, notifier: Notifier | None = None) -> JobManager:
+    """The backup job manager: each job runs `run_backup` on the connected phone.
+
+    When a job ends (`after_run`): the owner is told through `notifier` (a system notification,
+    or a toast), and the daily copy of the database is made.
+    """
+    notify = notifier if notifier is not None else NullNotifier()
+
+    def runner(control: JobControl) -> None:
+        run_backup(ctx, control, control.sets, control.dry_run)  # leaves its run_summary row
+
+    jobs = JobManager(
+        ctx,
+        clock=SystemClock(),
+        runner=runner,
+        describe=describe,
+        stored_speed=lambda: stored_read_speed(ctx),
+        on_finished=lambda snap: after_run(ctx, snap, notify, closing=lambda: jobs.closing),
+    )
+    return jobs
+
+
+def start_test_backup(ctx: AppContext, jobs: JobManager) -> threading.Thread | None:
+    """With SIFT_TEST_AUTO_BACKUP=1, back up the enabled sets once the phone is connected.
+
+    For the quit-path tests (there is no backup API yet). It needs SIFT_HOME, like every hook
+    that writes, so it never runs against the owner's real data.
+    """
+    if not testhooks.flag("SIFT_TEST_AUTO_BACKUP"):
+        return None
+    if not os.environ.get("SIFT_HOME"):
+        _log.warning("SIFT_TEST_AUTO_BACKUP needs SIFT_HOME set to a test folder; not starting")
+        return None
+
+    def start() -> None:
+        deadline = time.monotonic() + _AUTO_BACKUP_WAIT_S
+        while time.monotonic() < deadline:
+            tracker = ctx.tracker
+            if tracker is not None and tracker.session() is not None:
+                names = [s.name for s in ctx.config.backup.sets if s.enabled]
+                try:
+                    jobs.start_backup(names)
+                except JobError as e:
+                    _log.warning("The test backup did not start: %s", e.message)
+                return
+            time.sleep(0.05)
+        _log.warning("The test backup did not start: no phone")
+
+    thread = threading.Thread(target=start, name="sift-test-auto-backup", daemon=True)
+    thread.start()
+    return thread
+
+
+def start_test_jobs(ctx: AppContext) -> SlowJob | None:
+    """Start the test-only slow job when SIFT_TEST_SLOW_JOB=1 (see `core.testhooks`).
+
+    It stays for the hand-run window quit check: the window always looks at the real phone, so
+    the real backup job cannot run there against the fake one. Like the fake phone it needs
+    SIFT_HOME, so it never writes into the owner's real database.
+    """
+    if not testhooks.flag("SIFT_TEST_SLOW_JOB"):
+        return None
+    home = os.environ.get("SIFT_HOME")
+    if not home:
+        _log.warning("SIFT_TEST_SLOW_JOB needs SIFT_HOME set to a test folder; not starting it")
+        return None
+    job = SlowJob(ctx.db, Path(home).expanduser() / "slow-job")
+    job.start()
+    return job
+
+
+def _stop_jobs(jobs: JobManager, slow: SlowJob | None) -> None:
+    """Stop every backup at a file boundary, waiting up to _JOBS_STOP_TIMEOUT_S in all."""
+    deadline = time.monotonic() + _JOBS_STOP_TIMEOUT_S
+    jobs.stop_all(_JOBS_STOP_TIMEOUT_S)
+    if slow is not None and not slow.stop(max(0.0, deadline - time.monotonic())):
+        _log.warning("The test job did not stop within %s s", _JOBS_STOP_TIMEOUT_S)
 
 
 @contextmanager
-def _close_windows_on_signal(get_windows: Callable[[], Iterable[Any]]) -> Iterator[None]:
-    """SIGINT/SIGTERM close the windows instead of killing the process mid-cleanup."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
+def _signals_request_shutdown(shutdown: Shutdown) -> Iterator[None]:
+    """Headless mode: SIGINT and SIGTERM ask for shutdown, and `main` then runs it.
+
+    The handlers stay in place until the block ends, so a second Ctrl-C during cleanup does
+    not cut it short.
+    """
 
     def on_signal(signum: int, frame: FrameType | None) -> None:
-        close_windows(get_windows())
+        shutdown.request(f"signal {signal.Signals(signum).name}")
 
     previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
     try:
@@ -224,13 +368,29 @@ def _quiet_pywebview_logger() -> None:
     logging.getLogger("pywebview").setLevel(logging.INFO)
 
 
-def _run_window(url: str) -> None:
+def _run_window(url: str, shutdown: Shutdown) -> None:
+    """Show the window until the app quits. Every quit route runs `shutdown` (see WindowQuit).
+
+    Cmd-Q, the close button and SIGINT/SIGTERM all end in `applicationShouldTerminate:`, which
+    runs the shutdown and then lets AppKit exit the process, so this may never return. It does
+    return if the window goes away by itself; `main` then runs the shutdown.
+    """
     import webview  # imported here so headless runs never load Cocoa
 
+    from sift import cocoa_quit
+
     _quiet_pywebview_logger()
-    webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
-    with _close_windows_on_signal(lambda: webview.windows):
-        webview.start()
+    window = webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
+    if window is None:  # only when an `initialized` handler cancels it; Sift adds none
+        return
+    quit = WindowQuit(
+        shutdown,
+        ask_app_to_terminate=cocoa_quit.ask_app_to_terminate,
+        reply_to_terminate=cocoa_quit.reply_to_terminate,
+    )
+    window.events.closing += quit.on_window_closing
+    cocoa_quit.install(quit)
+    webview.start(gui="cocoa")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,11 +421,9 @@ def main(argv: list[str] | None = None) -> int:
         print("Sift is already running.")
         return 1
 
-    ctx: AppContext | None = None
-    sock: socket.socket | None = None
-    handle: ServerHandle | None = None
-    tracker: DeviceTracker | None = None
-    logging_on = False
+    # Every exit from here on, early or not, runs these steps in reverse order of adding.
+    shutdown = Shutdown()
+    shutdown.add("lock", lock.release, timeout_s=_LOCK_STEP_S)
     try:
         install_crash_handler(paths)
         token = secrets.token_urlsafe(32)
@@ -280,6 +438,8 @@ def main(argv: list[str] | None = None) -> int:
                 "Try a different --port, or leave it out."
             )
             return 2
+        # Closing twice is harmless: the server takes the socket over and closes it on stop.
+        shutdown.add("socket", sock.close, timeout_s=_SOCKET_STEP_S)
         try:
             ctx = build_context(paths, token, sock.getsockname()[1], find_web_dist())
         except DatabaseTooNewError:
@@ -303,31 +463,36 @@ def main(argv: list[str] | None = None) -> int:
                 "Nothing was changed; your backups are not affected."
             )
             return 2
+        shutdown.add("db", ctx.db.close, timeout_s=_DB_STEP_S)
+        if mode == "fake":  # SIFT_HOME is set (checked above)
+            keep_fake_backups_at_home(ctx.config, os.environ["SIFT_HOME"])
         setup_logging(paths, ctx.bus, level="INFO")
-        logging_on = True
+        shutdown.add("logging", teardown_logging, timeout_s=_LOGGING_STEP_S)
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
+        recover_at_startup(ctx)  # before any job can start
+        # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
+        jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())
+        ctx.jobs = jobs
         handle = start_server(ctx, sock)
+        shutdown.add("server", handle.stop, timeout_s=_SERVER_STEP_S)
         tracker = build_tracker(mode, ctx, os.environ)
         if tracker is not None:
             ctx.tracker = tracker
+            shutdown.add("tracker", tracker.stop, timeout_s=_TRACKER_STEP_S)  # before the DB closes
             tracker.start()
+        slow = start_test_jobs(ctx)
+        # Added last, so it runs first: jobs stop before the tracker, server and database.
+        shutdown.add("jobs", lambda: _stop_jobs(jobs, slow), timeout_s=_JOBS_STOP_TIMEOUT_S + 5)
+        start_test_backup(ctx, jobs)
         url = f"{handle.url}/?t={token}"
         if args.no_window:
-            print(f"Sift running at {url}", flush=True)
-            _wait_for_signal()
+            with _signals_request_shutdown(shutdown):
+                print(f"Sift running at {url}", flush=True)
+                shutdown.wait_requested()
+                shutdown.run()
         else:
-            _run_window(url)
+            _run_window(url, shutdown)
         return 0
     finally:
-        if tracker is not None:
-            tracker.stop()  # before the database closes: the tracker writes to it
-        if handle is not None:
-            handle.stop()
-        elif sock is not None:
-            sock.close()
-        if ctx is not None:
-            ctx.db.close()
-        if logging_on:
-            teardown_logging()
-        lock.release()
+        shutdown.run()

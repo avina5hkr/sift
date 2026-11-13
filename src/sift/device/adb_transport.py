@@ -13,15 +13,21 @@ How each call reaches the phone:
   and `DeviceDisconnected` when it is not.
 - `sha256` stats the paths, then hashes on the phone with one `sha256sum` line per file, in
   batches (see `shell.build_sha256_script` for why no name ever appears in the output).
-- `info` and `link_health` run read-only commands (`getprop`, `df`, `wm size`,
-  `dumpsys battery`, `true`, and `settings get secure android_id` when the phone reports no
-  `ro.serialno`). `DeviceInfo.serial` is the phone's identity: `ro.serialno`, else `android_id`.
+- `info` runs ONE read-only exec script (`shell.INFO_SCRIPT`: `getprop`, `settings get secure
+  android_id`, `date +%s`, `df`, `wm size`, `dumpsys battery`) with marked sections, so one
+  probe costs one connection. `DeviceInfo` keeps `serial` (`ro.serialno`) and `android_id`
+  apart; `link_health` runs `true`.
+- `open_read(path, offset, entry=...)` trusts a `RemoteEntry` the caller already has and skips
+  the extra LST2.
+- `walk(root, on_error, prune)` hands an unlistable subfolder (or an entry the phone cannot
+  look at) to `on_error` and carries on, instead of raising; a subfolder `prune` returns True
+  for is not listed at all.
 
-Connections to the adb server come from adbutils' `AdbClient.make_connection` (after
-`install_no_spawn_guard()`, so adbutils can never start an adb program); the service requests on
-them are written here as raw bytes so that paths that are not valid UTF-8 reach the phone
-unchanged. Sync connections are `Sync2` sockets. A `threading.BoundedSemaphore` caps how many
-connections are open at once; an open stream holds one until it is closed.
+Connections to the adb server come from `adbwire.open_service`, which only ever connects (no
+adb program is run and no server is started or restarted here); the service requests on them
+are written as raw bytes so that paths that are not valid UTF-8 reach the phone unchanged. Sync
+connections are `Sync2` sockets. A `threading.BoundedSemaphore` caps how many connections are
+open at once; an open stream holds one until it is closed.
 
 On a real phone LIS2 cannot tell an unreadable folder from an empty one, and LST2 succeeds on a
 folder whose contents cannot be read, so an unreadable folder (such as another app's folder under
@@ -47,28 +53,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
-import adbutils
-from adbutils.errors import AdbError, AdbTimeout
-
+from sift.device import adbwire
 from sift.device.adb_manager import ADB_SERVER_HOST
-from sift.device.adbutils_guard import install_no_spawn_guard
 from sift.device.shell import (
+    INFO_SCRIPT,
     build_sha256_script,
     encode_command,
-    parse_battery,
-    parse_df,
+    parse_info,
     parse_sha256_output,
-    parse_wm_size,
     tail_command,
 )
-from sift.device.sync2 import (
-    Sync2,
-    SyncStat,
-    _read_host_string,
-    _recv_exact,
-    _send_all,
-    device_features,
-)
+from sift.device.sync2 import Sync2, SyncStat, device_features
 from sift.device.transport import (
     NO_IDENTITY_MESSAGE,
     DeviceDisconnected,
@@ -111,6 +106,8 @@ class Limits:
     sha_min_s: float = 120
     # ~half the ~86 MB/s cold rate measured on a reference phone; also drives tail resume allowance
     sha_assumed_bps: int = 40 * 10**6
+    # `tail -c +N` is silent while it skips N bytes; never wait longer than this for it
+    resume_max_s: float = 600
     max_connections: int = 6
     max_request_bytes: int = 0xFFFF  # an adb host request's length is 4 hex digits
 
@@ -149,9 +146,11 @@ def resume_allowance_s(offset: int, limits: Limits) -> float:
 
     `tail -c +N` reads and throws away the first N-1 bytes before it prints anything, so a
     resume deep into a big file is silent for a while: `max(read_stall_s, offset /
-    sha_assumed_bps)`. After the first bytes arrive the normal `read_stall_s` applies.
+    sha_assumed_bps)`, but the part that comes from the offset is capped at `resume_max_s`
+    (600 s), so a wrong guess can never make a dead phone look alive for hours. It is never
+    less than `read_stall_s`. After the first bytes arrive the normal `read_stall_s` applies.
     """
-    return max(limits.read_stall_s, offset / limits.sha_assumed_bps)
+    return max(limits.read_stall_s, min(offset / limits.sha_assumed_bps, limits.resume_max_s))
 
 
 def _norm(path: str) -> str:
@@ -268,7 +267,7 @@ class _Watchdog:
         try:
             self._abort()
         except Exception:
-            log.exception("Could not abort a stalled read of %s", self._path)
+            log.exception("Could not abort a stalled read of %r", self._path)
 
 
 class StallGuardedStream(io.RawIOBase):
@@ -285,10 +284,14 @@ class StallGuardedStream(io.RawIOBase):
       between reads never counts as a stall.
     - Early end: if the chunks end before `expected_size` bytes, the read raises what
       `short_end(received, expected)` returns, `DeviceDisconnected` by default (again on every
-      later read; `short_end` is asked once). More bytes than expected is fine (the file grew).
+      later read; `short_end` is asked once, and if it raises, the default is used). A short
+      stream never reads as a clean end. More bytes than expected is fine (the file grew).
+    - A failure is kept without its traceback (each read raises a fresh copy), so a failed
+      stream holds no reference cycle and is freed as soon as the caller drops it.
     - `close()` first calls `abort` (so a read blocked on another thread wakes up), then stops
-      the watchdog, closes the chunk iterator and calls `release` exactly once. A stream that
-      is dropped without `close()` is closed when it is collected.
+      the watchdog, closes the chunk iterator and calls `release` exactly once, even when two
+      threads close at the same time (the second returns at once). A stream that is dropped
+      without `close()` is closed when it is collected.
     """
 
     def __init__(
@@ -306,6 +309,8 @@ class StallGuardedStream(io.RawIOBase):
         poll_s: float | None = None,
     ) -> None:
         super().__init__()
+        self._close_lock = threading.Lock()
+        self._closing = False
         self._chunks = chunks
         self._path = path
         self._expected = expected_size
@@ -356,13 +361,15 @@ class StallGuardedStream(io.RawIOBase):
         return b"".join(parts)
 
     def close(self) -> None:
-        if self.closed:
-            return
+        with self._close_lock:
+            if self._closing or self.closed:
+                return
+            self._closing = True
         try:
             try:
                 self._abort()  # wakes a read blocked on another thread
             except Exception:
-                log.exception("Could not abort the read of %s", self._path)
+                log.exception("Could not abort the read of %r", self._path)
             self._watchdog.stop()
             close_chunks = getattr(self._chunks, "close", None)
             if close_chunks is not None:
@@ -370,9 +377,11 @@ class StallGuardedStream(io.RawIOBase):
                     close_chunks()
         finally:
             release, self._release = self._release, None
-            if release is not None:
-                release()
-            super().close()
+            try:
+                if release is not None:
+                    release()
+            finally:
+                super().close()  # closed even when giving the connection back fails
 
     # -- internals ------------------------------------------------------------------------
 
@@ -381,7 +390,7 @@ class StallGuardedStream(io.RawIOBase):
             raise copy.copy(self._failure)  # a fresh instance (with `path`), no old traceback
 
     def _fail(self, error: TransportError) -> None:
-        self._failure = error
+        self._failure = _detached(error)
         self._raise_failure()
 
     def _timeout(self) -> DeviceTimeout:
@@ -403,7 +412,7 @@ class StallGuardedStream(io.RawIOBase):
                 if self._watchdog.stalled:
                     self._fail(self._timeout())
                 if isinstance(e, TransportError):
-                    self._failure = e
+                    self._failure = _detached(e)  # `e` holds this frame (and self) in its traceback
                     raise
                 self._fail(DeviceDisconnected(f"Lost the connection while reading {self._path}."))
             finally:
@@ -416,12 +425,25 @@ class StallGuardedStream(io.RawIOBase):
                 self._got_first = True
                 self._received += len(chunk)
                 return chunk
-        self._ended = True
         if self._expected is not None and self._received < self._expected:
-            if self._short_end is not None:
-                self._fail(self._short_end(self._received, self._expected))
-            self._fail(_ended_short(self._path, self._received, self._expected))
+            # The failure is stored before `_ended`, so no later read can mistake it for a
+            # clean end.
+            self._fail(self._short_end_error(self._received, self._expected))
+        self._ended = True
         return None
+
+    def _short_end_error(self, received: int, expected: int) -> TransportError:
+        if self._short_end is not None:
+            try:
+                return self._short_end(received, expected)
+            except Exception:
+                log.exception("Could not tell why the read of %r ended short", self._path)
+        return _ended_short(self._path, received, expected)
+
+
+def _detached(error: TransportError) -> TransportError:
+    """A copy of `error` with no traceback, cause or context to hold frames alive."""
+    return copy.copy(error).with_traceback(None)
 
 
 def _ended_short(path: str, received: int, expected: int) -> DeviceDisconnected:
@@ -432,24 +454,6 @@ def _ended_short(path: str, received: int, expected: int) -> DeviceDisconnected:
 
 def _file_changed(path: str) -> FileChanged:
     return FileChanged(f"{path} changed while it was being read.", path)
-
-
-def _host_request(
-    sock: socket.socket, payload: bytes, *, fail: type[TransportError], max_bytes: int
-) -> None:
-    """Send one adb host request and require OKAY; FAIL raises `fail` with adb's message.
-
-    A payload over `max_bytes` raises `RemoteError` before anything is sent.
-    """
-    if len(payload) > max_bytes:
-        raise RemoteError("That command is too long to send to the phone.")
-    _send_all(sock, b"%04x" % len(payload) + payload)
-    status = _recv_exact(sock, 4)
-    if status == b"OKAY":
-        return
-    if status == b"FAIL":
-        raise fail(_read_host_string(sock))
-    raise TransportError(f"Unexpected reply from the adb server: {status!r}")
 
 
 def _raw_chunks(sock: socket.socket) -> Iterator[bytes]:
@@ -468,7 +472,7 @@ def _raw_chunks(sock: socket.socket) -> Iterator[bytes]:
 
 def _sync_length(sock: socket.socket, what: str) -> int:
     """A sync packet's u32 length, refused above 64 KiB rather than read into memory."""
-    length: int = _U32.unpack(_recv_exact(sock, _U32.size))[0]
+    length: int = _U32.unpack(adbwire.recv_exact(sock, _U32.size))[0]
     if length > _MAX_SYNC_PAYLOAD:
         raise TransportError(f"The phone sent a {what} that is too long ({length} bytes).")
     return length
@@ -479,16 +483,16 @@ def _recv_chunks(sock: socket.socket, path: str, first: bytes) -> Iterator[bytes
     ident = first
     while True:
         if ident == b"DATA":
-            yield _recv_exact(sock, _sync_length(sock, "data packet"))
+            yield adbwire.recv_exact(sock, _sync_length(sock, "data packet"))
         elif ident == b"DONE":
-            _recv_exact(sock, _U32.size)
+            adbwire.recv_exact(sock, _U32.size)
             return
         elif ident == b"FAIL":
-            message = _recv_exact(sock, _sync_length(sock, "error message"))
+            message = adbwire.recv_exact(sock, _sync_length(sock, "error message"))
             raise RemoteError(message.decode("utf-8", "replace"), path)
         else:
             raise TransportError(f"Unexpected sync reply: {ident!r}")
-        ident = _recv_exact(sock, 4)
+        ident = adbwire.recv_exact(sock, 4)
 
 
 class AdbTransport:
@@ -502,12 +506,10 @@ class AdbTransport:
         limits: Limits = DEFAULT_LIMITS,
         host: str = ADB_SERVER_HOST,
     ) -> None:
-        install_no_spawn_guard()
         self.serial = serial
         self.limits = limits
         self._host = host
         self._port = port
-        self._client = adbutils.AdbClient(host=host, port=port)
         self._slots = threading.BoundedSemaphore(limits.max_connections)
         self._features: frozenset[str] | None = None
         self._features_lock = threading.Lock()
@@ -546,27 +548,19 @@ class AdbTransport:
         ):
             yield s
 
-    def _open_service(self, service: bytes, timeout_s: float) -> adbutils.AdbConnection:
-        """A connection to the phone running `service` (e.g. b"sync:", b"exec:...").
+    def _open_service(self, service: bytes, timeout_s: float) -> socket.socket:
+        """A socket connected to `service` (e.g. b"sync:", b"exec:...") on the phone.
 
-        The caller holds a connection slot and must close the returned connection.
+        The caller holds a connection slot and must close the returned socket.
         """
-        try:
-            conn = self._client.make_connection(timeout=timeout_s)
-        except AdbTimeout as e:
-            raise DeviceTimeout("The adb server did not answer in time.") from e
-        except (AdbError, OSError) as e:
-            raise DeviceDisconnected(f"Cannot reach the adb server: {e}") from e
-        try:
-            sock = conn.conn
-            transport = b"host:transport:" + self.serial.encode()
-            max_bytes = self.limits.max_request_bytes
-            _host_request(sock, transport, fail=DeviceDisconnected, max_bytes=max_bytes)
-            _host_request(sock, service, fail=RemoteError, max_bytes=max_bytes)
-        except BaseException:
-            conn.close()
-            raise
-        return conn
+        return adbwire.open_service(
+            self._host,
+            self._port,
+            self.serial,
+            service,
+            timeout_s=timeout_s,
+            max_bytes=self.limits.max_request_bytes,
+        )
 
     def _exec(self, command: str, timeout_s: float) -> bytes:
         """Run `command` on the phone (adbd runs it with `sh -c`) and return its output.
@@ -576,9 +570,8 @@ class AdbTransport:
         """
         deadline = time.monotonic() + timeout_s
         with self._slot(timeout_s):
-            conn = self._open_service(b"exec:" + encode_command(command), timeout_s)
+            sock = self._open_service(b"exec:" + encode_command(command), timeout_s)
             try:
-                sock: socket.socket = conn.conn
                 parts: list[bytes] = []
                 for chunk in _raw_chunks(sock):
                     parts.append(chunk)
@@ -588,38 +581,28 @@ class AdbTransport:
                     sock.settimeout(remaining)
                 return b"".join(parts)
             finally:
-                conn.close()
+                sock.close()
 
     # -- Transport: reads -----------------------------------------------------------------
 
     def info(self) -> DeviceInfo:
         timeout = self.limits.stat_s
-
-        def text(command: str) -> str:
-            return self._exec(command, timeout).decode("utf-8", "replace")
-
-        model = text("getprop ro.product.model").strip()
-        release = text("getprop ro.build.version.release").strip()
-        if not model or not release:
+        probe = parse_info(self._exec(INFO_SCRIPT, timeout).decode("utf-8", "replace"))
+        if not probe.model or not probe.release:
             raise RemoteError("The phone did not report its model and Android version.")
-        serial = text("getprop ro.serialno").strip()
-        if not serial:
-            # `settings get` is a read; it prints "null" when the value is not set.
-            serial = text("settings get secure android_id").strip()
-            if serial == "null":
-                serial = ""
-        if not serial:
+        if probe.serial is None and probe.android_id is None:
             raise RemoteError(NO_IDENTITY_MESSAGE)
-        storage = parse_df(text("df /sdcard"))
-        free, total = storage if storage is not None else (None, None)
+        free, total = probe.storage if probe.storage is not None else (None, None)
         return DeviceInfo(
-            serial=serial,
-            model=model,
-            android_version=release,
-            battery_pct=parse_battery(text("dumpsys battery")),
+            serial=probe.serial,
+            model=probe.model,
+            android_version=probe.release,
+            battery_pct=probe.battery_pct,
             free_bytes=free,
             total_bytes=total,
-            screen_sizes=parse_wm_size(text("wm size")),
+            screen_sizes=probe.screen_sizes,
+            android_id=probe.android_id,
+            phone_time=probe.phone_time,
         )
 
     def stat(self, path: str) -> RemoteEntry | None:
@@ -630,14 +613,21 @@ class AdbTransport:
         if st.error in (_ENOENT, _ENOTDIR):
             return None
         if st.error:
-            raise RemoteError(f"The phone cannot look at {path}: {_describe(st.error)}.", path)
+            raise RemoteError(
+                f"The phone cannot look at {path}: {_describe(st.error)}.", path, errno=st.error
+            )
         return _entry(path, st)
 
     def list_dir(self, path: str) -> list[RemoteEntry]:
         """One level, folders included. An unreadable folder may come back empty (see top)."""
         return self._list_folder(_norm(path))
 
-    def walk(self, root: str) -> Iterator[RemoteEntry]:
+    def walk(
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None = None,
+        prune: Callable[[str], bool] | None = None,
+    ) -> Iterator[RemoteEntry]:
         """Depth-first files and symlinks under `root`; symlinks are never descended into.
 
         If `root` is a symlink to a folder, as `/sdcard` is on a phone, the folder it points
@@ -646,21 +636,54 @@ class AdbTransport:
         is exhausted, closed or collected. Folders are handled one after another on it: each
         is checked with LST2, then its LIS2 listing is read to the end before anything else
         is sent, so nothing ever overlaps on the connection.
-        """
-        return self._walk(_norm(root))
 
-    def _walk(self, root: str) -> Iterator[RemoteEntry]:
+        With `on_error`, a subfolder that cannot be listed, or an entry the phone cannot look
+        at, is passed to it as a `RemoteError` and skipped. `root` must always be listable.
+        With `prune`, a subfolder it returns True for is never checked or listed.
+        """
+        return self._walk(_norm(root), on_error, prune)
+
+    def _walk(
+        self,
+        root: str,
+        on_error: Callable[[RemoteError], None] | None,
+        prune: Callable[[str], bool] | None,
+    ) -> Iterator[RemoteEntry]:
         _encode_path(root)  # refuse a bad root before connecting
-        with self._sync(self.limits.list_s) as sync:
-            stack = [iter(self._list_with(sync, root))]
-            while stack:
-                entry = next(stack[-1], None)
-                if entry is None:
-                    stack.pop()
-                elif entry.is_dir:
-                    stack.append(iter(self._list_with(sync, entry.path)))
-                else:
-                    yield entry
+        features = self._phone_features()
+        timeout = self.limits.list_s
+
+        def connect() -> Sync2:
+            return Sync2(self._host, self._port, self.serial, timeout_s=timeout, features=features)
+
+        with self._slot(timeout):
+            sync = connect()
+            try:
+                stack = [iter(self._list_with(sync, root, on_error))]
+                while stack:
+                    entry = next(stack[-1], None)
+                    if entry is None:
+                        stack.pop()
+                    elif entry.is_dir:
+                        if prune is not None and prune(entry.path):
+                            continue
+                        try:
+                            children = self._list_with(sync, entry.path, on_error)
+                        except RemoteError as e:
+                            if on_error is None:
+                                raise
+                            on_error(e)
+                            if not sync.is_open:
+                                # The phone answered with a sync FAIL, which ends the connection
+                                # (never a half-read reply to the next folder): carry on afresh.
+                                sync.close()
+                                sync = connect()
+                            continue
+                        stack.append(iter(children))
+                    else:
+                        yield entry
+            finally:
+                sync.close()
 
     def _list_folder(self, folder: str) -> list[RemoteEntry]:
         """Check and list one folder on a connection of its own."""
@@ -669,14 +692,22 @@ class AdbTransport:
             return self._list_with(sync, folder)
 
     @staticmethod
-    def _list_with(sync: Sync2, folder: str) -> list[RemoteEntry]:
-        """Check `folder` with LST2, then list it with LIS2 (read to the end) on `sync`."""
+    def _list_with(
+        sync: Sync2, folder: str, on_error: Callable[[RemoteError], None] | None = None
+    ) -> list[RemoteEntry]:
+        """Check `folder` with LST2, then list it with LIS2 (read to the end) on `sync`.
+
+        An entry the phone cannot look at raises `RemoteError`, or goes to `on_error` (and is
+        left out) when that is given.
+        """
         raw = _encode_path(folder)
         st = sync.stat(raw)
         if st.error == 0 and stat_mode.S_ISLNK(st.mode):
             st = sync.stat(raw + b"/")  # a trailing slash makes lstat follow the link
         if st.error:
-            raise RemoteError(f"Cannot list {folder}: {_describe(st.error)}.", folder)
+            raise RemoteError(
+                f"Cannot list {folder}: {_describe(st.error)}.", folder, errno=st.error
+            )
         if not stat_mode.S_ISDIR(st.mode):
             raise RemoteError(f"Cannot list {folder}: it is not a folder.", folder)
         listed = sorted(sync.list(raw))
@@ -685,15 +716,22 @@ class AdbTransport:
             child = _join(folder, name.decode("utf-8", "surrogateescape"))
             if child_stat.error:
                 message = f"The phone cannot look at {child}: {_describe(child_stat.error)}."
-                raise RemoteError(message, child)
+                failure = RemoteError(message, child, errno=child_stat.error)
+                if on_error is None:
+                    raise failure
+                on_error(failure)
+                continue
             entries.append(_entry(child, child_stat))
         return entries
 
-    def open_read(self, path: str, offset: int = 0) -> BinaryIO:
+    def open_read(
+        self, path: str, offset: int = 0, *, entry: RemoteEntry | None = None
+    ) -> BinaryIO:
         if offset < 0:
             raise ValueError(f"offset must not be negative: {offset}")
         path = _norm(path)
-        entry = self.stat(path)
+        if entry is None:
+            entry = self.stat(path)
         if entry is None:
             raise RemoteError(f"Cannot read {path}: no such file.", path)
         if entry.is_dir or entry.is_symlink:
@@ -708,16 +746,15 @@ class AdbTransport:
             service = b"exec:" + encode_command(f"{tail_command(path, offset)} 2>/dev/null")
         self._acquire(timeout)
         try:
-            conn = self._open_service(service, timeout)
+            sock = self._open_service(service, timeout)
         except BaseException:
             self._slots.release()
             raise
-        sock: socket.socket = conn.conn
         short_end: Callable[[int, int], TransportError]
         try:
             if offset == 0:
-                _send_all(sock, b"RECV" + _U32.pack(len(raw)) + raw)
-                first = _recv_exact(sock, 4)
+                adbwire.send_all(sock, b"RECV" + _U32.pack(len(raw)) + raw)
+                first = adbwire.recv_exact(sock, 4)
                 chunks = _recv_chunks(sock, path, first)
                 if first == b"FAIL":
                     next(chunks)  # raises RemoteError naming the path, now rather than later
@@ -744,7 +781,7 @@ class AdbTransport:
             sock.settimeout(first_chunk_s * 2)
         except BaseException:
             try:
-                conn.close()
+                sock.close()
             finally:
                 self._slots.release()
             raise
@@ -755,7 +792,7 @@ class AdbTransport:
 
         def release() -> None:
             try:
-                conn.close()
+                sock.close()
             finally:
                 self._slots.release()
 
@@ -789,7 +826,7 @@ class AdbTransport:
         except RemoteError:
             return True  # the phone answered, with an error
         except (TransportError, OSError) as e:
-            log.info("The phone did not answer a stat of %s: %s", path, e)
+            log.info("The phone did not answer a stat of %r: %s", path, e)
             return False
         return True
 

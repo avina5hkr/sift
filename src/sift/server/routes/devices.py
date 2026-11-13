@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 from typing import Annotated
 
@@ -9,6 +10,7 @@ from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 
 router = APIRouter()
+_download_running = threading.Lock()  # one download request at a time; a second is refused
 
 
 def get_adb_manager(ctx: Ctx) -> AdbManager:
@@ -41,7 +43,9 @@ class AdbLocationOut(BaseModel):
 
 
 @router.post("/devices/adb/download")
-def download_adb(manager: AdbManagerDep, body: DownloadRequest | None = None) -> AdbLocationOut:
+def download_adb(
+    ctx: Ctx, manager: AdbManagerDep, body: DownloadRequest | None = None
+) -> AdbLocationOut:
     """Download Google's platform-tools. The only network call in the app besides other
     first-run downloads the person approves; it needs `{"consent": true}`."""
     consent = body.consent if body else False
@@ -52,12 +56,21 @@ def download_adb(manager: AdbManagerDep, body: DownloadRequest | None = None) ->
             "Sift downloads Google's platform-tools only with your permission. "
             "Approve the download to continue.",
         )
+    if not _download_running.acquire(blocking=False):
+        raise ApiError(
+            409, "download_running", "adb is already being downloaded. Wait for it to finish."
+        )
     try:
-        return AdbLocationOut.of(manager.download(consent=True))
+        loc = AdbLocationOut.of(manager.download(consent=True))
     except AdbDownloadError as e:
         raise ApiError(502, "adb_download_failed", e.message) from e
     except AdbError as e:
         raise ApiError(500, "adb_error", e.message) from e
+    finally:
+        _download_running.release()
+    if ctx.tracker is not None:
+        ctx.tracker.retry()  # adb is there now: look for the phone at once, not after a backoff
+    return loc
 
 
 class StoredDevice(BaseModel):

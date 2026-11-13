@@ -287,3 +287,36 @@ def test_given_features_are_still_checked(features: set[str]) -> None:
     # Nothing listens on this port: the refusal must come before any connection is made.
     with pytest.raises(RemoteError, match="too old for Sift"):
         Sync2("127.0.0.1", _dead_port(), "FAKESERIAL", timeout_s=TIMEOUT_S, features=features)
+
+
+def test_a_sync_fail_message_over_64_kib_is_refused(server: FakeAdbServer) -> None:
+    server.fail_message = b"x" * (64 * 1024 + 1)
+    with connect(server) as sync:
+        with pytest.raises(TransportError, match="too long") as info:
+            sync.stat(b"/f")
+        assert not isinstance(info.value, RemoteError)
+        with pytest.raises(DeviceDisconnected, match="closed"):
+            sync.stat(b"/f")
+
+
+def test_a_sync_fail_message_of_exactly_64_kib_is_read(server: FakeAdbServer) -> None:
+    server.fail_message = b"x" * (64 * 1024)
+    with connect(server) as sync, pytest.raises(RemoteError) as info:
+        sync.stat(b"/f")
+    assert len(str(info.value)) == 64 * 1024
+
+
+def test_a_lis2_name_over_1024_bytes_is_refused(server: FakeAdbServer) -> None:
+    server.dirs[b"/d"] = [(b"a" * 1025, FakeStat())]
+    with connect(server) as sync:
+        with pytest.raises(TransportError, match="too long"):
+            list(sync.list(b"/d"))
+        with pytest.raises(DeviceDisconnected, match="closed"):
+            sync.stat(b"/d")
+
+
+def test_a_lis2_name_of_exactly_1024_bytes_is_listed(server: FakeAdbServer) -> None:
+    server.dirs[b"/d"] = [(b"a" * 1024, FakeStat())]
+    with connect(server) as sync:
+        [(name, _)] = list(sync.list(b"/d"))
+    assert len(name) == 1024
