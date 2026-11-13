@@ -10,6 +10,12 @@ import { formatAgo, formatBytes, formatCount } from '../lib/format'
 import type { CleanupSummary, TaskEvent } from '../lib/types'
 import { plain, post } from './Wizard/request'
 
+const CARDS = [
+  { tab: 'exact', title: 'Exact duplicates', empty: 'No exact copies found.', noun: ['extra copy', 'extra copies'] },
+  { tab: 'near', title: 'Near-duplicates', empty: 'No near-duplicates found.', noun: ['smaller or resent copy', 'smaller or resent copies'] },
+  { tab: 'similar', title: 'Similar shots', empty: 'No similar shots found.', noun: ['similar shot', 'similar shots'] },
+]
+
 export default function CleanupPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -63,7 +69,6 @@ export default function CleanupPage() {
       : start.isPending
         ? 'Starting…'
         : null
-  const card = data.cards.find((c) => c.tab === 'exact')
 
   return (
     <div className="flex max-w-3xl flex-col gap-5 p-6">
@@ -97,28 +102,31 @@ export default function CleanupPage() {
         )}
       </section>
 
-      {data.analyzed_at != null && card && (
-        <section aria-label="Exact duplicates" className="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="min-w-0 flex-1">
-              <h2 className="font-medium">Exact duplicates</h2>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                {card.groups === 0
-                  ? 'No exact copies found.'
-                  : `${formatCount(card.groups)} group${card.groups === 1 ? '' : 's'}, ${formatCount(card.files)} extra cop${
-                      card.files === 1 ? 'y' : 'ies'
-                    }, ${formatBytes(card.bytes)} to free`}
-              </p>
-            </div>
-            <ReasonButton
-              reason={card.groups === 0 ? 'There are no duplicates to review.' : null}
-              onClick={() => navigate('/cleanup/review')}
-            >
-              Review
-            </ReasonButton>
-          </div>
-        </section>
-      )}
+      {data.analyzed_at != null &&
+        CARDS.map(({ tab, title, empty, noun }) => {
+          const c = data.cards.find((x) => x.tab === tab)
+          if (!c) return null
+          return (
+            <section key={tab} aria-label={title} className="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="min-w-0 flex-1">
+                  <h2 className="font-medium">{title}</h2>
+                  <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                    {c.groups === 0
+                      ? empty
+                      : `${formatCount(c.groups)} group${c.groups === 1 ? '' : 's'}, ${formatCount(c.files)} ${noun[c.files === 1 ? 0 : 1]}, ${formatBytes(c.bytes)} to free`}
+                  </p>
+                </div>
+                <ReasonButton
+                  reason={c.groups === 0 ? 'There is nothing to review here.' : null}
+                  onClick={() => navigate(tab === 'exact' ? '/cleanup/review' : `/cleanup/review?tab=${tab}`)}
+                >
+                  Review
+                </ReasonButton>
+              </div>
+            </section>
+          )
+        })}
     </div>
   )
 }
