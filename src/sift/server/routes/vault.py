@@ -1,10 +1,12 @@
 """Verify, Problems and Repair, and the long-task status (Verify, Adopt, Rebuild)."""
 
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from sift.backup.adopt import adopt
 from sift.backup.problems import open_problems
 from sift.backup.replicator import Dest, load_dest
 from sift.backup.verifier import NothingToRepairFrom, repair, verify_dest
@@ -117,3 +119,47 @@ def repair_problem(ctx: Ctx, problem_id: int) -> RepairOut:
         raise ApiError(404, "not_found", str(e)) from e
     except NothingToRepairFrom as e:
         raise ApiError(409, "no_good_copy", str(e)) from e
+
+
+class AdoptRequest(BaseModel):
+    destination: str  # 'mac' or 'ssd'
+
+
+@router.post("/backup/adopt")
+def start_adopt(ctx: Ctx, body: AdoptRequest) -> TaskOut:
+    """Index the files already in a backup folder, in place. Nothing in it is changed."""
+    dests = [d for d in mounted_dests(ctx) if d.kind == body.destination]
+    if not dests:
+        raise ApiError(
+            409, "not_mounted", f"The {body.destination.upper()} backup folder is not available."
+        )
+    dest = dests[0]
+
+    def work(control: TaskControl) -> dict[str, Any]:
+        stats = adopt(
+            ctx.db,
+            dest,
+            mode=ctx.config.backup.adopt_mode,
+            should_stop=lambda: control.should_stop,
+            on_file=control.progress,
+        )
+        return asdict(stats)
+
+    return start_task(ctx, "adopt", work)
+
+
+@router.post("/backup/rebuild")
+def start_rebuild(ctx: Ctx) -> TaskOut:
+    """After a lost database: index every plugged-in backup folder again."""
+
+    def work(control: TaskControl) -> dict[str, Any]:
+        totals: dict[str, int] = {}
+        for dest in mounted_dests(ctx):
+            stats = adopt(
+                ctx.db, dest, should_stop=lambda: control.should_stop, on_file=control.progress
+            )
+            for key, value in asdict(stats).items():
+                totals[key] = totals.get(key, 0) + int(value)
+        return totals
+
+    return start_task(ctx, "rebuild", work)
