@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { formatBytes, formatCount, formatDuration, formatEta, formatSpeed } from './format'
+import { formatAgo, formatBytes, formatCount, formatDuration, formatEta, formatSpeed } from './format'
 
 test('formatBytes', () => {
   expect(formatBytes(0)).toBe('0 B')
@@ -25,4 +25,11 @@ test('formatDuration', () => {
   expect(formatDuration(42)).toBe('42 s')
   expect(formatDuration(125)).toBe('2 min 5 s')
   expect(formatDuration(3720)).toBe('1 h 2 min')
+})
+
+test('formatAgo says how long ago in plain words', () => {
+  expect(formatAgo(1000, 1010)).toBe('just now')
+  expect(formatAgo(1000, 1000 + 5 * 60)).toBe('5 minutes ago')
+  expect(formatAgo(1000, 1000 + 3600)).toBe('1 hour ago')
+  expect(formatAgo(1000, 1000 + 3 * 86_400)).toBe('3 days ago')
 })

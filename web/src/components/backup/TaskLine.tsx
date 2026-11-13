@@ -7,6 +7,7 @@ const LABEL: Record<TaskKind, string> = {
   rebuild: 'Rebuilding the backup list',
   confirm: 'Confirming a set',
   analyse: 'Analysing the phone',
+  analyze: 'Looking for duplicates',
 }
 const ENDED = { done: 'finished', stopped: 'stopped', failed: 'could not finish' }
 

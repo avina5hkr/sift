@@ -26,6 +26,7 @@ from sift.backup.scanner import ScanResult, scan, space_check
 from sift.backup.sets import resolve_roots
 from sift.backup.skiprules import SkipRules
 from sift.backup.summary import record_summary
+from sift.cleanup.candidates import rebuild_exact
 from sift.core.clock import Clock, SystemClock
 from sift.core.config import Config
 from sift.core.context import AppContext
@@ -238,6 +239,8 @@ def run_backup(
         result = _run(ctx, ctl, sets, dry_run, clock, sleep, reconnect_pause_s, progress)
         if not dry_run and not ctl.stop_requested:
             replicate_to_ssd(ctx, ctl, progress, clock)
+        if not dry_run and progress.device_id is not None:
+            rebuild_exact(ctx.db, progress.device_id)  # Review always matches the phone now
         # A stop asked for just as the run ended is still a stop, not a plain "done".
         outcome = "stopped" if ctl.stop_requested else "done"
         return result

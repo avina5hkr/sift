@@ -1,0 +1,289 @@
+"""Cleanup: Analyze (index + exact duplicates), Cleanup home summary, the Review list, selection."""
+
+import json
+import time
+from typing import Any, Literal
+
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+from sift.analysis.index import run_index
+from sift.backup.phonepaths import shown
+from sift.backup.run import usable_dests
+from sift.cleanup.candidates import (
+    is_checked,
+    rebuild_exact,
+    select_all_in_tab,
+    set_selection,
+)
+from sift.core.origin import classify_origin
+from sift.device.tracker import STORED_PHONE_ORDER
+from sift.server.deps import Ctx
+from sift.server.errors import ApiError
+from sift.server.routes.vault import TaskOut, start_task, tasks_of
+from sift.services.tasks import TaskControl
+
+router = APIRouter()
+
+ANALYZED_AT = "cleanup_analyzed_at"
+PAGE = 200
+
+
+def stored_device_id(ctx: Ctx) -> int | None:
+    with ctx.db.read() as conn:
+        row = conn.execute(f"SELECT id FROM device {STORED_PHONE_ORDER} LIMIT 1").fetchone()
+    return None if row is None else int(row[0])
+
+
+def _device(ctx: Ctx) -> int:
+    device_id = stored_device_id(ctx)
+    if device_id is None:
+        raise ApiError(409, "no_phone", "Back up a phone first; then Sift can analyse it.")
+    return device_id
+
+
+def screen_sizes(ctx: Ctx) -> list[tuple[int, int]]:
+    """The phone's screen sizes (`wm size`), cached per phone (plan assumption B2)."""
+    session = ctx.tracker.session() if ctx.tracker is not None else None
+    with ctx.db.read() as conn:
+        row = conn.execute(f"SELECT uuid FROM device {STORED_PHONE_ORDER} LIMIT 1").fetchone()
+    uuid = str(row[0]) if row else ""
+    key = f"screen_sizes:{uuid}"
+    if session is not None and session.device_uuid == uuid:
+        try:
+            sizes = [list(s) for s in session.transport.info().screen_sizes]
+            with ctx.db.tx() as conn:
+                conn.execute(
+                    "INSERT INTO setting (key, value) VALUES (?, ?) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps(sizes)),
+                )
+        except Exception:
+            pass
+    with ctx.db.read() as conn:
+        cached = conn.execute("SELECT value FROM setting WHERE key = ?", (key,)).fetchone()
+    return [(int(w), int(h)) for w, h in json.loads(cached[0])] if cached else []
+
+
+@router.post("/cleanup/analyze")
+def analyze(ctx: Ctx) -> TaskOut:
+    """Index the backed-up files (stage A) and find exact copies on the phone (stage B)."""
+    device_id = _device(ctx)
+    screens = screen_sizes(ctx)
+
+    def work(control: TaskControl) -> dict[str, Any]:
+        stats = run_index(
+            ctx.db,
+            ctx.paths.cache,
+            screens,
+            dest_ids={d.id for d in usable_dests(ctx)},
+            should_stop=lambda: control.should_stop,
+            on_file=control.progress,
+        )
+        groups = rebuild_exact(ctx.db, device_id)
+        with ctx.db.tx() as conn:
+            conn.execute(
+                "INSERT INTO setting (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (ANALYZED_AT, str(int(time.time()))),
+            )
+        return {"indexed": stats.indexed, "unreadable": stats.unreadable, "exact_groups": groups}
+
+    return start_task(ctx, "analyze", work)
+
+
+@router.post("/cleanup/cancel")
+def cancel(ctx: Ctx) -> TaskOut | None:
+    runner = tasks_of(ctx)
+    runner.stop(timeout_s=0.0)
+    status = runner.current()
+    return None if status is None else TaskOut(**status.as_event())
+
+
+Category = Literal["Camera", "WhatsApp images", "WhatsApp video", "Sent", "Other"]
+
+
+def category(path: str, kind: str) -> Category:
+    origin = classify_origin(path)
+    if origin == "camera":
+        return "Camera"
+    if origin == "whatsapp_sent":
+        return "Sent"
+    if origin.startswith("whatsapp"):
+        return "WhatsApp video" if kind == "video" else "WhatsApp images"
+    return "Other"
+
+
+class Card(BaseModel):
+    tab: str
+    groups: int
+    files: int
+    bytes: int
+
+
+class CleanupSummary(BaseModel):
+    has_backup: bool
+    analyzed_at: int | None
+    new_since: int  # backed-up files not analysed yet
+    storage: dict[str, int]  # category -> bytes on the phone
+    cards: list[Card]
+
+
+@router.get("/cleanup/summary")
+def summary(ctx: Ctx) -> CleanupSummary:
+    device_id = stored_device_id(ctx)
+    storage: dict[str, int] = dict.fromkeys(
+        ["Camera", "WhatsApp images", "WhatsApp video", "Sent", "Other"], 0
+    )
+    with ctx.db.read() as conn:
+        rows = (
+            conn.execute(
+                "SELECT p.remote_path, p.size, IFNULL(c.kind, 'other') FROM phone_file p "
+                "LEFT JOIN content c ON c.hash = p.content_hash "
+                "WHERE p.device_id = ? AND p.present = 1",
+                (device_id,),
+            ).fetchall()
+            if device_id is not None
+            else []
+        )
+        has_backup = bool(conn.execute("SELECT 1 FROM replica LIMIT 1").fetchone())
+        at = conn.execute("SELECT value FROM setting WHERE key = ?", (ANALYZED_AT,)).fetchone()
+        new_since = int(
+            conn.execute(
+                "SELECT count(*) FROM content WHERE analysis_version < 1 "
+                "AND hash IN (SELECT content_hash FROM replica)"
+            ).fetchone()[0]
+        )
+    groups = exact_groups_now(ctx, device_id) if device_id is not None else []
+    for path, size, kind in rows:
+        storage[category(shown(str(path)), str(kind))] += int(size)
+    return CleanupSummary(
+        has_backup=has_backup,
+        analyzed_at=int(at[0]) if at else None,
+        new_since=new_since,
+        storage=storage,
+        cards=[
+            Card(
+                tab="exact",
+                groups=len(groups),
+                files=sum(len(g.copies) for g in groups),
+                bytes=sum(g.reclaimable for g in groups),
+            )
+        ],
+    )
+
+
+class Item(BaseModel):
+    id: int
+    path: str
+    size: int
+    mtime: int
+    origin: str
+    kind: str
+    width: int | None
+    height: int | None
+    checked: bool
+    role: str
+
+
+class GroupOut(BaseModel):
+    group_id: int
+    content_hash: str
+    keeper: Item
+    copies: list[Item]
+    reclaimable: int
+
+
+class CandidatesOut(BaseModel):
+    tab: str
+    groups: list[GroupOut]
+    total_groups: int
+    next_cursor: int | None
+
+
+def exact_groups_now(ctx: Ctx, device_id: int) -> list[GroupOut]:
+    """The exact-duplicate groups as the phone is now: only present files whose content is
+    still the keeper's; a group whose keeper is gone or changed is left out until the next
+    rebuild (every backup run rebuilds them)."""
+    with ctx.db.read() as conn:
+        rows = conn.execute(
+            "SELECT c.group_id, p.id, p.remote_path, p.size, p.mtime, p.content_hash, c.role, "
+            "c.default_checked, s.checked, IFNULL(t.kind, 'other'), t.width, t.height "
+            "FROM candidate c JOIN phone_file p ON p.id = c.phone_file_id "
+            "LEFT JOIN selection s ON s.phone_file_id = p.id "
+            "LEFT JOIN content t ON t.hash = p.content_hash "
+            "WHERE c.tab = 'exact' AND p.device_id = ? AND p.present = 1 "
+            "AND p.content_hash IS NOT NULL ORDER BY c.group_id, c.role DESC, p.id",
+            (device_id,),
+        ).fetchall()
+    groups: dict[int, GroupOut] = {}
+    for gid, pid, path, size, mtime, digest, role, default, chosen, kind, width, height in rows:
+        item = Item(
+            id=pid,
+            path=shown(path),
+            size=size,
+            mtime=mtime,
+            origin=classify_origin(shown(path)),
+            kind=kind,
+            width=width,
+            height=height,
+            role=role,
+            checked=role != "keeper" and is_checked(default, chosen),
+        )
+        if role == "keeper":
+            groups[gid] = GroupOut(
+                group_id=gid, content_hash=digest, keeper=item, copies=[], reclaimable=0
+            )
+        elif gid in groups and digest == groups[gid].content_hash:
+            groups[gid].copies.append(item)
+            groups[gid].reclaimable += size
+    return [g for g in groups.values() if g.copies]
+
+
+@router.get("/cleanup/candidates")
+def candidates(ctx: Ctx, tab: str = "exact", sort: str = "size", cursor: int = 0) -> CandidatesOut:
+    if tab != "exact":
+        return CandidatesOut(tab=tab, groups=[], total_groups=0, next_cursor=None)
+    device_id = _device(ctx)
+    ordered = exact_groups_now(ctx, device_id)
+    if sort == "date":
+        ordered.sort(key=lambda g: -g.keeper.mtime)
+    elif sort == "group":
+        ordered.sort(key=lambda g: -len(g.copies))
+    else:
+        ordered.sort(key=lambda g: -g.reclaimable)
+    page = ordered[cursor : cursor + PAGE]
+    nxt = cursor + PAGE if cursor + PAGE < len(ordered) else None
+    return CandidatesOut(tab=tab, groups=page, total_groups=len(ordered), next_cursor=nxt)
+
+
+class SelectionRequest(BaseModel):
+    ids: list[int] = []
+    checked: bool
+    all_in_tab: str | None = None
+
+
+class SelectionOut(BaseModel):
+    changed: int
+
+
+@router.post("/selection")
+def selection(ctx: Ctx, body: SelectionRequest) -> SelectionOut:
+    device_id = _device(ctx)
+    if body.all_in_tab is not None:
+        return SelectionOut(
+            changed=select_all_in_tab(ctx.db, device_id, body.all_in_tab, body.checked)
+        )
+    with ctx.db.read() as conn:  # only this phone's candidates, never a keeper
+        allowed = {
+            int(r[0])
+            for r in conn.execute(
+                "SELECT c.phone_file_id FROM candidate c "
+                "JOIN phone_file p ON p.id = c.phone_file_id "
+                "WHERE p.device_id = ? AND IFNULL(c.role, '') != 'keeper'",
+                (device_id,),
+            )
+        }
+    ids = [i for i in body.ids if i in allowed]
+    set_selection(ctx.db, ids, body.checked)
+    return SelectionOut(changed=len(ids))

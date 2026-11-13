@@ -59,3 +59,24 @@ def remove(ctx: Ctx, body: RemoveRequest) -> Removed:
         return Removed(files=_control(ctx).remove(body.path, keep_folder=body.keep_folder))
     except KeyError:
         raise ApiError(404, "no_such_path", "That path is not on the fake phone.") from None
+
+
+class ImageRequest(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=20)  # the same small photo at each path
+    width: int = Field(default=64, ge=8, le=512)
+    height: int = Field(default=48, ge=8, le=512)
+
+
+@router.post("/images", status_code=204)
+def add_images(ctx: Ctx, body: ImageRequest) -> Response:
+    """Put one real JPEG at every path, so previews and exact duplicates can be tested."""
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (body.width, body.height), (40, 120, 200)).save(out, "JPEG")
+    phone = _control(ctx).phone
+    for path in body.paths:
+        phone.add_file(path, out.getvalue(), mtime=1_700_000_000)
+    return Response(status_code=204)
