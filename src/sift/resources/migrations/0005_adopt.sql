@@ -46,3 +46,8 @@ CREATE INDEX ix_confirmation_set ON confirmation (device_id, set_name, created_a
 
 CREATE INDEX IF NOT EXISTS ix_replica_dest ON replica (dest_id);
 CREATE INDEX IF NOT EXISTS ix_content_size ON content (size);
+
+-- When the phone's own SHA-256 of this file last equalled content_hash, and the file's mtime
+-- then; a confirmation re-asks the phone only for files changed since (or never checked).
+ALTER TABLE phone_file ADD COLUMN phone_hash_at INTEGER;
+ALTER TABLE phone_file ADD COLUMN phone_hash_mtime INTEGER;

@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from sift.backup.adopt import adopt
+from sift.backup.confirm import build_report, confirm, latest
 from sift.backup.problems import open_problems
 from sift.backup.replicator import Dest, load_dest
 from sift.backup.verifier import NothingToRepairFrom, repair, verify_dest
@@ -163,3 +164,64 @@ def start_rebuild(ctx: Ctx) -> TaskOut:
         return totals
 
     return start_task(ctx, "rebuild", work)
+
+
+class ConfirmationOut(BaseModel):
+    set_name: str
+    report: dict[str, Any]  # the live checks (no phone: phone_unchecked counts what is pending)
+    last_confirmed_at: int | None
+    last_confirmed: bool
+    stale_reason: str | None
+
+
+def _phone(ctx: Ctx) -> tuple[int, Any]:
+    from sift.server.routes.backup import _connected_device_id
+
+    device_id = _connected_device_id(ctx)
+    session = ctx.tracker.session() if ctx.tracker is not None else None
+    if device_id is None or session is None:
+        raise ApiError(409, "no_phone", "Connect the phone you back up, then try again.")
+    return device_id, session
+
+
+@router.get("/backup/confirmation")
+def confirmation(ctx: Ctx, set: str) -> ConfirmationOut:
+    from sift.server.routes.backup import _connected_device_id
+
+    device_id = _connected_device_id(ctx)
+    if device_id is None:
+        raise ApiError(409, "no_phone", "Connect the phone you back up, then try again.")
+    live = build_report(ctx.db, ctx.config, device_id, set)
+    last = latest(ctx.db, ctx.config, device_id, set)
+    return ConfirmationOut(
+        set_name=set,
+        report=asdict(live),
+        last_confirmed_at=last.created_at if last else None,
+        last_confirmed=bool(last and last.confirmed),
+        stale_reason=last.stale_reason if last else None,
+    )
+
+
+class ConfirmRequest(BaseModel):
+    set: str
+
+
+@router.post("/backup/confirm")
+def start_confirm(ctx: Ctx, body: ConfirmRequest) -> TaskOut:
+    """Check the set with the phone's own hashes and save a dated confirmation."""
+    if body.set not in {s.name for s in ctx.config.backup.sets}:
+        raise ApiError(404, "unknown_set", f"There is no set called {body.set!r}.")
+    device_id, session = _phone(ctx)
+
+    def work(control: TaskControl) -> dict[str, Any]:
+        done = confirm(
+            ctx.db,
+            ctx.config,
+            device_id,
+            body.set,
+            session.transport,
+            should_stop=lambda: control.should_stop,
+        )
+        return {"confirmed": done.confirmed, "files": done.files, "report": done.report}
+
+    return start_task(ctx, "confirm", work)
