@@ -250,3 +250,31 @@ bought, so from M3 on every milestone follows `CLAUDE.md`:
 - One whole-branch review per milestone (most capable model), one fix pass. Delete and phone-write
   code (M8, M11, M12) also gets one focused review when it is written.
 - `docs/CODEMAP.md` (from `make codemap`) replaces exploratory file reading.
+
+## 10. M2 outcome and carry-over (2026-11-13)
+
+M2 is complete on branch `m2-backup`: 18 tasks, each reviewed, then a whole-branch review and one
+fix wave. Suites: 1499 pytest, 138 vitest, 11 Playwright e2e, P1/P2/P6 under the `ci` profile,
+ruff + mypy strict clean. Records: `docs/spikes/m2-quit.md` (four quit routes, mid-job),
+`docs/spikes/m2-backup.md` (75 real files, all SHA-256 equal, second run 0 bytes, reader test
+40.6 MB/s), and the contract re-run after removing adbutils in `docs/spikes/m1-device.md`.
+
+Decisions later milestones must respect:
+- adbutils is gone; `sift.device.adbwire` is the only adb socket code. The downloaded adb must
+  pass `codesign --verify --strict` with team `EQHXZ8M8AV`.
+- Phone paths that are not UTF-8 are stored through `sift.backup.phonepaths` (valid UTF-8
+  unchanged). Every read of `phone_file.remote_path` for the UI must use its display form.
+- Each phone has its own folder label under one locked `mac_root`; switching needs typed SWITCH.
+- A set folder missing on the phone counts as empty; the mass-disappearance guard is the net.
+- Notifications post only from a packaged `.app` (from source the center aborts the process).
+- Migrations in use: 0002 backup, 0003 run_summary, 0004 run_summary.discarded.
+
+Carry-over:
+- **M3:** exFAT behaviour of `renamex_np`, folder `F_FULLFSYNC` and mtime across rename on the
+  real SSD; decide `required_destinations` when the SSD step was skipped (still mac+ssd);
+  reconcile runs only at startup and its requeue is not scoped per destination.
+- **M3+:** the puller holds its path lock across commit I/O (needs a per-hash claim to lift);
+  overview queries are unindexed (about 0.2 s at 300k rows); the "no space" hint is a 100 MB
+  heuristic; the window-mode quit check used the test job (headless covers the real one).
+- **M9:** full Settings, per-phone folder renaming after a switch, the adb download size is a
+  constant.
