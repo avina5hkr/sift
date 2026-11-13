@@ -8,6 +8,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import sift
+from sift.analysis.cluster import Stopped as ClusteringStopped
+from sift.analysis.models import ConsentNeeded, DownloadStopped, ModelDownloadError
 from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
@@ -58,6 +60,10 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "ChecksumMismatch": ChecksumMismatch,
     "TargetExists": TargetExists,
     "SourceCorrupt": SourceCorrupt,
+    "ConsentNeeded": ConsentNeeded,
+    "ModelDownloadError": ModelDownloadError,
+    "DownloadStopped": DownloadStopped,
+    "ClusteringStopped": ClusteringStopped,
     "NothingToRepairFrom": NothingToRepairFrom,
     "TaskBusy": TaskBusy,
     "ScanNotPending": ScanNotPending,

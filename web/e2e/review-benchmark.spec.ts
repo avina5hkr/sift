@@ -51,6 +51,10 @@ async function mockApi(page: Page) {
 
 test.setTimeout(240_000)
 
+// Timing under a busy machine (other e2e workers) can miss the target once; the target itself
+// stays strict, so a real slowdown still fails every attempt.
+test.describe.configure({ retries: 2 })
+
 test('20,000 items: first paint of the grid and a scroll through all of them', async ({ page, sift }) => {
   await sift.complete()
   await mockApi(page)

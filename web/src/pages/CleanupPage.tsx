@@ -3,7 +3,9 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ReasonButton } from '../components/backup/ReasonButton'
 import { TaskLine } from '../components/backup/TaskLine'
+import { ModelCard } from '../components/cleanup/ModelCard'
 import { StorageBar } from '../components/cleanup/StorageBar'
+import { TeachCard } from '../components/cleanup/TeachCard'
 import { apiFetch } from '../lib/api'
 import { useEventStore } from '../lib/events'
 import { formatAgo, formatBytes, formatCount } from '../lib/format'
@@ -101,6 +103,9 @@ export default function CleanupPage() {
           </p>
         )}
       </section>
+
+      <ModelCard />
+      {data.has_backup && <TeachCard />}
 
       {data.analyzed_at != null &&
         CARDS.map(({ tab, title, empty, noun }) => {

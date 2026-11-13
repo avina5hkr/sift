@@ -6,6 +6,8 @@ adb or the operating system, can never reach a screen through it (the detail goe
 The one value it reads is `RemoteError.errno`, to pick between fixed sentences.
 """
 
+from sift.analysis.cluster import Stopped as ClusteringStopped
+from sift.analysis.models import ConsentNeeded, DownloadStopped, ModelDownloadError
 from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
@@ -56,6 +58,10 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (IncompleteCopy, "A file was not copied completely, so it was not kept."),
     (ChecksumMismatch, "A copied file did not read back correctly, so it was discarded."),
     (TargetExists, "A file with that name already exists, so it was left alone."),
+    (ConsentNeeded, "Sift needs your permission before it downloads the model."),
+    (ModelDownloadError, "Sift could not download the model."),
+    (DownloadStopped, "The model download was stopped."),
+    (ClusteringStopped, "Grouping look-alike pictures was stopped."),
     (NothingToRepairFrom, "No good copy of this file is on another backup drive."),
     (SourceCorrupt, "A backed-up file no longer matches its checksum, so it was not copied."),
     (ScanNotPending, "That scan is no longer waiting for your confirmation."),

@@ -192,3 +192,84 @@ def make(out: Path, *, n_images: int = 12) -> dict[str, object]:
 
 if __name__ == "__main__":
     make(Path(sys.argv[1] if len(sys.argv) > 1 else "build/fixtures"))
+
+
+# -- greetings and documents (OCR, search, Teach the app) -----------------------------------
+
+_FONTS = {
+    "latin": "/System/Library/Fonts/Helvetica.ttc",
+    "devanagari": "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc",
+}
+
+
+def _font(kind: str, size: int):
+    from PIL import ImageFont
+
+    try:
+        return ImageFont.truetype(_FONTS[kind], size)
+    except OSError:
+        return ImageFont.load_default(size)
+
+
+def greeting(seed: int, text: str, *, script: str = "latin") -> Image.Image:
+    """A greeting-like card: a warm gradient, flower shapes and a big line of text."""
+    rnd = random.Random(seed)
+    w, h = 720, 720
+    img = Image.new("RGB", (w, h))
+    draw = ImageDraw.Draw(img)
+    top = (rnd.randrange(200, 256), rnd.randrange(120, 200), rnd.randrange(40, 120))
+    bottom = (rnd.randrange(150, 230), rnd.randrange(40, 120), rnd.randrange(80, 160))
+    for y in range(h):
+        t = y / h
+        draw.line(
+            [(0, y), (w, y)],
+            fill=tuple(int(a + (b - a) * t) for a, b in zip(top, bottom, strict=True)),
+        )
+    for _ in range(9):  # flowers: a ring of petals round a centre
+        cx, cy, r = rnd.randrange(w), rnd.randrange(h // 2, h), rnd.randrange(30, 70)
+        petal = (rnd.randrange(200, 256), rnd.randrange(60, 160), rnd.randrange(120, 220))
+        for k in range(6):
+            a = k * math.tau / 6
+            px, py = cx + math.cos(a) * r * 0.8, cy + math.sin(a) * r * 0.8
+            draw.ellipse([px - r / 2, py - r / 2, px + r / 2, py + r / 2], fill=petal)
+        draw.ellipse([cx - r / 3, cy - r / 3, cx + r / 3, cy + r / 3], fill=(250, 220, 60))
+    font = _font(script, 84)
+    box = draw.textbbox((0, 0), text, font=font)
+    x = (w - (box[2] - box[0])) // 2
+    draw.text((x + 3, 123), text, font=font, fill=(60, 20, 20))
+    draw.text((x, 120), text, font=font, fill=(255, 255, 240))
+    return img
+
+
+def document(seed: int) -> Image.Image:
+    """A document-like page: lines of text and a 12-digit number."""
+    rnd = random.Random(seed)
+    img = Image.new("RGB", (900, 1200), (250, 250, 246))
+    draw = ImageDraw.Draw(img)
+    font = _font("latin", 34)
+    words = ["account", "invoice", "total", "date", "address", "name", "amount", "payment"]
+    for i in range(14):
+        line = " ".join(rnd.choice(words) for _ in range(5))
+        draw.text((60, 80 + i * 62), line.capitalize(), font=font, fill=(20, 20, 20))
+    number = "".join(str(rnd.randrange(10)) for _ in range(12))
+    draw.text((60, 1000), f"No. {number[:4]} {number[4:8]} {number[8:]}", font=font, fill=(0, 0, 0))
+    return img
+
+
+def make_text_fixtures(out: Path) -> dict[str, list[str]]:
+    """Greetings in English and Hindi and documents; returns the file names by kind."""
+    out.mkdir(parents=True, exist_ok=True)
+    names: dict[str, list[str]] = {"greeting": [], "greeting_hi": [], "document": []}
+    for i, text in enumerate(["Good Morning", "Good Morning!", "Good Morning", "Have a nice day"]):
+        name = f"greet_en_{i}.jpg"
+        (out / name).write_bytes(jpeg_bytes(greeting(200 + i, text)))
+        names["greeting"].append(name)
+    for i, text in enumerate(["सुप्रभात", "शुभ प्रभात"]):
+        name = f"greet_hi_{i}.jpg"
+        (out / name).write_bytes(jpeg_bytes(greeting(300 + i, text, script="devanagari")))
+        names["greeting_hi"].append(name)
+    for i in range(3):
+        name = f"doc_{i}.jpg"
+        (out / name).write_bytes(jpeg_bytes(document(400 + i)))
+        names["document"].append(name)
+    return names

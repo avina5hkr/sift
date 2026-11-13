@@ -13,6 +13,8 @@ import BackupPage from './pages/BackupPage'
 import CleanupPage from './pages/CleanupPage'
 import LogsPage from './pages/LogsPage'
 import ReviewPage from './pages/ReviewPage'
+import SearchPage from './pages/SearchPage'
+import TeachPage from './pages/TeachPage'
 import QuarantinePage from './pages/QuarantinePage'
 import SettingsPage from './pages/SettingsPage'
 import WizardPage from './pages/Wizard'
@@ -77,6 +79,8 @@ export default function App() {
             <Route path="/backup" element={<BackupPage />} />
             <Route path="/cleanup" element={<CleanupPage />} />
             <Route path="/cleanup/review" element={<ReviewPage />} />
+            <Route path="/cleanup/teach" element={<TeachPage />} />
+            <Route path="/cleanup/search" element={<SearchPage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/settings" element={<SettingsPage />} />

@@ -7,8 +7,11 @@ from typing import Any, Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from sift.analysis.cluster import run_clusters
+from sift.analysis.embed import run_embed
 from sift.analysis.index import run_index
 from sift.analysis.near import find_groups, load_items, store_groups
+from sift.analysis.ocr import run_ocr
 from sift.backup.phonepaths import shown
 from sift.backup.run import usable_dests
 from sift.cleanup.candidates import (
@@ -22,6 +25,7 @@ from sift.core.origin import classify_origin
 from sift.device.tracker import STORED_PHONE_ORDER
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
+from sift.server.routes.teach import embedding_model
 from sift.server.routes.vault import TaskOut, start_task, tasks_of
 from sift.services.tasks import TaskControl
 
@@ -69,7 +73,8 @@ def screen_sizes(ctx: Ctx) -> list[tuple[int, int]]:
 
 @router.post("/cleanup/analyze")
 def analyze(ctx: Ctx) -> TaskOut:
-    """Index the backed-up files (stage A) and find exact copies on the phone (stage B)."""
+    """Index (A), exact and near copies (B-E), OCR (F) and, with the model, embeddings and
+    clusters (G, H)."""
     device_id = _device(ctx)
     screens = screen_sizes(ctx)
 
@@ -84,6 +89,28 @@ def analyze(ctx: Ctx) -> TaskOut:
         )
         groups = rebuild_exact(ctx.db, device_id)
         near = store_groups(ctx.db, find_groups(load_items(ctx.db, device_id), ctx.config.analysis))
+        dests = {d.id for d in usable_dests(ctx)}
+        stop = lambda: control.should_stop  # noqa: E731
+        read = run_ocr(ctx.db, dest_ids=dests, should_stop=stop, on_file=control.progress)
+        model = embedding_model(ctx)
+        embedded = 0
+        clusters: int | None = 0
+        if model is not None:
+            embedded = run_embed(
+                ctx.db,
+                model,
+                ctx.paths.cache,
+                dest_ids=dests,
+                should_stop=stop,
+                on_file=control.progress,
+            )
+            clusters = run_clusters(
+                ctx.db,
+                ctx.config.analysis,
+                model.version,
+                changed=embedded > 0,
+                should_stop=stop,
+            )
         with ctx.db.tx() as conn:
             conn.execute(
                 "INSERT INTO setting (key, value) VALUES (?, ?) "
@@ -95,6 +122,9 @@ def analyze(ctx: Ctx) -> TaskOut:
             "unreadable": stats.unreadable,
             "exact_groups": groups,
             "near_groups": len(near),
+            "ocr": read,
+            "embedded": embedded,
+            "clusters": clusters,
         }
 
     return start_task(ctx, "analyze", work)
