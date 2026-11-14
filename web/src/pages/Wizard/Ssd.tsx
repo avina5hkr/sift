@@ -5,10 +5,12 @@ import { formatBytes } from '../../lib/format'
 import type { SsdVolume } from '../../lib/types'
 import { Button, ErrorNote, Hint, StepHeading, type StepProps } from './ui'
 import { plain, post } from './request'
+import { ChooseFolderButton } from '../../components/ChooseFolderButton'
 
-type Volumes = { volumes: SsdVolume[]; selected_uuid: string }
+type Volumes = { volumes: SsdVolume[]; selected_uuid: string; folder?: string }
+type SsdFolderSaved = { volume_name: string; folder: string; root: string }
 
-export function Ssd({ next }: StepProps) {
+export function Ssd({ next, settings = false }: StepProps & { settings?: boolean }) {
   const qc = useQueryClient()
   const list = useQuery({
     queryKey: ['setup', 'volumes'],
@@ -24,13 +26,28 @@ export function Ssd({ next }: StepProps) {
     onError: (e) => setError(plain(e)),
     onSettled: () => void qc.invalidateQueries({ queryKey: ['setup', 'volumes'] }),
   })
+  const [savedFolder, setSavedFolder] = useState<string | null>(null)
+  const saveFolder = useMutation({
+    mutationFn: (path: string) => post<SsdFolderSaved>('/api/setup/ssd-folder', { path }),
+    onMutate: () => setError(null),
+    onSuccess: (r) => {
+      setSavedFolder(`${r.folder} on ${r.volume_name}`)
+      next()
+    },
+    onError: (e) => setError(plain(e)),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['setup', 'volumes'] }),
+  })
 
   const volumes = list.data?.volumes ?? []
   const current = picked ?? list.data?.selected_uuid ?? null
   const chosen = volumes.find((v) => v.uuid === current)
   return (
     <section aria-labelledby="step-title" className="flex flex-col gap-4">
-      <StepHeading>An SSD for a second copy (optional)</StepHeading>
+      {settings ? (
+        <h2 className="text-lg font-semibold">Backup folder on the SSD</h2>
+      ) : (
+        <StepHeading>An SSD for a second copy (optional)</StepHeading>
+      )}
       <p>
         If you have an external drive, Sift can keep a second copy of your backup on it. You can skip this and add a
         drive later.
@@ -66,13 +83,24 @@ export function Ssd({ next }: StepProps) {
           ))}
         </fieldset>
       )}
+      {list.data?.selected_uuid && (
+        <p className="text-sm">
+          Backup folder on the drive:{' '}
+          <span className="font-mono">{savedFolder ?? (list.data.folder || 'a folder named like the Mac backup folder, at the top of the drive')}</span>
+        </p>
+      )}
       <ErrorNote message={error} />
       <div className="flex flex-wrap items-center gap-3">
+        <ChooseFolderButton
+          start="/Volumes"
+          label="Choose a folder on the drive…"
+          onPicked={(path) => saveFolder.mutate(path)}
+        />
         <Button primary disabled={!chosen || save.isPending} onClick={() => save.mutate(chosen?.uuid ?? null)}>
           Use this drive
         </Button>
         <Button disabled={save.isPending} onClick={() => save.mutate(null)}>
-          Skip for now
+          {settings ? 'Use no SSD' : 'Skip for now'}
         </Button>
         <Button disabled={list.isFetching} onClick={() => void list.refetch()}>
           Look again

@@ -302,6 +302,9 @@ def _check_names(values: list[str]) -> list[str]:
 class BackupConfig(_Section):
     mac_root: str = "~/PhoneBackup"
     ssd_volume_uuid: str = ""
+    ssd_folder: str = (
+        ""  # the backup folder on the SSD, relative to the drive; "" = same name as mac_root
+    )
     device_label: str = "Phone"
     layout: Layout = "mirror"
     settle_seconds: Count = 120

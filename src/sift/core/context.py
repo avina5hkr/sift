@@ -1,5 +1,6 @@
 """The shared application context handed to the API and, later, to the backup engine."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,3 +34,4 @@ class AppContext:
     ssd: SsdWatcher | None = None  # the backup SSD's presence; None until wired
     tasks: TaskRunner | None = None  # Verify, Adopt, Rebuild; None until wired
     phone_control: FakePhoneControl | None = None  # test hook only: see routes/testphone.py
+    pick_folder: Callable[[str | None], str | None] | None = None  # the window's folder dialog

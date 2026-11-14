@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 import uvicorn
 
@@ -376,7 +377,19 @@ def _quiet_pywebview_logger() -> None:
     logging.getLogger("pywebview").setLevel(logging.INFO)
 
 
-def _run_window(url: str, shutdown: Shutdown) -> None:
+def _choose_folder(window: Any, start: str | None) -> str | None:
+    """The macOS folder dialog over the window; None when the owner cancels."""
+    import webview
+
+    kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None)
+    if kind is None:
+        kind = webview.FOLDER_DIALOG
+    folder = os.path.expanduser(start) if start else ""
+    picked = window.create_file_dialog(kind, directory=folder if os.path.isdir(folder) else "")
+    return str(picked[0]) if picked else None
+
+
+def _run_window(url: str, shutdown: Shutdown, ctx: AppContext | None = None) -> None:
     """Show the window until the app quits. Every quit route runs `shutdown` (see WindowQuit).
 
     Cmd-Q, the close button and SIGINT/SIGTERM all end in `applicationShouldTerminate:`, which
@@ -391,6 +404,8 @@ def _run_window(url: str, shutdown: Shutdown) -> None:
     window = webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
     if window is None:  # only when an `initialized` handler cancels it; Sift adds none
         return
+    if ctx is not None:
+        ctx.pick_folder = lambda start: _choose_folder(window, start)
     quit = WindowQuit(
         shutdown,
         ask_app_to_terminate=cocoa_quit.ask_app_to_terminate,
@@ -508,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
                 shutdown.wait_requested()
                 shutdown.run()
         else:
-            _run_window(url, shutdown)
+            _run_window(url, shutdown, ctx)
         return 0
     finally:
         shutdown.run()

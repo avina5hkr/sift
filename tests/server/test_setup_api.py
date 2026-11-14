@@ -1020,3 +1020,45 @@ def test_a_backed_up_phone_without_a_label_keeps_its_folder_after_switching_away
     post(client, "switch-phone", {"ref": ref_of(client, "Beta 2"), "confirmation": "SWITCH"})
     post(client, "switch-phone", {"ref": ref_of(client, "Alpha 1"), "confirmation": "SWITCH"})
     assert labels(ctx) == [("Alpha 1", "Phone"), ("Beta 2", "Beta 2")]
+
+
+def test_a_folder_on_the_ssd_can_be_chosen(
+    client: TestClient, ctx: AppContext, tmp_path: Path
+) -> None:
+    mount = tmp_path / "Volumes" / "T7"
+    mount.mkdir(parents=True)
+    drive = Volume("T7", "ExFAT", "uuid-t7", 700, 1000, True, None, str(mount))
+    with_volumes(client, drive, OLD)
+    saved = post(client, "ssd-folder", {"path": str(mount / "Backups" / "Phone")}).json()
+    assert saved["volume_uuid"] == "uuid-t7" and saved["folder"] == "Backups/Phone"
+    assert (mount / "Backups" / "Phone").is_dir()
+    assert ctx.config.backup.ssd_folder == "Backups/Phone"
+    assert get(client, "volumes").json()["folder"] == "Backups/Phone"
+    # the drive itself, or a folder elsewhere, is refused
+    assert post(client, "ssd-folder", {"path": str(mount)}).status_code == 422
+    assert post(client, "ssd-folder", {"path": str(tmp_path / "elsewhere")}).status_code == 422
+    # once files are backed up there, the folder cannot move
+    with ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO destination (kind, root_path, volume_uuid, label) "
+            "VALUES ('ssd', ?, 'uuid-t7', 'T7')",
+            (str(mount / "Backups" / "Phone"),),
+        )
+        conn.execute(
+            "INSERT INTO content (hash, size, kind, created_at) VALUES ('h1', 1, 'image', 1)"
+        )
+        conn.execute(
+            "INSERT INTO replica (content_hash, dest_id, rel_path, rel_key, size, verified_at) "
+            "SELECT 'h1', id, 'a.jpg', 'a.jpg', 1, 1 FROM destination WHERE volume_uuid = 'uuid-t7'"
+        )
+    moved = post(client, "ssd-folder", {"path": str(mount / "Other")})
+    assert moved.status_code == 409 and moved.json()["code"] == "backups_exist"
+    # choosing another drive starts its folder afresh
+    assert post(client, "ssd", {"volume_uuid": ""}).status_code == 200
+    assert ctx.config.backup.ssd_folder == ""
+
+
+def test_the_folder_dialog_needs_the_window(client: TestClient, ctx: AppContext) -> None:
+    assert post(client, "pick-folder", {}).status_code == 409
+    ctx.pick_folder = lambda start: f"{start}/picked"
+    assert post(client, "pick-folder", {"start": "/Users"}).json() == {"path": "/Users/picked"}
