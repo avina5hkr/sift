@@ -44,7 +44,7 @@ function JunkRow({
     <section data-testid="junk-item" aria-label="Suggested file" className="flex flex-wrap items-start gap-4 border-b border-neutral-200 px-4 py-3 dark:border-neutral-800">
       <div className="flex flex-wrap gap-2">
         {group.copies.map((c) => (
-          <Tile key={c.id} item={c} checked={review.isChecked(c)} focused={focusedId === c.id} onToggle={onToggle} onOpen={onOpen} />
+          <Tile key={c.id} item={c} reason={group.reasons?.[0]?.text} checked={review.isChecked(c)} focused={focusedId === c.id} onToggle={onToggle} onOpen={onOpen} />
         ))}
       </div>
       <div className="flex min-w-0 flex-1 flex-col items-start gap-2">

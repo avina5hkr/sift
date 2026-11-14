@@ -10,11 +10,13 @@ type Props = {
   focused: boolean
   /** The keeper is shown larger, labelled KEEP, and has no checkbox. */
   keeper?: boolean
+  /** The top reason Sift suggests this file, read out with its name. */
+  reason?: string
   onToggle?: (item: ReviewItem, shift: boolean) => void
   onOpen: (item: ReviewItem) => void
 }
 
-function Picture({ item, size }: { item: ReviewItem; size: number }) {
+function Picture({ item, size, label }: { item: ReviewItem; size: number; label: string }) {
   if (item.kind === 'video') {
     return (
       <div aria-hidden="true" className="flex items-center justify-center bg-neutral-800 text-3xl text-neutral-300" style={{ width: size, height: size }}>
@@ -25,7 +27,7 @@ function Picture({ item, size }: { item: ReviewItem; size: number }) {
   return (
     <img
       src={withToken(`/api/media/${item.id}/thumb`)}
-      alt=""
+      alt={label}
       loading="lazy"
       decoding="async"
       draggable={false}
@@ -36,9 +38,10 @@ function Picture({ item, size }: { item: ReviewItem; size: number }) {
 }
 
 /** One file: its picture (a plain tile for a video), a size badge and, for a copy, a checkbox. */
-export const Tile = memo(function Tile({ item, checked, focused, keeper = false, onToggle, onOpen }: Props) {
+export const Tile = memo(function Tile({ item, checked, focused, keeper = false, reason, onToggle, onOpen }: Props) {
   const size = keeper ? 240 : TILE
   const name = baseName(item.path)
+  const label = reason ? `${name}, ${reason}` : name
   return (
     <div id={`tile-${item.id}`} data-testid={keeper ? 'keeper' : 'copy'} className="shrink-0" style={{ width: size }}>
       <div
@@ -48,8 +51,8 @@ export const Tile = memo(function Tile({ item, checked, focused, keeper = false,
         } ${focused ? 'outline-2 outline-offset-2 outline-[var(--ring)]' : ''}`}
         style={{ width: size, height: size }}
       >
-        <button type="button" tabIndex={-1} aria-label={`Open ${name}`} onClick={() => onOpen(item)} className="block cursor-zoom-in p-0">
-          <Picture item={item} size={size - 4} />
+        <button type="button" tabIndex={-1} aria-label={`Open ${label}`} onClick={() => onOpen(item)} className="block cursor-zoom-in p-0">
+          <Picture item={item} size={size - 4} label={label} />
         </button>
         {keeper ? (
           <span className="absolute top-2 left-2 rounded bg-green-700 px-2 py-0.5 text-xs font-bold tracking-wide text-white">KEEP</span>

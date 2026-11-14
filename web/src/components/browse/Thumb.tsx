@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { withToken } from '../../lib/api'
 import type { BrowseFile } from '../../lib/types'
 
-const BOX = 'flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded bg-neutral-100 text-xs text-neutral-500 dark:bg-neutral-900'
+const BOX = 'flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded bg-neutral-100 text-xs text-neutral-600 dark:bg-neutral-900 dark:text-neutral-400'
 
 /** A small picture for a photo (a plain tile for a video or anything else, and for a photo with no backup copy yet). */
 export function Thumb({ file }: { file: Pick<BrowseFile, 'id' | 'kind'> }) {

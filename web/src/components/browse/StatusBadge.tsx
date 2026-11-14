@@ -19,7 +19,7 @@ export function StatusBadge({ status }: { status: BrowseStatus }) {
 /** A folder's files at a glance: "120 backed up · 3 not". */
 export function FolderStatus({ status }: { status: BrowseFolder['status'] }) {
   const { backed, not } = folderCounts(status)
-  if (backed + not === 0) return <span className="text-xs text-neutral-500">Empty</span>
+  if (backed + not === 0) return <span className="text-xs text-neutral-600 dark:text-neutral-400">Empty</span>
   return (
     <span className={`${PILL} ${not > 0 ? LOOK.not_backed_up : LOOK.mac_ssd}`}>
       {formatCount(backed)} backed up{not > 0 ? ` · ${formatCount(not)} not` : ''}

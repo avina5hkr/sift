@@ -93,7 +93,7 @@ export default function WizardPage() {
             <li
               key={name}
               aria-current={i === step ? 'step' : undefined}
-              className={i === step ? 'font-semibold underline' : i < step ? '' : 'text-neutral-500'}
+              className={i === step ? 'font-semibold underline' : i < step ? '' : 'text-neutral-600 dark:text-neutral-400'}
             >
               {i + 1}. {name}
             </li>
