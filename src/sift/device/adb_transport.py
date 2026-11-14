@@ -907,6 +907,46 @@ class AdbTransport:
         if written is None or written.size != size:
             raise RemoteError(f"The phone did not keep all of {remote}.", remote)
 
+    def apps_probe(self, kind: str) -> str | None:
+        from sift.device.apps import PROBES
+
+        command = PROBES.get(kind)
+        if command is None:
+            raise ValueError(kind)
+        try:
+            return self._exec(command, self.limits.stat_s * 6).decode("utf-8", "replace")
+        except TransportError:
+            return None
+
+    def package_paths(self, package: str) -> list[str]:
+        from sift.device.apps import parse_paths, valid_package
+
+        if not valid_package(package):
+            raise RemoteError(f"Not a package name: {package!r}", package)
+        out = self._exec(f"pm path {package} 2>/dev/null", self.limits.stat_s)
+        return parse_paths(out.decode("utf-8", "replace"))
+
+    def _pm(self, words: str, package: str) -> None:
+        from sift.device.apps import valid_package
+
+        if not valid_package(package):
+            raise RemoteError(f"Not a package name: {package!r}", package)
+        out = self._exec(f"pm {words} {package} 2>&1", self.limits.stat_s * 6)
+        text = out.decode("utf-8", "replace").strip()
+        if "Success" not in text:
+            raise RemoteError(f"The phone refused for {package}: {text or 'no answer'}", package)
+
+    def uninstall(self, package: str) -> None:
+        self._pm("uninstall", package)
+
+    def clear_data(self, package: str) -> None:
+        self._pm("clear", package)
+
+    def trim_caches(self) -> None:
+        out = self._exec("pm trim-caches 999G 2>&1; echo rc=$?", self.limits.stat_s * 6)
+        if not out.decode("utf-8", "replace").strip().endswith("rc=0"):
+            raise RemoteError("The phone did not free its caches.")
+
     def remove_dir(self, path: str) -> None:
         """`rmdir --` one folder: the phone refuses a folder that is not empty."""
         _encode_path(path)

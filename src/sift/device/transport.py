@@ -157,6 +157,27 @@ class Transport(Protocol):
 
     def push(self, local: Path, remote: str, mtime: int) -> None: ...
 
+    def apps_probe(self, kind: str) -> str | None:
+        """Text of one read-only app probe (packages, diskstats, usagestats, versions), or None
+        when the phone cannot answer it."""
+        ...
+
+    def package_paths(self, package: str) -> list[str]:
+        """The APK files of an installed package (base and splits); [] if unknown."""
+        ...
+
+    def uninstall(self, package: str) -> None:
+        """Remove an app and its data (`pm uninstall`); RemoteError when the phone refuses."""
+        ...
+
+    def clear_data(self, package: str) -> None:
+        """Wipe an app's data, keeping the app (`pm clear`)."""
+        ...
+
+    def trim_caches(self) -> None:
+        """Ask Android to free cache space (`pm trim-caches`)."""
+        ...
+
     def remove_dir(self, path: str) -> None:
         """Remove an empty folder (`rmdir`, never recursive); RemoteError if it is not empty."""
         ...

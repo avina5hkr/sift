@@ -439,6 +439,63 @@ class FakeTransport:
                 raise RemoteError(f"cannot write {remote}: permission denied", remote)
             self.phone.add_file(remote, local.read_bytes(), mtime=mtime)
 
+    def apps_probe(self, kind: str) -> str | None:
+        self._begin("apps_probe", kind)
+        with self._slot(self.limits.stat_s):
+            self._shell("apps_probe")
+            apps = self.phone.apps
+            if kind == "packages":
+                return "".join(
+                    f"package:{p}  installer={a.installer or 'null'}\n" for p, a in apps.items()
+                )
+            if kind == "diskstats":
+                names = list(apps)
+
+                def col(f: str) -> str:
+                    return ",".join(str(getattr(apps[n], f)) for n in names)
+
+                quoted = ",".join(f'"{n}"' for n in names)
+                return (
+                    f"Package Names: [{quoted}]\nApp Sizes: [{col('app_bytes')}]\n"
+                    f"App Data Sizes: [{col('data_bytes')}]\nCache Sizes: [{col('cache_bytes')}]\n"
+                )
+            if kind == "usagestats":
+                return "".join(
+                    f'    package={p} totalTimeUsed="0:01" lastTimeUsed="{a.last_used * 1000}"\n'
+                    for p, a in apps.items()
+                    if a.last_used
+                )
+            if kind == "versions":
+                return "".join(
+                    f"  Package [{p}] (abc):\n    versionName={a.version}\n"
+                    for p, a in apps.items()
+                )
+            raise ValueError(kind)
+
+    def package_paths(self, package: str) -> list[str]:
+        self._begin("package_paths", package)
+        app = self.phone.apps.get(package)
+        return list(app.apk_paths) if app else []
+
+    def uninstall(self, package: str) -> None:
+        self._begin("uninstall", package, mutating=True)
+        with self._slot(self.limits.delete_s):
+            if self.phone.apps.pop(package, None) is None:
+                raise RemoteError(f"Failure [DELETE_FAILED_INTERNAL_ERROR] {package}", package)
+
+    def clear_data(self, package: str) -> None:
+        self._begin("clear_data", package, mutating=True)
+        with self._slot(self.limits.delete_s):
+            app = self.phone.apps.get(package)
+            if app is None:
+                raise RemoteError(f"Failed {package}", package)
+            app.data_bytes = app.cache_bytes = 0
+
+    def trim_caches(self) -> None:
+        self._begin("trim_caches", None, mutating=True)
+        for app in self.phone.apps.values():
+            app.cache_bytes = 0
+
     def remove_dir(self, path: str) -> None:
         self._begin("remove_dir", path, mutating=True)
         with self._slot(self.limits.delete_s):
