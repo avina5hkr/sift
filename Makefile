@@ -28,3 +28,6 @@ codemap:
 
 bench:
 	SIFT_TRACKER=off uv run pytest -q -s -m bench tests/m9/test_bench.py
+
+build:
+	packaging/build_dmg.sh
