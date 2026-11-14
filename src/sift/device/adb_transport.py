@@ -457,6 +457,10 @@ def _file_changed(path: str) -> FileChanged:
     return FileChanged(f"{path} changed while it was being read.", path)
 
 
+BUGREPORT_S = 20 * 60  # a bug report takes 1 to 5 minutes on a current phone
+BUGREPORT_QUIET_S = 120.0  # longest gap between progress lines
+
+
 def _raw_chunks(sock: socket.socket) -> Iterator[bytes]:
     """Everything the phone sends until it closes the stream."""
     while True:
@@ -917,6 +921,52 @@ class AdbTransport:
             return self._exec(command, self.limits.stat_s * 6).decode("utf-8", "replace")
         except TransportError:
             return None
+
+    def health_probe(self, kind: str) -> str | None:
+        from sift.device.health import PROBES
+
+        command = PROBES.get(kind)
+        if command is None:
+            raise ValueError(kind)
+        try:
+            return self._exec(command, self.limits.stat_s * 6).decode("utf-8", "replace")
+        except TransportError:
+            return None
+
+    def capture_bugreport(
+        self, on_progress: Callable[[int, int], None], should_stop: Callable[[], bool]
+    ) -> str:
+        from sift.device.health import parse_bugreportz
+
+        deadline = time.monotonic() + BUGREPORT_S
+        text = ""
+        with self._slot(BUGREPORT_S):
+            sock = self._open_service(
+                b"exec:" + encode_command("bugreportz -p"), self.limits.stat_s
+            )
+            try:
+                sock.settimeout(BUGREPORT_QUIET_S)
+                for chunk in _raw_chunks(sock):
+                    text += chunk.decode("utf-8", "replace")
+                    done, total, path, error = parse_bugreportz(text)
+                    if total:
+                        on_progress(done, total)
+                    if error:
+                        raise RemoteError(f"The phone could not make a bug report: {error}")
+                    if path:
+                        return path
+                    if should_stop():
+                        raise RemoteError("Stopped.")
+                    if time.monotonic() > deadline:
+                        raise DeviceTimeout("The bug report took too long.")
+            finally:
+                sock.close()
+        _, _, path, error = parse_bugreportz(text)
+        if path:
+            return path
+        raise RemoteError(
+            f"The phone did not make a bug report: {error or text[-200:] or 'no answer'}"
+        )
 
     def package_paths(self, package: str) -> list[str]:
         from sift.device.apps import parse_paths, valid_package

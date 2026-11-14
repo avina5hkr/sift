@@ -472,6 +472,41 @@ class FakeTransport:
                 )
             raise ValueError(kind)
 
+    def health_probe(self, kind: str) -> str | None:
+        from sift.device.fake_health import canned
+        from sift.device.health import PROBES
+
+        if kind not in PROBES:
+            raise ValueError(kind)
+        self._begin("health_probe", kind)
+        with self._slot(self.limits.stat_s):
+            self._shell("health_probe")
+            phone = self.phone
+            if kind in phone.health:
+                return phone.health[kind]
+            if kind == "contacts":
+                return None if phone.contacts is None else f"{phone.contacts}\n"
+            if kind == "diskstats":
+                from sift.device.fake_health import diskstats_head
+
+                v = phone.android_version if phone.android_version in ("14", "15", "16") else "14"
+                return diskstats_head(v) + (self.apps_probe("diskstats") or "")
+            return canned(phone.android_version, kind)
+
+    def capture_bugreport(
+        self, on_progress: Callable[[int, int], None], should_stop: Callable[[], bool]
+    ) -> str:
+        self._begin("capture_bugreport", None, mutating=True)
+        for done in (25, 50, 75, 100):
+            if should_stop():
+                raise RemoteError("Stopped.")
+            on_progress(done, 100)
+        if self.phone.bugreport is None:
+            raise RemoteError("The phone could not make a bug report: bugreportz failed")
+        path = "/bugreports/bugreport-test-2026-11-14.zip"
+        self.phone.add_file(path, self.phone.bugreport, mtime=int(self.wall_clock()))
+        return path
+
     def package_paths(self, package: str) -> list[str]:
         self._begin("package_paths", package)
         app = self.phone.apps.get(package)

@@ -162,6 +162,18 @@ class Transport(Protocol):
         when the phone cannot answer it."""
         ...
 
+    def health_probe(self, kind: str) -> str | None:
+        """Text of one read-only health probe (`device.health.PROBES`), or None when the phone
+        cannot answer it."""
+        ...
+
+    def capture_bugreport(
+        self, on_progress: Callable[[int, int], None], should_stop: Callable[[], bool]
+    ) -> str:
+        """Run `bugreportz -p` and return the zip's path on the phone (pull it with
+        `open_read`); RemoteError when the phone does not produce one."""
+        ...
+
     def package_paths(self, package: str) -> list[str]:
         """The APK files of an installed package (base and splits); [] if unknown."""
         ...

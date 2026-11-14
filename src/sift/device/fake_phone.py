@@ -94,6 +94,9 @@ class FakePhone:
     ) -> None:
         self.serial = serial
         self.apps: dict[str, FakeApp] = {}
+        self.health: dict[str, str | None] = {}  # probe kind -> text (None = cannot answer)
+        self.contacts: int | None = 0  # the contacts provider's count (None = cannot answer)
+        self.bugreport: bytes | None = b"PK\x03\x04 fake bug report"  # None: FAIL
         self.model = model
         self.android_version = android_version
         # Unless given, the Android ID follows the serial, so two phones with different serials
