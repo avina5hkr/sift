@@ -187,3 +187,13 @@ test('opens with the backup status filter chosen from the link', async () => {
   expect(screen.getByRole('combobox', { name: 'Backup status' })).toHaveValue('mac_only')
   expect(calls.some((c) => c.path.startsWith('/api/browse?') && c.path.includes('status=mac_only'))).toBe(true)
 })
+
+test('the bottom bar shows the total size of the ticked files and folders', async () => {
+  renderPage()
+  await userEvent.click(await screen.findByRole('checkbox', { name: 'Select a.jpg' }))
+  expect(screen.getByLabelText('Total size selected')).toHaveTextContent('1.0 MB')
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Select e.jpg' }))
+  expect(screen.getByLabelText('Total size selected')).toHaveTextContent('6.0 MB')
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Select folder DCIM' }))
+  expect(screen.getByLabelText('Total size selected')).toHaveTextContent('15.0 MB')
+})

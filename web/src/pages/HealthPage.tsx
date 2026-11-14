@@ -36,9 +36,9 @@ function SavedPaths({ label, paths }: { label: string; paths: string[] }) {
 export default function HealthPage() {
   const qc = useQueryClient()
   const report = useQuery({ queryKey: ['health', 'report'], queryFn: () => apiFetch<{ report: HealthReport | null }>('/api/health/report') })
-  const run = useTaskRun('/api/health/run', () => void qc.invalidateQueries({ queryKey: ['health', 'report'] }))
+  const run = useTaskRun('/api/health/run', 'health', () => void qc.invalidateQueries({ queryKey: ['health', 'report'] }))
   const [bugPaths, setBugPaths] = useState<string[] | null>(null)
-  const bug = useTaskRun('/api/health/bugreport', (t) => setBugPaths((t.result?.paths as string[] | undefined) ?? []))
+  const bug = useTaskRun('/api/health/bugreport', 'bugreport', (t) => setBugPaths((t.result?.paths as string[] | undefined) ?? []))
   const exportMd = useMutation({ mutationFn: () => post<{ paths: string[] }>('/api/health/export') })
 
   const data = report.data?.report ?? null

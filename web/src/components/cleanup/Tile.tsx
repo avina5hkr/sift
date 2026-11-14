@@ -42,6 +42,7 @@ export const Tile = memo(function Tile({ item, checked, focused, keeper = false,
   return (
     <div id={`tile-${item.id}`} data-testid={keeper ? 'keeper' : 'copy'} className="shrink-0" style={{ width: size }}>
       <div
+        data-focused={focused ? 'true' : undefined}
         className={`relative overflow-hidden rounded-md border-2 bg-neutral-100 dark:bg-neutral-900 ${
           checked ? 'border-blue-600 dark:border-blue-400' : 'border-transparent'
         } ${focused ? 'outline-2 outline-offset-2 outline-[var(--ring)]' : ''}`}

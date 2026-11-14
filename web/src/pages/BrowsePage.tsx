@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { FolderStatus, StatusBadge } from '../components/browse/StatusBadge'
 import { Thumb } from '../components/browse/Thumb'
@@ -113,13 +113,24 @@ export default function BrowsePage() {
   const listTitle = listKey != null ? (smart.data?.pages[0]?.title ?? lists.data?.find((l) => l.key === listKey)?.title ?? '') : ''
 
   const covered = (file: BrowseFile) => [...folders].some((f) => file.path.startsWith(`${f}/`))
-  const toggleFile = (id: number) =>
+  // Sizes of everything ticked, remembered when ticked so they survive moving to another folder or list.
+  const tickedFiles = useRef(new Map<number, { size: number; path: string }>())
+  const tickedFolders = useRef(new Map<string, number>())
+  const toggleFile = (f: BrowseFile) => {
+    tickedFiles.current.set(f.id, { size: f.size, path: f.path })
+    toggleId(f.id)
+  }
+  const toggleFolder = (d: BrowseFolder) => {
+    tickedFolders.current.set(d.path, d.size)
+    togglePath(d.path)
+  }
+  const toggleId = (id: number) =>
     setIds((s) => {
       const n = new Set(s)
       if (!n.delete(id)) n.add(id)
       return n
     })
-  const toggleFolder = (p: string) =>
+  const togglePath = (p: string) =>
     setFolders((s) => {
       const n = new Set(s)
       if (!n.delete(p)) n.add(p)
@@ -142,6 +153,13 @@ export default function BrowsePage() {
   const reason = flow.phase !== 'idle' ? 'Working…' : nothing ? 'Tick the files or folders you want to delete first.' : null
   const selected = [plural(ids.size, 'file', 'files'), plural(folders.size, 'folder', 'folders')].join(' and ')
   const crumbs = first?.crumbs ?? []
+  const insideTicked = (path: string) => [...folders].some((f) => path.startsWith(`${f}/`))
+  const selectedBytes =
+    [...folders].filter((f) => !insideTicked(f)).reduce((n, f) => n + (tickedFolders.current.get(f) ?? 0), 0) +
+    [...ids].reduce((n, id) => {
+      const t = tickedFiles.current.get(id)
+      return t && !insideTicked(t.path) ? n + t.size : n
+    }, 0)
 
   return (
     <div className="flex min-h-full">
@@ -276,7 +294,7 @@ export default function BrowsePage() {
                         title={filtering ? 'Clear the filters to select a whole folder' : blocked ? 'Not backed up yet' : undefined}
                         disabled={blocked}
                         checked={folders.has(d.path)}
-                        onChange={() => toggleFolder(d.path)}
+                        onChange={() => toggleFolder(d)}
                       />
                     </td>
                     <td className="py-1.5 pr-3">
@@ -310,7 +328,7 @@ export default function BrowsePage() {
                         title={unbacked ? 'Not backed up yet' : inFolder ? 'In a selected folder' : undefined}
                         disabled={unbacked || inFolder}
                         checked={inFolder || ids.has(f.id)}
-                        onChange={() => toggleFile(f.id)}
+                        onChange={() => toggleFile(f)}
                       />
                     </td>
                     <td className="py-1.5 pr-3">
@@ -358,6 +376,11 @@ export default function BrowsePage() {
 
         <div className="sticky bottom-0 -mx-6 mt-auto flex flex-wrap items-center gap-3 border-t border-neutral-200 bg-[var(--bg)] px-6 py-3 dark:border-neutral-800">
           <span className="text-sm">{selected} selected</span>
+          {!nothing && (
+            <span aria-label="Total size selected" className="text-sm font-medium">
+              {formatBytes(selectedBytes)}
+            </span>
+          )}
           <ReasonButton
             primary
             placement="above"
