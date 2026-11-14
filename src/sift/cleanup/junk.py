@@ -145,6 +145,7 @@ class Item:
     paths: list[tuple[int, str, str, int]] = field(default_factory=list)  # id, path, origin, mtime
     copies: int = 0  # near-duplicate copies plus extra phone paths ("Seen N times")
     label: str | None = None
+    label_group: str | None = None  # "c<id>" for a label given to a whole group at once
     junk_cluster: bool = False
     near_copies: int = 0
     ocr_done: bool = True
@@ -189,7 +190,13 @@ def _items(db: Database, device_id: int, version: int, never: Sequence[str]) -> 
                 "GROUP BY m.content_hash"
             ).fetchall()
         )
-        labels = dict(conn.execute("SELECT content_hash, label FROM label").fetchall())
+        labels, groups = {}, {}
+        for h, lab, source, cluster_id in conn.execute(
+            "SELECT content_hash, label, source, cluster_id FROM label"
+        ):
+            labels[h] = lab
+            if source == "cluster" and cluster_id is not None:
+                groups[h] = f"c{cluster_id}"
         junk_clusters = {
             str(r[0])
             for r in conn.execute(
@@ -227,6 +234,7 @@ def _items(db: Database, device_id: int, version: int, never: Sequence[str]) -> 
                 or min(w or 0, h or 0) < MIN_SHORT_SIDE  # too small: OCR never reads it
             )
             item.label = labels.get(digest)
+            item.label_group = groups.get(digest)
             item.junk_cluster = digest in junk_clusters
             item.listed = listed
             out[digest] = item
@@ -282,15 +290,46 @@ class Model:
     hashes: list[str]
 
 
+# One label given to a whole group counts as at most this many independent decisions, however
+# many pictures the group holds (external review, P2.7).
+GROUP_WEIGHT = 5.0
+
+
+def evidence(items: Sequence[Item]) -> tuple[list[str], np.ndarray]:
+    """Per labelled item: its validation group (the label's group, else the picture itself)
+    and its weight (1 for a picture's own label; a group label shares GROUP_WEIGHT)."""
+    groups = [i.label_group or i.hash for i in items]
+    size: dict[str, int] = {}
+    for g, i in zip(groups, items, strict=True):
+        if i.label_group:
+            size[g] = size.get(g, 0) + 1
+    weights = np.array(
+        [min(1.0, GROUP_WEIGHT / size[g]) if g in size else 1.0 for g in groups], dtype=float
+    )
+    return groups, weights
+
+
+def effective_counts(items: Sequence[Item]) -> dict[str, float]:
+    """Independent decisions per label (group labels weighted down)."""
+    labelled = [i for i in items if i.label in _LABEL]
+    _groups, weights = evidence(labelled)
+    out: dict[str, float] = {}
+    for i, w in zip(labelled, weights, strict=True):
+        out[str(i.label)] = out.get(str(i.label), 0.0) + float(w)
+    return out
+
+
 def train(items: Sequence[Item], feats: np.ndarray, cfg: Config, version: int) -> Model:
     idx = [n for n, i in enumerate(items) if i.label in _LABEL and i.embedding is not None]
     labels = np.array([_LABEL[str(items[n].label)] for n in idx], dtype=np.int64)
     emb = np.stack([items[n].embedding for n in idx]) if idx else np.zeros((0, 1))  # type: ignore[misc]
-    junk, keep = int((labels == 1).sum()), int((labels == 0).sum())
+    groups, weights = evidence([items[n] for n in idx])
+    junk = float(weights[labels == 1].sum()) if idx else 0.0
+    keep = float(weights[labels == 0].sum()) if idx else 0.0
     lr = None
     if junk >= cfg.scoring.min_labels_each and keep >= cfg.scoring.min_labels_each:
         x = np.hstack([emb, feats[idx]])
-        lr = LogReg(x, (labels == 1).astype(np.float64))
+        lr = LogReg(x, (labels == 1).astype(np.float64), groups=groups, weights=weights)
     return Model(version, lr, emb.astype(np.float32), labels, [items[n].hash for n in idx])
 
 
@@ -437,14 +476,23 @@ def state_in(
 
 
 def label_counts(db: Database, embed_version: int) -> dict[str, int]:
-    """Labels the model can learn from (the content has an embedding of this version)."""
+    """Independent decisions the model can learn from, per label (the content has an embedding
+    of this version): a picture's own label counts 1; a label given to a group counts at most
+    GROUP_WEIGHT however many pictures it covers (the same rule training uses)."""
     with db.read() as conn:
         rows = conn.execute(
-            "SELECT l.label, count(*) FROM label l JOIN content c ON c.hash = l.content_hash "
-            "WHERE c.embedding IS NOT NULL AND c.embed_version = ? GROUP BY l.label",
+            "SELECT l.label, CASE WHEN l.source = 'cluster' AND l.cluster_id IS NOT NULL "
+            "THEN l.cluster_id END AS g, count(*) FROM label l JOIN content c "
+            "ON c.hash = l.content_hash WHERE c.embedding IS NOT NULL AND c.embed_version = ? "
+            "GROUP BY l.label, g",
             (embed_version,),
         ).fetchall()
-    return {str(k): int(v) for k, v in rows}
+    out: dict[str, float] = {}
+    for label, group, n in rows:
+        out[str(label)] = out.get(str(label), 0.0) + (
+            float(n) if group is None else min(float(n), GROUP_WEIGHT)
+        )
+    return {k: int(v) for k, v in out.items()}
 
 
 _cache_lock = threading.Lock()

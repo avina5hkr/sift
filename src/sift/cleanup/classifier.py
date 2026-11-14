@@ -8,6 +8,7 @@ cross-validation on log loss, then calibrated on the out-of-fold scores (Platt s
 isotonic with 200+ labels). junk_score = min(p_lr, junk_vote): both models must agree.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -97,17 +98,32 @@ def _balanced(y: np.ndarray) -> np.ndarray:
     return np.where(y == 1, len(y) / (2 * pos), len(y) / (2 * neg))
 
 
-def _logloss(y: np.ndarray, p: np.ndarray) -> float:
+def _logloss(y: np.ndarray, p: np.ndarray, sw: np.ndarray | None = None) -> float:
     p = np.clip(p, 1e-12, 1 - 1e-12)
-    return float(-(y * np.log(p) + (1 - y) * np.log(1 - p)).mean())
+    loss = -(y * np.log(p) + (1 - y) * np.log(1 - p))
+    return float(np.average(loss, weights=sw))
 
 
-def _folds(y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Fold number per row, spreading each class evenly over the folds."""
+def _scale(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    std = x.std(axis=0)
+    return x.mean(axis=0), np.where(std > 1e-9, std, 1.0)
+
+
+def _folds(
+    y: np.ndarray, rng: np.random.Generator, groups: Sequence[str] | None = None
+) -> np.ndarray:
+    """Fold number per row. Rows of one group (pictures labelled together) always share a fold,
+    so validation never scores a picture on its own group's training; groups of each class
+    (by majority label) are spread evenly over the folds."""
+    keys = list(groups) if groups is not None else [str(n) for n in range(len(y))]
+    members: dict[str, list[int]] = {}
+    for n, g in enumerate(keys):
+        members.setdefault(g, []).append(n)
     fold = np.zeros(len(y), dtype=np.int64)
     for cls in (0, 1):
-        idx = rng.permutation(np.nonzero(y == cls)[0])
-        fold[idx] = np.arange(len(idx)) % FOLDS
+        names = [g for g, rows in members.items() if round(float(y[rows].mean())) == cls]
+        for k, g in enumerate(rng.permutation(np.array(names, dtype=object))):
+            fold[members[str(g)]] = k % FOLDS
     return fold
 
 
@@ -138,12 +154,18 @@ def _isotonic(z: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 class LogReg:
     """Junk (1) against not junk (0), calibrated."""
 
-    def __init__(self, x: np.ndarray, y: np.ndarray, seed: int = 0) -> None:
-        self.mean = x.mean(axis=0)
-        self.std = np.where(x.std(axis=0) > 1e-9, x.std(axis=0), 1.0)
-        xs = (x - self.mean) / self.std
+    def __init__(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        seed: int = 0,
+        *,
+        groups: Sequence[str] | None = None,
+        weights: np.ndarray | None = None,
+    ) -> None:
+        sw = np.ones(len(y)) if weights is None else np.asarray(weights, dtype=float)
         rng = np.random.default_rng(seed)
-        fold = _folds(y, rng)
+        fold = _folds(y, rng, groups)
         best: tuple[float, float, np.ndarray] | None = None
         for c in C_GRID:
             oof = np.zeros(len(y))
@@ -151,14 +173,16 @@ class LogReg:
                 train, test = fold != f, fold == f
                 if not test.any() or len(np.unique(y[train])) < 2:
                     continue
-                w = _fit(xs[train], y[train], c, _balanced(y[train]))
-                oof[test] = _decision(xs[test], w)
-            loss = _logloss(y, _sigmoid(oof))
+                mean, std = _scale(x[train])  # fitted on the training fold only
+                w = _fit((x[train] - mean) / std, y[train], c, _balanced(y[train]) * sw[train])
+                oof[test] = _decision((x[test] - mean) / std, w)
+            loss = _logloss(y, _sigmoid(oof), sw)
             if best is None or loss < best[0]:
                 best = (loss, c, oof)
         assert best is not None
         _loss, self.c, oof = best
-        self.w = _fit(xs, y, self.c, _balanced(y))
+        self.mean, self.std = _scale(x)
+        self.w = _fit((x - self.mean) / self.std, y, self.c, _balanced(y) * sw)
         self.isotonic = len(y) >= ISOTONIC_FROM
         if self.isotonic:
             self.steps = _isotonic(oof, y)
