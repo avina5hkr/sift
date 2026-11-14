@@ -116,6 +116,9 @@ def analyze(ctx: Ctx) -> TaskOut:
         partial = {"indexed": stats.indexed, "ocr": read, "embedded": embedded}
         if control.should_stop:  # stopped: the later steps run next time; not marked analysed
             return partial
+        from sift.cleanup.labels_io import apply_pending
+
+        apply_pending(ctx.db)  # teaching loaded from a file, for pictures now known
         junk = rebuild_junk(
             ctx.db,
             device_id,

@@ -13,6 +13,7 @@ from sift.analysis.embed import ClipOnnx, EmbeddingModel, search
 from sift.analysis.models import CLIP, discard_bad, download, installed
 from sift.backup.phonepaths import shown
 from sift.cleanup.junk import bump_labels
+from sift.cleanup.suggest import load_teaching, medoid_vectors, suggest
 from sift.device.tracker import STORED_PHONE_ORDER
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
@@ -119,6 +120,12 @@ def _phone_files(ctx: Ctx, device_id: int, hashes: list[str]) -> dict[str, tuple
     return out
 
 
+class SuggestionOut(BaseModel):
+    label: str | None
+    reason: str
+    source: str
+
+
 class ClusterCard(BaseModel):
     id: int
     size: int
@@ -126,16 +133,27 @@ class ClusterCard(BaseModel):
     sample_ids: list[int]  # phone_file ids for the 4 x 3 mosaic
     sample_text: str | None
     label: str | None  # set when every member has the same label
+    marked: int  # members with a label
+    suggestion: SuggestionOut | None
 
 
 class ClustersOut(BaseModel):
     images: int
     covered: int
+    to_mark: int  # groups with no label yet
+    marked: int  # groups with at least one label
+    offset: int
     clusters: list[ClusterCard]
 
 
+PAGE = 24
+
+
 @router.get("/cleanup/clusters")
-def clusters(ctx: Ctx) -> ClustersOut:
+def clusters(
+    ctx: Ctx, section: Literal["to_mark", "marked"] = "to_mark", offset: int = 0, limit: int = PAGE
+) -> ClustersOut:
+    """One page of groups, largest first: those not marked yet, or those marked."""
     device_id = _device_id(ctx)
     with ctx.db.read() as conn:
         rows = conn.execute(
@@ -170,10 +188,39 @@ def clusters(ctx: Ctx) -> ClustersOut:
                 sample_ids=[files[str(m[1])][0] for m in present[:12]],
                 sample_text=text[:140] if text else None,
                 label=next(iter(labels)) if len(labels) == 1 and None not in labels else None,
+                marked=sum(1 for m in present if m[3] is not None),
+                suggestion=None,
             )
         )
     cards.sort(key=lambda c: -c.size)
-    return ClustersOut(images=images, covered=sum(c.size for c in cards), clusters=cards)
+    todo = [c for c in cards if not c.marked]
+    done = [c for c in cards if c.marked]
+    chosen = todo if section == "to_mark" else done
+    page = chosen[max(offset, 0) : max(offset, 0) + max(1, min(limit, 100))]
+    _suggest(ctx, page, {cid: [str(m[1]) for m in by[cid]] for cid in (c.id for c in page)})
+    return ClustersOut(
+        images=images,
+        covered=sum(c.size for c in cards),
+        to_mark=len(todo),
+        marked=len(done),
+        offset=offset,
+        clusters=page,
+    )
+
+
+def _suggest(ctx: Ctx, page: list[ClusterCard], members: dict[int, list[str]]) -> None:
+    """Fill each card's suggestion: from the owner's teaching when it is close, else built in."""
+    model = embedding_model(ctx)
+    if model is None or not page:
+        return
+    vectors = medoid_vectors(ctx.db, [c.id for c in page], model.version)
+    teaching = load_teaching(ctx.db, model.version)
+    for card in page:
+        vec = vectors.get(card.id)
+        if vec is None:
+            continue
+        found = suggest(model, vec, teaching, members[card.id])
+        card.suggestion = SuggestionOut(label=found.label, reason=found.reason, source=found.source)
 
 
 class MediaItem(BaseModel):
@@ -289,3 +336,27 @@ def add_labels(ctx: Ctx, body: LabelRequest) -> LabelOut:
         )
         bump_labels(conn)  # the junk model retrains on its next use
     return LabelOut(labelled=len(known))
+
+
+@router.get("/labels/export")
+def export_labels(ctx: Ctx) -> dict[str, Any]:
+    """Everything taught so far, to keep in a file on this Mac (nothing leaves it)."""
+    from sift.cleanup.labels_io import export
+
+    return export(ctx.db)
+
+
+class ImportOut(BaseModel):
+    read: int
+    applied: int
+    waiting: int  # for pictures Sift has not backed up yet
+
+
+@router.post("/labels/import")
+def import_labels(ctx: Ctx, body: dict[str, Any]) -> ImportOut:
+    from sift.cleanup.labels_io import load
+
+    try:
+        return ImportOut(**load(ctx.db, body))
+    except ValueError as e:
+        raise ApiError(422, "not_teaching", str(e)) from e
