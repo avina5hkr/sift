@@ -107,7 +107,7 @@ def junk_status(ctx: Ctx) -> JunkStatus:
     device_id = _device(ctx)
     version = embed_version(ctx)
     ensure_fresh(ctx.db, device_id, ctx.config, version, ctx.paths.lexicons)
-    st = state(ctx.db, ctx.config, version)
+    st = state(ctx.db, ctx.config, version, ctx.paths.lexicons)
     counts = label_counts(ctx.db, version)  # the labels the model can learn from
     with ctx.db.read() as conn:
         tabs = dict(
@@ -205,13 +205,19 @@ class MarkOut(BaseModel):
     errors: int | None = None
     sample_size: int | None = None
     threshold: float | None = None
+    too_few: bool = False
 
 
 @router.post("/cleanup/calibration/mark")
 def mark_calibration(ctx: Ctx, body: MarkRequest) -> MarkOut:
     try:
         result = calibration.mark(
-            ctx.db, ctx.config, body.content_hash, body.correct, embed_version(ctx)
+            ctx.db,
+            ctx.config,
+            body.content_hash,
+            body.correct,
+            embed_version(ctx),
+            ctx.paths.lexicons,
         )
     except KeyError as e:
         raise ApiError(404, "not_in_sample", "This picture is not in the current sample.") from e
@@ -223,4 +229,5 @@ def mark_calibration(ctx: Ctx, body: MarkRequest) -> MarkOut:
         errors=result.errors,
         sample_size=result.sample_size,
         threshold=result.threshold,
+        too_few=result.too_few,
     )

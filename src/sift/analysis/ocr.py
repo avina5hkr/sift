@@ -136,27 +136,35 @@ def run_ocr(
             if should_stop():
                 break
             part = todo[start : start + BATCH]
-            results = list(pool.map(lambda item: reader(item[1]), part))
+            results = list(pool.map(lambda item: _read(reader, item[1]), part))
+            read = [(d, f) for (d, _p), f in zip(part, results, strict=True) if f is not None]
+            failed = [d for (d, _p), f in zip(part, results, strict=True) if f is None]
             with db.tx() as conn:
+                # A reading (text, or none found) is stored with its version. A failure is
+                # not a reading: the version stays, so the image counts as not checked for
+                # document words (never suggested as junk) and the next Analyze tries again.
                 conn.executemany(
                     "UPDATE content SET ocr_text = ?, ocr_lang = ?, text_density = ?, "
-                    "ocr_version = ? WHERE hash = ?",
-                    [
-                        (
-                            found.text if found else None,
-                            lang if found else None,
-                            found.density if found else None,
-                            VERSION,
-                            digest,
-                        )
-                        for (digest, _p), found in zip(part, results, strict=True)
-                    ],
+                    "ocr_version = ?, ocr_error = NULL WHERE hash = ?",
+                    [(f.text, lang, f.density, VERSION, d) for d, f in read],
+                )
+                conn.executemany(
+                    "UPDATE content SET ocr_error = 'could not read this image' WHERE hash = ?",
+                    [(d,) for d in failed],
                 )
             done += sum(found is not None for found in results)
             n += len(part)
             if on_file is not None:
                 on_file(n, len(todo))
     return done
+
+
+def _read(reader: Callable[[Path], OcrResult | None], path: Path) -> OcrResult | None:
+    try:
+        return reader(path)
+    except Exception as e:  # one bad image is a failed reading, not a failed Analyze
+        log.info("OCR failed on %s: %s", path.name, e)
+        return None
 
 
 def workers() -> int:

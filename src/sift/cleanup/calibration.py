@@ -38,6 +38,13 @@ class Result:
     errors: int
     passed: bool
     threshold: float
+    too_few: bool = False  # under MIN_TO_PASS checked items: feedback kept, no pre-ticking
+
+
+# A calibration with zero wrong among n random suggestions bounds the error rate at about 3/n
+# (95%, rule of three): 50 items -> about 6%. Fewer cannot switch on pre-ticking; the owner's
+# answers still teach the model (wrong ones become keep, the threshold rises).
+MIN_TO_PASS = 50
 
 
 def start(
@@ -82,7 +89,12 @@ def items(db: Database) -> list[tuple[str, int, float, int | None]]:
 
 
 def mark(
-    db: Database, cfg: Config, content_hash: str, correct: bool, embed_version: int
+    db: Database,
+    cfg: Config,
+    content_hash: str,
+    correct: bool,
+    embed_version: int,
+    lexicons: Path | None = None,
 ) -> Result | None:
     """Record one verdict; when it was the last, finish in the same transaction and return
     the result (so a sample started meanwhile can never be the one that passes)."""
@@ -96,13 +108,15 @@ def mark(
         rows = conn.execute("SELECT content_hash, score, verdict FROM calibration_item").fetchall()
         if any(v is None for _h, _s, v in rows):
             return None
-        st = state_in(conn, cfg, embed_version)
+        st = state_in(conn, cfg, embed_version, lexicons)
         wrong = [(str(h), float(sc)) for h, sc, v in rows if v == 0]
-        # the model must be the one the sample was drawn from
-        passed = not wrong and get_setting(conn, SAMPLE_FOR) == st["fingerprint"]
+        too_few = len(rows) < MIN_TO_PASS
+        # the model must be the one the sample was drawn from, and the sample big enough
+        passed = not wrong and not too_few and get_setting(conn, SAMPLE_FOR) == st["fingerprint"]
         threshold = st["t_suggest"]
         if wrong:  # not capped at 1: a wrong item at 1.0 stops model suggestions altogether
-            threshold = max(sc for _h, sc in wrong) + 0.01
+            # only ever raised: a failed calibration never lowers a stricter threshold
+            threshold = max(threshold, max(sc for _h, sc in wrong) + 0.01)
             conn.executemany(
                 "INSERT INTO label (content_hash, label, tag, source, cluster_id, created_at) "
                 "VALUES (?, 'keep', NULL, 'calibration', NULL, ?) ON CONFLICT (content_hash) DO "
@@ -123,7 +137,7 @@ def mark(
         )
         conn.execute("DELETE FROM calibration_item")
         conn.execute("DELETE FROM setting WHERE key = ?", (SAMPLE_FOR,))
-    return Result(len(rows), len(wrong), passed, threshold)
+    return Result(len(rows), len(wrong), passed, threshold, too_few)
 
 
 def last(db: Database) -> dict[str, Any] | None:

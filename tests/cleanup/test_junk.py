@@ -176,7 +176,8 @@ def test_cold_start_lists_lexicon_hits_with_copies_under_maybe_only(rig) -> None
     assert {t for h, t in got.items() if not h.startswith("j")} == {"maybe"}
 
 
-def test_calibration_passes_then_a_wrong_item_raises_the_threshold(rig) -> None:
+def test_calibration_passes_then_a_wrong_item_raises_the_threshold(rig, monkeypatch) -> None:
+    monkeypatch.setattr(calibration, "MIN_TO_PASS", 5)  # the flow, on a six-item sample
     db, cfg = rig.ctx.db, rig.ctx.config
     extra = [
         {"hash": f"g{i}", "emb": near(A, np.random.default_rng(200 + i)), "text": "good morning"}
@@ -302,3 +303,62 @@ def test_p5_no_protected_file_is_ever_a_candidate(flags: list[dict[str, Any]], s
             assert v.tier == "protected", (f, v)
         if is_protected or f["label"] == "keep":
             assert v.tier not in ("suggested", "maybe"), (f, v)
+
+
+def _six_item_sample(rig):
+    extra = [
+        {"hash": f"g{i}", "emb": near(A, np.random.default_rng(200 + i)), "text": "good morning"}
+        for i in range(5)
+    ]
+    seed(rig.ctx.db, taught() + unlabelled() + extra)
+
+
+def test_a_small_calibration_teaches_but_never_turns_on_pre_ticking(rig) -> None:
+    """Review P2.6: one or a few suggested items cannot prove the model is right."""
+    db, cfg = rig.ctx.db, rig.ctx.config
+    _six_item_sample(rig)
+    assert calibration.start(db, 1, cfg, CLIP.version, rng=random.Random(1)) == 6
+    result = None
+    for h, _pid, _s, _v in calibration.items(db):
+        result = calibration.mark(db, cfg, h, True, CLIP.version)
+    assert result is not None and result.too_few and not result.passed
+    assert not state(db, cfg, CLIP.version)["precheck_allowed"]
+    calibration.start(db, 1, cfg, CLIP.version, rng=random.Random(2))
+    sample = calibration.items(db)
+    for n, (h, _pid, _s, _v) in enumerate(sample):
+        calibration.mark(db, cfg, h, n != 0, CLIP.version)
+    with db.read() as conn:  # the owner's "wrong" still teaches the model
+        assert conn.execute(
+            "SELECT label FROM label WHERE content_hash = ?", (sample[0][0],)
+        ).fetchone() == ("keep",)
+
+
+def test_an_approval_ends_when_a_word_list_changes(rig, monkeypatch, tmp_path) -> None:
+    from sift.cleanup.lexicons import source_text
+
+    monkeypatch.setattr(calibration, "MIN_TO_PASS", 5)
+    db, cfg = rig.ctx.db, rig.ctx.config
+    words = tmp_path / "lexicons"
+    words.mkdir()
+    (words / "greeting.yaml").write_text(source_text("greeting", None))
+    _six_item_sample(rig)
+    calibration.start(db, 1, cfg, CLIP.version, words, rng=random.Random(1))
+    for h, _pid, _s, _v in calibration.items(db):
+        calibration.mark(db, cfg, h, True, CLIP.version, words)
+    assert state(db, cfg, CLIP.version, words)["precheck_allowed"]
+    (words / "greeting.yaml").write_text(source_text("greeting", None) + "\n# edited\n")
+    assert not state(db, cfg, CLIP.version, words)["precheck_allowed"]
+
+
+def test_a_failed_calibration_never_lowers_a_stricter_threshold(rig, monkeypatch) -> None:
+    from sift.cleanup.junk import T_SUGGEST, put_setting
+
+    db, cfg = rig.ctx.db, rig.ctx.config
+    _six_item_sample(rig)
+    calibration.start(db, 1, cfg, CLIP.version, rng=random.Random(1))
+    with db.tx() as conn:  # the threshold was raised meanwhile (an earlier calibration)
+        put_setting(conn, T_SUGGEST, "1.5")
+    for n, (h, _pid, _s, _v) in enumerate(calibration.items(db)):
+        result = calibration.mark(db, cfg, h, n != 0, CLIP.version)
+    assert result is not None and result.threshold == 1.5
+    assert state(db, cfg, CLIP.version)["t_suggest"] == 1.5

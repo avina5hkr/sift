@@ -350,6 +350,7 @@ export type CalibrationState = { items: CalibrationItem[]; marked: number; total
 export type CalibrationMark = {
   finished: boolean
   passed?: boolean | null
+  too_few?: boolean
   errors?: number | null
   sample_size?: number | null
   threshold?: number | null

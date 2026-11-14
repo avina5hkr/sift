@@ -65,8 +65,20 @@ def _digest(*parts: object) -> str:
     return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:24]
 
 
-def model_fingerprint(conn: Any, cfg: Config, embed_version: int) -> str:
-    """Everything the trained model and its threshold depend on."""
+# Bump when the feature code or the classifier changes meaning: a calibration approved on the
+# old pipeline must not carry over (external review, P2.6).
+FEATURES_VERSION = 2
+CLASSIFIER_VERSION = 2
+
+
+def model_fingerprint(
+    conn: Any, cfg: Config, embed_version: int, lexicons: Path | None = None
+) -> str:
+    """Everything the trained model, its predictions and its threshold depend on: the labels,
+    the threshold, the embedding model and its version, the text reader's version, the feature
+    and classifier code versions, the word lists as they read now, and the scoring settings."""
+    from sift.analysis.ocr import VERSION as OCR_VERSION
+
     labelled = conn.execute(
         "SELECT count(*), IFNULL(sum(l.label = 'junk'), 0) FROM label l JOIN content c "
         "ON c.hash = l.content_hash WHERE c.embedding IS NOT NULL AND c.embed_version = ?",
@@ -76,6 +88,11 @@ def model_fingerprint(conn: Any, cfg: Config, embed_version: int) -> str:
         get_setting(conn, LABELS_REV),
         get_setting(conn, T_SUGGEST),
         embed_version,
+        cfg.analysis.embedding_model,
+        OCR_VERSION,
+        FEATURES_VERSION,
+        CLASSIFIER_VERSION,
+        [source_text(n, lexicons) for n in ("greeting", "document")],
         tuple(labelled),
         cfg.scoring.model_dump(mode="json"),
     )
@@ -100,7 +117,7 @@ def _inputs_fingerprint(
     ).fetchone()
     return _digest(
         device_id,
-        model_fingerprint(conn, cfg, embed_version),
+        model_fingerprint(conn, cfg, embed_version, lexicons),
         get_setting(conn, PRECHECK),
         cfg.cleanup.never_precheck,
         never_scored(cfg),
@@ -397,14 +414,18 @@ def never_scored(cfg: Config) -> list[str]:
     )
 
 
-def state(db: Database, cfg: Config, embed_version: int) -> dict[str, Any]:
+def state(
+    db: Database, cfg: Config, embed_version: int, lexicons: Path | None = None
+) -> dict[str, Any]:
     with db.read() as conn:
-        return state_in(conn, cfg, embed_version)
+        return state_in(conn, cfg, embed_version, lexicons)
 
 
-def state_in(conn: Any, cfg: Config, embed_version: int) -> dict[str, Any]:
+def state_in(
+    conn: Any, cfg: Config, embed_version: int, lexicons: Path | None = None
+) -> dict[str, Any]:
     t = get_setting(conn, T_SUGGEST)
-    fp = model_fingerprint(conn, cfg, embed_version)
+    fp = model_fingerprint(conn, cfg, embed_version, lexicons)
     return {
         "labels_rev": int(get_setting(conn, LABELS_REV) or 0),
         "trained_rev": int(get_setting(conn, TRAINED_REV) or -1),
@@ -450,7 +471,7 @@ def score_all(
 ) -> tuple[list[Item], list[Verdict], Model, dict[str, Any]]:
     """Score every image and video of this phone, retraining first when labels changed.
     Returns the listed items, their verdicts, the model and the state it was built from."""
-    st = state(db, cfg, embed_version)
+    st = state(db, cfg, embed_version, lexicons)
     greet, doc = load("greeting", lexicons), load("document", lexicons)
     every = _items(db, device_id, embed_version, never_scored(cfg))
     feats = _features(every, greet, doc, time.time())

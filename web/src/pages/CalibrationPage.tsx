@@ -11,8 +11,10 @@ const BTN = 'rounded-md border px-4 py-2 text-sm font-medium'
 const PLAIN = 'border-neutral-300 hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800'
 
 /** The one-line outcome of a finished check. */
-function outcome(r: { errors: number; sample_size: number; passed: boolean; threshold: number }): string {
+function outcome(r: { errors: number; sample_size: number; passed: boolean; threshold: number; too_few?: boolean }): string {
   if (r.passed) return `${r.errors} wrong in ${formatCount(r.sample_size)}: suggestions will now be ticked`
+  if (r.errors === 0 && r.too_few)
+    return `0 wrong in ${formatCount(r.sample_size)}: thanks, but that is too few to trust; suggestions stay unticked until at least 50 are checked`
   if (r.errors === 0) return `0 wrong in ${formatCount(r.sample_size)}, but the picture model changed; check a fresh sample`
   return `${formatCount(r.errors)} wrong: the threshold rose to ${r.threshold.toFixed(2)}; check a fresh sample`
 }
@@ -113,7 +115,7 @@ export default function CalibrationPage() {
     onSuccess: (r, v) => {
       if (r.finished) {
         if (r.sample_size != null && r.errors != null) {
-          setResult(outcome({ errors: r.errors, sample_size: r.sample_size, passed: r.passed === true, threshold: r.threshold ?? 0 }))
+          setResult(outcome({ errors: r.errors, sample_size: r.sample_size, passed: r.passed === true, threshold: r.threshold ?? 0, too_few: r.too_few === true }))
         }
         void qc.invalidateQueries({ queryKey: ['cleanup'] })
         return
