@@ -2,6 +2,8 @@
 
 Near-duplicates: wa_forward and mixed groups. The keeper is locked; the copies are suggested,
 and pre-checked only when their dHash is within 4 of the keeper's (cosine arrives in M6).
+Videos are never pre-checked: matching sampled frames does not show the sound or the frames
+between them are the same, so the owner chooses each one (external review, P2.8).
 Similar shots: camera_burst groups, for the owner to choose; never pre-checked. Camera-origin
 videos are never suggested. Each content is shown by its phone paths that are present now; the
 keeper content is shown by its best path (the exact-duplicate keeper rule).
@@ -69,6 +71,7 @@ def tab_groups(db: Database, device_id: int, tab: str) -> list[TabGroup]:
                 continue  # camera-origin videos are never suggested
             close = (
                 tab == "near"
+                and r[3] != "video"  # looks alike is not the same video: the owner decides
                 and r[6] is not None
                 and best[6] is not None
                 and distance(int(r[6]), int(best[6])) <= PRECHECK_DHASH

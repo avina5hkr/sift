@@ -119,3 +119,33 @@ def test_a_pictures_own_label_survives_a_later_group_label(rig: Rig) -> None:
     with rig.ctx.db.read() as conn:
         got = dict(conn.execute("SELECT content_hash, label FROM label").fetchall())
     assert got == {hashes[0]: "keep", hashes[1]: "junk"}
+
+
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_look_alike_videos_are_never_pre_ticked(rig: Rig, kind: str) -> None:
+    """Two WhatsApp videos whose sampled frames match (same dHash) but whose sound differs:
+    listed in Near-duplicates for the owner to choose, never ticked by default."""
+    from sift.cleanup.near_tabs import tab_groups
+    from tests.cleanup.test_delete import whatsapp
+
+    ids = whatsapp(rig, 2)
+    with rig.ctx.db.tx() as conn:
+        a, b = (
+            conn.execute("SELECT content_hash FROM phone_file WHERE id = ?", (i,)).fetchone()[0]
+            for i in ids
+        )
+        conn.executemany(
+            "UPDATE content SET kind = ?, dhash = 12345 WHERE hash = ?", [(kind, a), (kind, b)]
+        )
+        conn.execute(
+            "INSERT INTO near_group (id, kind, group_type, algo_version) VALUES (1, ?, "
+            "'wa_forward', 1)",
+            (kind,),
+        )
+        conn.executemany(
+            "INSERT INTO near_member (group_id, content_hash, role) VALUES (1, ?, ?)",
+            [(a, "keeper"), (b, "copy")],
+        )
+    groups = tab_groups(rig.ctx.db, 1, "near")
+    assert len(groups) == 1 and len(groups[0].copies) == 1  # still shown
+    assert groups[0].copies[0].default_checked == (kind == "image")
