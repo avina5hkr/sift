@@ -106,18 +106,36 @@ def _backup_verified(ctx: AppContext, device_id: int) -> tuple[bool, str]:
     return True, f"All {len(names)} sets confirmed."
 
 
+NOT_INSTALLED = "WhatsApp is not installed; nothing to back up."
+
+
 def _whatsapp(ctx: AppContext, session: DeviceSession | None) -> tuple[bool | None, str]:
-    from sift.cleanup.apps import whatsapp_backup_age_h
+    from sift.cleanup.apps import WHATSAPP, whatsapp_backup_age_h
+    from sift.device.apps import parse_packages
 
     if session is None:
         return None, "Connect the phone to check the WhatsApp backup file."
+    try:
+        installed = set(parse_packages(session.transport.apps_probe("packages") or ""))
+    except Exception:
+        installed = set()
+    apps = [p for p in WHATSAPP if p in installed] if installed else ["com.whatsapp"]
+    if not apps:
+        return True, NOT_INSTALLED
     limit = ctx.config.apps.whatsapp_backup_max_age_hours
-    age = whatsapp_backup_age_h(session, "com.whatsapp")
-    if age is None:
-        return False, "No local WhatsApp backup found (WhatsApp, Settings, Chats, Chat backup)."
-    if age > limit:
-        return False, f"The local backup is {age:.0f} hours old; back up again."
-    return True, f"Local backup is {age:.0f} hours old."
+    lines, ok = [], True
+    for pkg in apps:
+        name = WHATSAPP[pkg][0]
+        age = whatsapp_backup_age_h(session, pkg)
+        if age is None:
+            ok = False
+            lines.append(f"No local {name} backup found ({name}, Settings, Chats, Chat backup).")
+        elif age > limit:
+            ok = False
+            lines.append(f"The local {name} backup is {age:.0f} hours old; back up again.")
+        else:
+            lines.append(f"Local {name} backup is {age:.0f} hours old.")
+    return ok, " ".join(lines)
 
 
 def newest_vcf(ctx: AppContext, device_id: int) -> tuple[Path, str, int] | None:
@@ -206,7 +224,9 @@ def states(ctx: AppContext, device_id: int, session: DeviceSession | None) -> li
     for item in ITEMS:
         ok, detail = auto.get(item.id, (None, None))
         ticked, done_on, note = ticks.get(item.id, (False, None, None))
-        green = (item.how == "tick" or ok is True) and (item.how == "auto" or ticked)
+        green = (item.how == "tick" or ok is True) and (
+            item.how == "auto" or ticked or detail == NOT_INSTALLED
+        )
         out.append(ItemState(item.id, item.title, item.how, item.help, ok, detail, ticked,
                              done_on, note, green))  # fmt: skip
     return out

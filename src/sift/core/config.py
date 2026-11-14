@@ -213,6 +213,8 @@ _DEFAULT_SET_LIST: list[BackupSet] = [
             "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
             "/sdcard/WhatsApp/Databases",
             "/sdcard/WhatsApp/Backups",
+            "/sdcard/WhatsApp Business/Databases",
+            "/sdcard/WhatsApp Business/Backups",
         ],
         enabled=True,
         deletable=False,  # never freed from the phone (NEVER_DELETE_FLOOR); kept in the backup
@@ -405,6 +407,8 @@ NEVER_DELETE_FLOOR: tuple[str, ...] = (
     "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
     "/sdcard/WhatsApp/Databases",
     "/sdcard/WhatsApp/Backups",
+    "/sdcard/WhatsApp Business/Databases",
+    "/sdcard/WhatsApp Business/Backups",
 )
 
 

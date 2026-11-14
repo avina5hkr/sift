@@ -18,7 +18,7 @@ from typing import Any
 
 from sift.backup.run import usable_dests
 from sift.core.context import AppContext
-from sift.core.files import link_new, write_new
+from sift.core.files import place_new, write_new
 from sift.device.apps import (
     PLAY_STORE,
     parse_diskstats,
@@ -141,47 +141,76 @@ def whatsapp_backup(session: DeviceSession, package: str) -> tuple[RemoteEntry, 
 
 
 def saved_in_backup(ctx: AppContext, session: DeviceSession, entry: RemoteEntry) -> bool:
-    """True when this phone file, unchanged, has a verified copy on every required backup
-    folder (and the Mac copy is on disk). Uninstalling WhatsApp removes its folder from the
-    phone, so its chat backup must be safe in Sift's backup first; Sift keeps that copy until
-    the owner deletes it (I1)."""
-    from sift.backup.confirm import current_dest_ids, required_kinds
+    """True when this phone file, unchanged, has a copy on every required backup folder that is
+    plugged in, on disk at the right size, and not in quarantine (the deleter's I3a check).
+    Uninstalling WhatsApp removes its folder from the phone, so its chat backup must be safe in
+    Sift's backup first; Sift keeps that copy until the owner deletes it (I1)."""
     from sift.backup.phonepaths import to_db
     from sift.backup.run import _stored_device_id
+    from sift.cleanup.deleter import backups_still_there
 
     device_id = _stored_device_id(ctx.db, session.device_uuid)
     if device_id is None:
         return False
-    ids = current_dest_ids(ctx.db, ctx.config)
-    need = [ids.get(k, -1) for k in required_kinds(ctx.config)]
-    if any(i < 0 for i in need):
-        return False
     with ctx.db.read() as conn:
-        row = conn.execute(
-            "SELECT content_hash FROM phone_file WHERE device_id = ? AND remote_path = ? "
+        rows = conn.execute(
+            "SELECT content_hash FROM phone_file WHERE device_id = ? AND lower(remote_path) = ? "
             "AND size = ? AND mtime = ? AND state = 'done' AND content_hash IS NOT NULL",
-            (device_id, to_db(entry.path), entry.size, entry.mtime),
-        ).fetchone()
-        if row is None:
-            return False
-        copies = {
-            int(r[0]): (str(r[1]), int(r[2]))
-            for r in conn.execute(
-                "SELECT dest_id, rel_path, size FROM replica WHERE content_hash = ? "
-                "AND verified_at > 0",
-                (row[0],),
-            )
-        }
-    if any(i not in copies or copies[i][1] != entry.size for i in need):
-        return False
-    mac = {d.id: d for d in usable_dests(ctx) if d.kind == "mac"}
-    for dest_id, dest in mac.items():
-        if dest_id in copies:
-            try:
-                return (Path(dest.root) / copies[dest_id][0]).stat().st_size == entry.size
-            except OSError:
-                return False
-    return False
+            (device_id, to_db(entry.path).lower(), entry.size, entry.mtime),
+        ).fetchall()
+    return any(backups_still_there(ctx, str(r[0]), entry.size) for r in rows)
+
+
+def _drives_missing(ctx: AppContext) -> bool:
+    from sift.backup.confirm import current_dest_ids, required_kinds
+
+    ids = current_dest_ids(ctx.db, ctx.config)
+    mounted = {d.id for d in usable_dests(ctx)}
+    return any(ids.get(k, -1) not in mounted for k in required_kinds(ctx.config))
+
+
+def media_unsaved(ctx: AppContext, session: DeviceSession, package: str) -> str | None:
+    """Why WhatsApp's media folder is not safely backed up, or None. Uninstalling removes
+    `Android/media/<package>`, media included, so every file Sift knows there must pass the
+    deleter's backup check, after a backup of that folder in the last day."""
+    import json
+
+    from sift.backup.run import _stored_device_id
+    from sift.backup.sets import resolve_roots, set_for_path
+    from sift.cleanup.deleter import backups_still_there
+
+    name = WHATSAPP[package][0]
+    folder = WHATSAPP[package][1].rsplit("/", 1)[0]  # .../WhatsApp/Databases -> .../WhatsApp
+    device_id = _stored_device_id(ctx.db, session.device_uuid)
+    sets = ctx.config.backup.sets
+    media_set = set_for_path(f"{folder}/Media/x.jpg", resolve_roots(sets, [s.name for s in sets]))
+    if device_id is None or media_set is None:
+        return f"Back up {name}'s media first: no backup set covers {folder}/Media."
+    limit = ctx.config.apps.whatsapp_backup_max_age_hours
+    with ctx.db.read() as conn:
+        scans = conn.execute(
+            "SELECT sets FROM scan WHERE device_id = ? AND state = 'applied' AND finished_at >= ?",
+            (device_id, int(time.time()) - limit * 3600),
+        ).fetchall()
+        rows = conn.execute(
+            "SELECT content_hash, size, state FROM phone_file WHERE device_id = ? AND present = 1 "
+            "AND lower(remote_path) LIKE ? ESCAPE '!'",
+            (device_id, folder.lower().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+             + "/%"),
+        ).fetchall()  # fmt: skip
+    if not any(media_set in json.loads(r[0] or "[]") for r in scans):
+        return f"Back up the {media_set} set first (no backup of it in the last {limit} hours)."
+    unsaved = sum(
+        1 for h, size, state in rows
+        if state != "done" or not backups_still_there(ctx, h, int(size))
+    )  # fmt: skip
+    if unsaved:
+        return (
+            f"{unsaved} of {name}'s files are not backed up on every backup folder yet"
+            + (" (plug in the SSD)" if _drives_missing(ctx) else "")
+            + ". Uninstalling removes them from the phone."
+        )
+    return None
 
 
 def check(
@@ -205,11 +234,15 @@ def check(
             if found is None or found[1] > limit:
                 return f"{name}'s chat backup on the phone is not from the last {limit} hours."
             if not saved_in_backup(ctx, session, found[0]):
+                if _drives_missing(ctx):
+                    return f"Plug in the SSD: {name}'s chat backup must be on every backup folder."
                 return (
-                    f"This can remove {name}'s chat backup from the phone. Back up its "
-                    "Databases folder to your backup folders first (Backup page); Sift keeps "
-                    "that copy until you delete it."
+                    f"This can remove {name}'s chat backup from the phone. Back it up first: "
+                    "turn on the WhatsApp chat backups set and run a backup (Backup page). Sift "
+                    "keeps that copy until you delete it."
                 )
+            if why := media_unsaved(ctx, session, package):
+                return why
             if not unlock.get("backup_done"):
                 return f"Confirm that your {name} chat backup is complete."
             if str(unlock.get("typed_name", "")).strip().casefold() != name.casefold():
@@ -305,7 +338,7 @@ def _pull_apk(session: DeviceSession, remote: str, target: Path) -> None:
             os.fsync(out.fileno())
         if tmp.stat().st_size != entry.size:
             raise ValueError(f"short read of {remote}")
-        link_new(tmp, target)
+        place_new(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
 

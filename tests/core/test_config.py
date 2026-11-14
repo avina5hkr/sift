@@ -676,6 +676,8 @@ FLOOR = [
     "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
     "/sdcard/WhatsApp/Databases",
     "/sdcard/WhatsApp/Backups",
+    "/sdcard/WhatsApp Business/Databases",
+    "/sdcard/WhatsApp Business/Backups",
 ]
 
 

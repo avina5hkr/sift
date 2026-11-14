@@ -115,30 +115,28 @@ def thermal(v: str) -> str:
     )
 
 
-def telephony(v: str) -> str:
-    if v == "14":
-        state = (
-            "{mVoiceRegState=0(IN_SERVICE), mDataRegState=0(IN_SERVICE), mOperatorAlphaLong=TestNet"
-        )
-        lte = 3
-    elif v == "15":
-        state = (
-            "{mVoiceRegState=0(IN_SERVICE), mDataRegState=0(IN_SERVICE), mOperatorAlphaLong=TestNet"
-        )
-        lte = 1
-    else:
-        state = (
-            "{voiceRegState=1(OUT_OF_SERVICE), dataRegState=1(OUT_OF_SERVICE), operatorAlphaLong="
-        )
-        lte = 0
+IN = "{mVoiceRegState=0(IN_SERVICE), mDataRegState=0(IN_SERVICE), mOperatorAlphaLong=TestNet"
+OUT = "{voiceRegState=1(OUT_OF_SERVICE), dataRegState=1(OUT_OF_SERVICE), operatorAlphaLong="
+
+
+def radio_block(slot: int, state: str, lte: int) -> str:
     return (
-        "last known state:\n  Phone Id=0\n"
+        f"  Phone Id={slot}\n"
         f"  mServiceState=0 0 voice home data home {state}}}\n"
         "  mSignalStrength=SignalStrength:{ mCdma=CellSignalStrengthCdma: cdmaDbm=2147483647"
         " level=0 mGsm=CellSignalStrengthGsm: rssi=2147483647 level=0 mLte=CellSignalStrengthLte:"
         f" rssi=-67 rsrp=-98 rsrq=-11 level={lte} parametersUseForLevel=0 mNr=CellSignalStrengthNr:"
         "{ csiRsrp = 2147483647 level = 0 }, primary=CellSignalStrengthLte}\n"
     )
+
+
+def telephony(v: str) -> str:
+    if v == "14":
+        return "last known state:\n" + radio_block(0, IN, 3)
+    if v == "15":
+        return "last known state:\n" + radio_block(0, IN, 1)
+    # dual SIM: slot 1 empty, the SIM in slot 2 has no service
+    return "last known state:\n" + radio_block(0, OUT, 0) + radio_block(1, OUT, 0)
 
 
 def wifi(v: str) -> str:

@@ -4,7 +4,7 @@ import type { TaskEvent } from '../../lib/types'
 import { plain, post } from '../../pages/Wizard/request'
 
 /** Start a background task and follow it until it ends, keeping its newest state for the TaskLine. */
-export function useTaskRun(path: string, onDone: (task: TaskEvent) => void) {
+export function useTaskRun(path: string, onDone: (task: TaskEvent) => void, body?: unknown) {
   const [task, setTask] = useState<TaskEvent | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -22,7 +22,7 @@ export function useTaskRun(path: string, onDone: (task: TaskEvent) => void) {
     setTask(null)
     setBusy(true)
     try {
-      let t = await post<TaskEvent>(path)
+      let t = await post<TaskEvent>(path, body)
       setTask(t)
       while (alive.current && t.state === 'running') {
         await new Promise((r) => setTimeout(r, 400))

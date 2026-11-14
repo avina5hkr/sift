@@ -47,7 +47,8 @@ beforeEach(() => {
           reinstall: { path: '/Backups/apps.csv', apps: [{ name: 'Signal', package: 'org.signal', link: 'https://play.google.com/x' }, { name: 'Local', package: 'a.b', link: '' }] },
         })
       }
-      if (url === '/api/reset-checklist/restore/contacts') return reply({ phone_path: '/sdcard/Download/contacts.vcf' })
+      if (url === '/api/reset-checklist/restore/contacts')
+        return reply({ kind: 'restore', state: 'done', done: 1, total: 1, message: null, result: { phone_path: '/sdcard/Download/contacts.vcf' } })
       if (url === '/api/reset-checklist/export') return reply({ paths: ['/Backups/reports/list.md'], markdown: '# x' })
       return reply({ code: 'nope', message: 'No.' }, 404)
     }),

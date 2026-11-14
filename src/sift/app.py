@@ -115,7 +115,7 @@ def build_context(paths: AppPaths, token: str, port: int, web_dist: Path | None)
     except BaseException:
         db.close()
         raise
-    _join_added_sets(config, db, paths.config)
+    _join_added_sets(config, db, paths.config, warnings)
     return AppContext(
         paths=paths,
         config=config,
@@ -129,27 +129,34 @@ def build_context(paths: AppPaths, token: str, port: int, web_dist: Path | None)
     )
 
 
-def _join_added_sets(config: Config, db: Database, path: Path) -> None:
-    """Built-in sets added in a later version join the owner's config once (setting
-    `sets_joined` remembers them, so a set the owner removed is not added back)."""
+def _join_added_sets(config: Config, db: Database, path: Path, warnings: list[str]) -> None:
+    """Built-in sets added in a later version join the owner's config once. The setting
+    `sets_joined` remembers every such set the config has held, so a set the owner removed is
+    not added back. A config that loaded with warnings is not rewritten (that would erase the
+    entries the loader skipped): the set joins in memory only, until the owner saves."""
+    from sift.core.config import ADDED_LATER
+
     with db.read() as conn:
         row = conn.execute("SELECT value FROM setting WHERE key = 'sets_joined'").fetchone()
     already = set(json.loads(row[0])) if row else set()
     added = join_added_sets(config, already)
-    if not added:
+    if warnings:
         return
-    if path.exists():
+    if added and path.exists():
         try:
             save_config(config, path)
         except OSError as e:
             _log.warning("Could not save the new backup sets: %s", e)
             return
-    with db.tx() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO setting (key, value) VALUES ('sets_joined', ?)",
-            (json.dumps(sorted(already | set(added))),),
-        )
-    _log.info("Added backup sets: %s", ", ".join(added))
+    present = {s.name for s in config.backup.sets} & set(ADDED_LATER)
+    if present - already:
+        with db.tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO setting (key, value) VALUES ('sets_joined', ?)",
+                (json.dumps(sorted(already | present)),),
+            )
+    if added:
+        _log.info("Added backup sets: %s", ", ".join(added))
 
 
 class _UvicornErrorForwarder(logging.Handler):

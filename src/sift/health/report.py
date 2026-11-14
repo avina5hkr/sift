@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from sift.core.config import Config
 from sift.core.db import Database
-from sift.core.files import report_folder, write_new
+from sift.core.files import write_to_each
 from sift.device import health as h
 from sift.device.apps import parse_diskstats, parse_packages
 from sift.device.transport import Transport
@@ -145,7 +145,8 @@ def _battery(texts: dict[str, str | None], warn_c: int) -> Area:
         parts.append(f"temperature {b.temperature_c:.0f} C")
         if b.temperature_c >= warn_c:
             level = "warn"
-    verdicts = [", ".join(parts).capitalize() + "." if parts else "Battery details unavailable."]
+    text = ", ".join(parts)
+    verdicts = [text[:1].upper() + text[1:] + "." if parts else "Battery details unavailable."]
     if b.temperature_c is not None and b.temperature_c >= warn_c:
         verdicts.append("The battery is hot; a hot phone slows itself down.")
     if b.level is not None:
@@ -166,28 +167,39 @@ def _heat(texts: dict[str, str | None]) -> Area:
 
 
 def _network(props: dict[str, str], texts: dict[str, str | None]) -> Area:
-    radio = h.parse_telephony(texts.get("telephony") or "")
-    wifi = h.parse_wifi(texts.get("wifi") or "")
-    sims = [s.strip() for s in props.get("gsm.sim.state", "").split(",") if s.strip()]
+    sims = [x.strip() for x in props.get("gsm.sim.state", "").split(",") if x.strip()]
     types = [t.strip() for t in props.get("gsm.network.type", "").split(",")]
+    ready = [i for i, x in enumerate(sims) if x in ("READY", "LOADED")]
+    radio = h.parse_telephony(texts.get("telephony") or "", ready[0] if ready else None)
+    wifi = h.parse_wifi(texts.get("wifi") or "")
     if not sims and radio.signal_level is None and radio.voice is None and wifi.enabled is None:
         return Area("network", "Network", "unavailable", [UNAVAILABLE])
     verdicts: list[str] = []
+    level: Level = "ok"
     bad = False
-    ready = [i for i, s in enumerate(sims) if s in ("READY", "LOADED")]
-    if sims:
-        if ready:
-            net = types[ready[0]] if ready[0] < len(types) else ""
-            verdicts.append("SIM ready" + (f" on {net}" if net and net != "Unknown" else "") + ".")
-        else:
-            verdicts.append(f"No SIM ready ({', '.join(sims).lower()}).")
-            bad = True
-    if radio.signal_level is not None:
-        verdicts.append(f"Signal level {radio.signal_level} of 4.")
-        bad = bad or radio.signal_level <= 1
-    if radio.voice and radio.voice != "IN_SERVICE":
-        verdicts.append(f"Calls: {radio.voice.replace('_', ' ').lower()}.")
+    airplane = radio.voice == "POWER_OFF"
+    no_sim = bool(sims) and all(x in ("ABSENT", "NOT_READY", "UNKNOWN", "") for x in sims)
+    if airplane:
+        verdicts.append("Airplane mode is on (the mobile radio is off).")
+    elif no_sim:
+        verdicts.append("No SIM is inserted.")
+        level = "warn"
+    elif sims and not ready:
+        verdicts.append(f"No SIM ready ({', '.join(sims).lower()}).")
         bad = True
+    elif ready:
+        net = types[ready[0]] if ready[0] < len(types) else ""
+        slot = f" in slot {ready[0] + 1}" if len(sims) > 1 else ""
+        verdicts.append(
+            f"SIM ready{slot}" + (f" on {net}" if net and net != "Unknown" else "") + "."
+        )
+    if not airplane and not no_sim:
+        if radio.signal_level is not None:
+            verdicts.append(f"Signal level {radio.signal_level} of 4.")
+            bad = bad or radio.signal_level <= 1
+        if radio.voice and radio.voice != "IN_SERVICE":
+            verdicts.append(f"Calls: {radio.voice.replace('_', ' ').lower()}.")
+            bad = True
     if wifi.enabled is False:
         verdicts.append("Wi-Fi is off.")
     elif wifi.enabled and wifi.rssi is not None:
@@ -197,9 +209,10 @@ def _network(props: dict[str, str], texts: dict[str, str | None]) -> Area:
         verdicts.append("Wi-Fi is on, not connected.")
     if bad:
         verdicts.append(NETWORK_ADVICE)
+        level = "bad"
     facts = {"sims": sims, "network_types": types, "signal_level": radio.signal_level,
              "voice": radio.voice, "data": radio.data, "wifi": asdict(wifi)}  # fmt: skip
-    return Area("network", "Network", "bad" if bad else "ok", verdicts, facts)
+    return Area("network", "Network", level, verdicts, facts)
 
 
 def _apps(transport: Transport, texts: dict[str, str | None]) -> Area:
@@ -284,13 +297,11 @@ def markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def export(report: dict[str, Any], roots: list[Path], report_dir: str) -> list[str]:
-    """The report as Markdown in `DEST_ROOT/<report_dir>/` on each root; never replaces a file."""
-    body = markdown(report).encode()
+def export(
+    report: dict[str, Any], roots: list[Path], report_dir: str
+) -> tuple[list[str], list[str]]:
+    """The report as Markdown in `DEST_ROOT/<report_dir>/` on each root; never replaces a file.
+    Returns (paths written, failures per root)."""
     stamp = datetime.fromtimestamp(report["created_at"], UTC).astimezone()
-    written = []
-    for root in roots:
-        folder = report_folder(root, report_dir)
-        folder.mkdir(parents=True, exist_ok=True)
-        written.append(str(write_new(folder / f"health-{stamp:%Y-%m-%d-%H%M%S}.md", body)))
-    return written
+    name = f"health-{stamp:%Y-%m-%d-%H%M%S}.md"
+    return write_to_each(roots, report_dir, name, markdown(report).encode())

@@ -27,7 +27,7 @@ def test_android_14_is_healthy(rig: Rig) -> None:
     assert "Security patch is from 2026-09-01." in a["system"].verdicts
     assert a["storage"].verdicts[0].startswith("Storage is 86% full")
     assert a["memory"].verdicts[1].startswith("Top 5 apps by memory: com.example.social")
-    assert a["battery"].verdicts[0] == "Battery health good, temperature 31 c."
+    assert a["battery"].verdicts[0] == "Battery health good, temperature 31 C."
     assert a["network"].verdicts[:2] == ["SIM ready on LTE.", "Signal level 3 of 4."]
     assert health.NETWORK_ADVICE not in a["network"].verdicts
     assert a["apps"].facts["largest"][0][0] == "com.example.oldgame"  # third-party only
@@ -46,7 +46,8 @@ def test_android_16_has_no_service_and_says_a_reset_may_not_fix_it(rig: Rig) -> 
     a = areas(rig, "16")
     net = a["network"]
     assert net.level == "bad"
-    assert "SIM ready on NR." in net.verdicts and "Calls: out of service." in net.verdicts
+    assert "SIM ready in slot 2 on NR." in net.verdicts
+    assert "Calls: out of service." in net.verdicts
     assert "Wi-Fi is off." in net.verdicts and net.verdicts[-1] == health.NETWORK_ADVICE
     assert a["storage"].level == "ok"  # the wrapped df line is read
     assert not any("fault" in v.lower() for x in a.values() for v in x.verdicts)
@@ -176,8 +177,65 @@ def test_restore_helper_pushes_the_contacts_beside_never_over(rig: Rig) -> None:
     assert helper["contacts"] == {"phone_path": "/sdcard/contacts.vcf", "cards": 2}
     assert "com.example.oldgame" in {a["package"] for a in helper["reinstall"]["apps"]}
     assert c.post("/api/reset-checklist/restore/contacts", headers=h, json={}).status_code == 409
-    first = c.post("/api/reset-checklist/restore/contacts", headers=h, json={"confirm": True})
-    assert first.json()["phone_path"] == "/sdcard/Download/contacts.vcf"
-    again = c.post("/api/reset-checklist/restore/contacts", headers=h, json={"confirm": True})
-    assert again.json()["phone_path"] == "/sdcard/Download/contacts_restored.vcf"
+
+    def push() -> str:
+        assert (
+            c.post(
+                "/api/reset-checklist/restore/contacts", headers=h, json={"confirm": True}
+            ).status_code
+            == 200
+        )
+        assert rig.ctx.tasks.wait(60)
+        return rig.ctx.tasks.current().result["phone_path"]
+
+    assert push() == "/sdcard/Download/contacts.vcf"
+    assert push() == "/sdcard/Download/contacts_restored.vcf"
     assert rig.transport.phone.entry("/sdcard/Download/contacts.vcf") is not None
+
+
+def test_a_sim_in_slot_two_is_read_from_its_own_block(rig: Rig) -> None:
+    from sift.device import fake_health as fx
+
+    phone = rig.transport.phone
+    phone.android_version = "16"
+    phone.health["telephony"] = "x\n" + fx.radio_block(0, fx.OUT, 0) + fx.radio_block(1, fx.IN, 4)
+    a = {x.key: x for x in health.collect(rig.transport, rig.ctx.config, now=NOW).areas}
+    assert a["network"].level == "ok" and "Signal level 4 of 4." in a["network"].verdicts
+
+
+@pytest.mark.parametrize(
+    ("sims", "voice", "expect"),
+    [("ABSENT", "OUT_OF_SERVICE", "No SIM is inserted."),
+     ("READY", "POWER_OFF", "Airplane mode is on (the mobile radio is off).")],
+)  # fmt: skip
+def test_no_sim_or_airplane_mode_gets_no_reset_advice(
+    rig: Rig, sims: str, voice: str, expect: str
+) -> None:
+    from sift.device import fake_health as fx
+
+    phone = rig.transport.phone
+    phone.health["props"] = fx.props("14").replace("[READY]", f"[{sims}]")
+    phone.health["telephony"] = fx.radio_block(
+        0, fx.IN.replace("0(IN_SERVICE)", f"3({voice})", 1), 0
+    )
+    net = {x.key: x for x in health.collect(rig.transport, rig.ctx.config, now=NOW).areas}[
+        "network"
+    ]
+    assert expect in net.verdicts and health.NETWORK_ADVICE not in net.verdicts
+
+
+def test_files_are_placed_without_hard_links_and_never_replace(tmp_path: Path, monkeypatch) -> None:
+    """exFAT has no hard links; the no-replace rename (and its fallback) is used instead."""
+    import sift.backup.staging as staging
+    from sift.core.files import write_new, write_to_each
+
+    monkeypatch.setattr("os.link", lambda *a, **k: (_ for _ in ()).throw(OSError(45, "no")))
+    monkeypatch.setattr(staging, "_renamex_np", None)  # the lock + lstat + rename fallback
+    first = write_new(tmp_path / "r.md", b"one")
+    second = write_new(tmp_path / "r.md", b"two")
+    assert (first.read_bytes(), second.name, second.read_bytes()) == (b"one", "r-1.md", b"two")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["r-1.md", "r.md"]
+    blocked = tmp_path / "ro"
+    blocked.write_text("a file where a folder should be")
+    written, failed = write_to_each([tmp_path / "ok", blocked], "reports", "x.md", b"x")
+    assert len(written) == 1 and len(failed) == 1

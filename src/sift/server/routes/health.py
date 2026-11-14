@@ -9,12 +9,12 @@ from pydantic import BaseModel, Field
 
 from sift.backup.run import _stored_device_id, usable_dests
 from sift.cleanup.archive import push_one
-from sift.core.files import report_folder, write_new
+from sift.core.files import write_to_each
 from sift.health import bugreport, checklist
 from sift.health import report as health
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
-from sift.server.routes.delete import _session
+from sift.server.routes.delete import _no_backup_running, _session
 from sift.server.routes.vault import TaskOut, start_task
 from sift.services.tasks import TaskControl
 
@@ -45,6 +45,7 @@ def _roots(ctx: Ctx) -> list[Path]:
 
 @router.post("/health/run")
 def run(ctx: Ctx) -> TaskOut:
+    _no_backup_running(ctx)
     session = _phone(ctx)
     device_id = _device_id(ctx, session)
 
@@ -55,6 +56,8 @@ def run(ctx: Ctx) -> TaskOut:
             should_stop=lambda: control.should_stop,
             on_progress=control.progress,
         )
+        if control.should_stop:  # a stopped run is partial: keep the last full report
+            return {"report_id": None}
         return {"report_id": health.save(ctx.db, device_id, rep)}
 
     return start_task(ctx, "health", work)
@@ -73,12 +76,15 @@ def export(ctx: Ctx) -> dict[str, Any]:
     roots = _roots(ctx)
     if not roots:
         raise ApiError(409, "no_backup_drive", "Connect a backup folder first.")
-    return {"paths": health.export(rep, roots, ctx.config.health.report_dir),
-            "markdown": health.markdown(rep)}  # fmt: skip
+    paths, failed = health.export(rep, roots, ctx.config.health.report_dir)
+    if not paths:
+        raise ApiError(409, "not_saved", "The report could not be saved: " + "; ".join(failed))
+    return {"paths": paths, "failed": failed, "markdown": health.markdown(rep)}
 
 
 @router.post("/health/bugreport")
 def capture_bugreport(ctx: Ctx) -> TaskOut:
+    _no_backup_running(ctx)
     session = _phone(ctx)
     roots = _roots(ctx)
     if not roots:
@@ -132,12 +138,10 @@ def export_checklist(ctx: Ctx) -> dict[str, Any]:
     from datetime import datetime
 
     name = f"pre-reset-checklist-{datetime.now():%Y-%m-%d-%H%M%S}.md"
-    paths = []
-    for root in roots:
-        folder = report_folder(root, ctx.config.health.report_dir)
-        folder.mkdir(parents=True, exist_ok=True)
-        paths.append(str(write_new(folder / name, text.encode())))
-    return {"paths": paths, "markdown": text}
+    paths, failed = write_to_each(roots, ctx.config.health.report_dir, name, text.encode())
+    if not paths:
+        raise ApiError(409, "not_saved", "The checklist could not be saved: " + "; ".join(failed))
+    return {"paths": paths, "failed": failed, "markdown": text}
 
 
 @router.get("/reset-checklist/restore")
@@ -157,11 +161,12 @@ class PushContacts(BaseModel):
 
 
 @router.post("/reset-checklist/restore/contacts")
-def push_contacts(ctx: Ctx, body: PushContacts) -> dict[str, Any]:
+def push_contacts(ctx: Ctx, body: PushContacts) -> TaskOut:
     """Push the newest backed-up .vcf to the phone's Download folder for import (never over a
-    file there)."""
+    file there). A restore task, like the Archive restore; refused while a backup runs."""
     if not body.confirm:
         raise ApiError(409, "not_confirmed", "Confirm first.")
+    _no_backup_running(ctx)
     session = _phone(ctx)
     try:
         session.check_identity()
@@ -172,8 +177,8 @@ def push_contacts(ctx: Ctx, body: PushContacts) -> dict[str, Any]:
         raise ApiError(409, "no_vcf", "No backed-up contacts file was found.")
     local, remote, mtime = vcf
     target = "/sdcard/Download/" + remote.rsplit("/", 1)[-1]
-    try:
-        where = push_one(session, local, target, mtime)
-    except Exception as e:
-        raise ApiError(409, "push_failed", f"The phone did not take the file: {e}") from e
-    return {"phone_path": where}
+
+    def work(control: TaskControl) -> dict[str, Any]:
+        return {"phone_path": push_one(session, local, target, mtime)}
+
+    return start_task(ctx, "restore", work)

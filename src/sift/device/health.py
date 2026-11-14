@@ -181,8 +181,7 @@ class Radio:
     data: str | None = None
 
 
-def parse_telephony(text: str) -> Radio:
-    """`dumpsys telephony.registry`: the first SIM's signal level and service states."""
+def _radio_block(text: str) -> Radio:
     r = Radio()
     if m := re.search(r"mSignalStrength=SignalStrength:\{(.*)", text):
         levels = [int(x) for x in re.findall(r"\blevel\s*=\s*(\d)", m.group(1))]
@@ -193,6 +192,27 @@ def parse_telephony(text: str) -> Radio:
     if m := re.search(r"[Dd]ataRegState\s*=\s*\d+\((\w+)\)", text):
         r.data = m.group(1)
     return r
+
+
+def parse_telephony(text: str, slot: int | None = None) -> Radio:
+    """`dumpsys telephony.registry`: signal level and service states of one SIM slot. The
+    output has one `Phone Id=N` block per slot; `slot` picks one (the slot with the ready
+    SIM), else the block with the best service and signal is used."""
+    parts = re.split(r"^\s*Phone Id=(\d+)\s*$", text, flags=re.M)
+    blocks: dict[int, Radio] = {}
+    for i in range(1, len(parts) - 1, 2):
+        blocks.setdefault(int(parts[i]), _radio_block(parts[i + 1]))
+    if not blocks:
+        return _radio_block(text)
+    if slot is not None and slot in blocks:
+        return blocks[slot]
+    return max(
+        blocks.values(),
+        key=lambda r: (
+            r.voice == "IN_SERVICE",
+            r.signal_level if r.signal_level is not None else -1,
+        ),
+    )
 
 
 @dataclass
