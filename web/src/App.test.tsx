@@ -194,10 +194,16 @@ test('a Retry that cannot reach the engine shows a plain message, not an error d
   expect(alert).not.toHaveTextContent('Failed to fetch')
 })
 
-test('the Settings page says when Settings arrive', async () => {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(STATUS), { status: 200 })))
+test('/settings opens the General settings page', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) =>
+      Promise.resolve(new Response(JSON.stringify(url === '/api/settings' ? { pages: { general: [] }, warnings: [] } : STATUS), { status: 200 })),
+    ),
+  )
   renderApp('/settings')
-  expect(await screen.findByText('The Settings screens arrive in milestone M9.')).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { level: 1, name: 'General' })).toBeInTheDocument()
+  expect(screen.getByRole('navigation', { name: 'Settings pages' })).toBeInTheDocument()
 })
 
 test('shows messages from the engine as toasts', async () => {

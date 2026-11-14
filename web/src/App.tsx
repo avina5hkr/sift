@@ -99,7 +99,8 @@ export default function App() {
             <Route path="/archive/chat-backups" element={<ChatBackupsPage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings" element={<Navigate to="/settings/general" replace />} />
+            <Route path="/settings/:page" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to={home} replace />} />
           </Routes>
         </main>
