@@ -109,32 +109,11 @@ def check_execute(
 
 
 def backups_still_there(ctx: AppContext, digest: str | None, size: int) -> bool:
-    """I3a again, just before the delete: each required copy is still there, right size."""
-    from pathlib import Path
+    """I3a again, just before the delete: each required copy is there and its content, read
+    from the disk now, matches the content hash."""
+    from sift.cleanup.verify import required_copies
 
-    from sift.backup.confirm import current_dest_ids, required_kinds
-    from sift.backup.run import usable_dests
-
-    if digest is None:
-        return False
-    dests = current_dest_ids(ctx.db, ctx.config)
-    usable = {d.id: d for d in usable_dests(ctx)}
-    with ctx.db.read() as conn:
-        for kind in required_kinds(ctx.config):
-            dest = usable.get(dests[kind])
-            row = conn.execute(
-                "SELECT rel_path FROM replica WHERE content_hash = ? AND dest_id = ? "
-                "AND verified_at IS NOT NULL AND rel_path NOT LIKE '.quarantine/%'",
-                (digest, dests[kind]),
-            ).fetchone()
-            if dest is None or row is None:
-                return False
-            try:
-                if (Path(dest.root) / str(row[0])).stat().st_size != size:
-                    return False
-            except OSError:
-                return False
-    return True
+    return required_copies(ctx, digest, size) is None
 
 
 STANDARD_FOLDERS = frozenset(
@@ -206,12 +185,29 @@ def execute(
     gone_paths: list[str] = []
     final = "done"
     moved = 0
+    batch = max(1, ctx.config.cleanup.preflight_hash_batch)
+    fresh: dict[str, str | None] = {}
     try:
         for n, (pid, stored, digest, size, mtime) in enumerate(rows, 1):
             if should_stop():
                 final = "stopped"
                 break
             path = from_db(str(stored))
+            if (n - 1) % batch == 0:
+                # I3b again, as close to the deletes as practical: the phone hashes the next
+                # batch now, so an edit that kept the size and time is still caught. The phone
+                # has no compare-and-delete: an edit in the seconds between this hash and the
+                # delete below is not caught (documented limit).
+                chunk = [from_db(str(r[1])) for r in rows[n - 1 : n - 1 + batch]]
+                try:
+                    fresh = transport.sha256(chunk)
+                except (DeviceDisconnected, DeviceTimeout) as e:
+                    log.warning("The phone went away during a delete run: %s", e)
+                    final = "stopped"
+                    break
+                except TransportError as e:
+                    log.warning("The phone could not re-check files before deleting: %s", e)
+                    fresh = {}
             state, error = "deleted", None
             try:
                 entry = transport.stat(path)
@@ -219,8 +215,12 @@ def execute(
                     state = "gone"
                 elif entry.size != size or entry.mtime != mtime:
                     state = "changed"  # edited after the preflight: left alone
+                elif path not in fresh or fresh[path] is None:
+                    state, error = "failed", "The phone could not re-check this file."
+                elif fresh[path] != digest:
+                    state = "changed"  # same size and time, different content: left alone
                 elif not backups_still_there(ctx, digest, int(size)):
-                    state, error = "failed", "The backup copy is missing now."
+                    state, error = "failed", "A backup copy is missing or damaged now."
                 else:
                     transport.delete(path)
                     if transport.stat(path) is not None:

@@ -26,6 +26,7 @@ from sift.backup.sets import resolve_roots, set_for_path
 from sift.cleanup.errors import RunBlocked
 from sift.cleanup.junk import Item, is_protected
 from sift.cleanup.lexicons import load
+from sift.cleanup.verify import Cache, required_copies
 from sift.core.config import NEVER_DELETE_FLOOR, Config, phone_path_key
 from sift.core.context import AppContext
 from sift.device.session import DeviceSession
@@ -41,6 +42,7 @@ REASONS = {
     "not_backed_up": "Not backed up yet on every required drive",
     "waiting_for_ssd": "Waiting for the SSD",
     "backup_missing": "The backup copy is missing or the wrong size",
+    "backup_corrupt": "The backup copy is damaged (its content does not match)",
     "changed": "Changed on the phone since the backup",
     "outside_roots": "Outside the folders Sift may delete from",
     "protected": "Protected",
@@ -302,38 +304,14 @@ def _slate_kept(ctx: AppContext, run_id: int, pids: set[int]) -> set[int]:
 
 
 def _replicas_ok(ctx: AppContext, files: list[_File]) -> dict[int, str]:
-    """(a) every required destination: a verified replica whose file is there, right size."""
-    cfg = ctx.config
-    dests = current_dest_ids(ctx.db, cfg)
-    usable = {d.id: d for d in usable_dests(ctx)}
+    """(a) every required destination holds a good copy: present, right size, and its content
+    hashed now and equal to the content hash (a stored verified date is not enough)."""
+    cache: Cache = {}  # each copy read once per run, even for several phone paths
     out: dict[int, str] = {}
-    need = [(k, dests[k]) for k in required_kinds(cfg)]
-    with ctx.db.read() as conn:
-        for f in files:
-            if f.digest is None:
-                out[f.pid] = "not_backed_up"
-                continue
-            for kind, dest_id in need:
-                row = conn.execute(
-                    "SELECT rel_path, size FROM replica WHERE content_hash = ? AND dest_id = ? "
-                    "AND verified_at IS NOT NULL AND rel_path NOT LIKE '.quarantine/%'",
-                    (f.digest, dest_id),
-                ).fetchone()
-                if row is None:
-                    out[f.pid] = "not_backed_up"
-                    break
-                dest = usable.get(dest_id)
-                if dest is None:
-                    out[f.pid] = "waiting_for_ssd" if kind == "ssd" else "backup_missing"
-                    break
-                local = Path(dest.root) / str(row[0])
-                try:
-                    if local.stat().st_size != int(row[1]) or int(row[1]) != f.size:
-                        out[f.pid] = "backup_missing"
-                        break
-                except OSError:
-                    out[f.pid] = "backup_missing"
-                    break
+    for f in files:
+        why = required_copies(ctx, f.digest, f.size, cache)
+        if why is not None:
+            out[f.pid] = why
     return out
 
 

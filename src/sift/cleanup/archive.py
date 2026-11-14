@@ -11,6 +11,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from sift.backup.phonepaths import from_db, to_db
 from sift.backup.run import usable_dests
@@ -119,14 +120,18 @@ def restore(
         raise RestoreRefused("The phone needs room for these files plus 2 GB.")
     pushed: list[str] = []
     failed = 0
-    for n, (rel, _digest, size, pid, stored, mtime, _present, _uuid) in enumerate(todo, 1):
+    for n, (rel, digest, size, pid, stored, mtime, _present, _uuid) in enumerate(todo, 1):
         if should_stop():
             break
         local = Path(dest.root) / rel
         try:
             if local.stat().st_size != int(size):
                 raise OSError("the backup copy is not the right size")
-            target = push_one(session, local, from_db(str(stored)), int(mtime))
+            target = push_verified(session, local, from_db(str(stored)), int(mtime), str(digest))
+        except RestoreRefused as e:
+            log.warning("Did not restore %s: %s", rel, e)
+            failed += 1
+            continue
         except (OSError, RemoteError) as e:
             log.warning("Could not restore %s: %s", rel, e)
             failed += 1
@@ -164,8 +169,48 @@ def restore(
 
 
 def push_one(session: DeviceSession, local: Path, phone_path: str, mtime: int) -> str:
-    """Push to `phone_path`, or to a free `_restored` name beside it; returns where it went."""
+    """Push to `phone_path`, or to a free `_restored` name beside it; returns where it went.
+    For files with no content hash to check (a contacts file); backups use `push_verified`."""
+    target = _free_phone_name(session.transport, phone_path)
+    session.transport.push(local, target, mtime)
+    return target
+
+
+def push_verified(
+    session: DeviceSession, local: Path, phone_path: str, mtime: int, digest: str
+) -> str:
+    """Restore one backed-up file to the phone and prove it arrived intact.
+
+    The backup copy is hashed first (a damaged copy is never restored); it is pushed to
+    `phone_path` or a free `_restored` name beside it (never over a file); then the phone hashes
+    what it received. A wrong or partial upload is removed (it is the file this call just
+    created under a name that was free) and RestoreRefused is raised. Returns where it went."""
+    from sift.backup.staging import regular_file_sha256
+    from sift.device.transport import DeviceDisconnected, DeviceTimeout
+
+    try:
+        source = regular_file_sha256(local)
+    except OSError as e:
+        raise RestoreRefused(f"The backup copy could not be read: {e}") from e
+    if source != digest:
+        raise RestoreRefused("The backup copy is damaged (its content does not match).")
     transport = session.transport
+    target = _free_phone_name(transport, phone_path)
+    try:
+        transport.push(local, target, mtime)
+    except DeviceDisconnected, DeviceTimeout:
+        raise  # the phone went away: whatever arrived is checked by the next restore's stat
+    except Exception:
+        _remove_own_upload(transport, target)
+        raise
+    got = transport.sha256([target]).get(target)
+    if got != digest:
+        _remove_own_upload(transport, target)
+        raise RestoreRefused("The phone did not receive the file intact; that copy was removed.")
+    return target
+
+
+def _free_phone_name(transport: Any, phone_path: str) -> str:
     target = phone_path
     p = PurePosixPath(phone_path)
     n = 1
@@ -174,5 +219,12 @@ def push_one(session: DeviceSession, local: Path, phone_path: str, mtime: int) -
         n += 1
         if n > 100:
             raise RestoreRefused(f"No free name for {phone_path} on the phone.")
-    transport.push(local, target, mtime)
     return target
+
+
+def _remove_own_upload(transport: Any, target: str) -> None:
+    try:
+        if transport.stat(target) is not None:
+            transport.delete(target)
+    except Exception as e:
+        log.warning("Could not remove the failed upload %s: %s", target, e)

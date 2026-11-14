@@ -123,7 +123,7 @@ def _active(conn: object) -> list[tuple[int, str, int, str, str]]:
         (int(a), str(b), int(c), str(d), str(e))
         for a, b, c, d, e in conn.execute(  # type: ignore[attr-defined]
             "SELECT id, content_hash, dest_id, orig_rel, q_rel FROM quarantine "
-            "WHERE purged_at IS NULL AND restored_at IS NULL"
+            "WHERE purged_at IS NULL AND restored_at IS NULL AND restore_to IS NULL"
         )
     ]
 
@@ -132,6 +132,7 @@ def reconcile(ctx: AppContext) -> int:
     """At start: finish or undo a quarantine move a crash interrupted; returns rows fixed."""
     usable = {d.id: d for d in usable_dests(ctx)}
     fixed = 0
+    fixed += _reconcile_restores(ctx, usable)
     with REPLICATION_LOCK, ctx.db.tx() as conn:
         for qid, _digest, dest_id, orig, q_rel in _active(conn):
             dest = usable.get(dest_id)
@@ -153,6 +154,35 @@ def reconcile(ctx: AppContext) -> int:
                     (q_rel, rel_key(q_rel), dest_id, orig),
                 )
                 fixed += 1
+    return fixed
+
+
+def _reconcile_restores(ctx: AppContext, usable: dict[int, Any]) -> int:
+    """Restores a crash interrupted: the file is at its recorded destination (moved, database
+    not updated: finish), or still in quarantine (not moved: forget the plan). Either way the
+    bytes stay where they are and the replica row ends up pointing at them."""
+    fixed = 0
+    with ctx.db.read() as conn:
+        rows = conn.execute(
+            "SELECT id, dest_id, q_rel, restore_to FROM quarantine WHERE restore_to IS NOT NULL "
+            "AND purged_at IS NULL AND restored_at IS NULL"
+        ).fetchall()
+    with REPLICATION_LOCK:
+        for qid, dest_id, q_rel, back in rows:
+            dest = usable.get(int(dest_id))
+            if dest is None:
+                continue  # repaired when that drive is plugged in
+            root = Path(dest.root)
+            at_q, at_back = (root / q_rel).is_file(), (root / back).is_file()
+            if at_back and not at_q:
+                _finish_restore(ctx, int(qid), int(dest_id), str(q_rel), str(back))
+                fixed += 1
+            elif at_q:
+                with ctx.db.tx() as conn:
+                    conn.execute("UPDATE quarantine SET restore_to = NULL WHERE id = ?", (qid,))
+                fixed += 1
+            else:
+                log.warning("Quarantined file %s is in neither place; left for review", q_rel)
     return fixed
 
 
@@ -304,14 +334,23 @@ def _restore_one(
         phone_done.add(e.content_hash)
         pushed = 1
     back = _free_name(root, e.orig_rel)
+    with ctx.db.tx() as conn:  # where it goes, first: a crash after the move is repaired
+        conn.execute("UPDATE quarantine SET restore_to = ? WHERE id = ?", (back, e.id))
     _move(root, e.q_rel, back)
+    _finish_restore(ctx, e.id, e.dest_id, e.q_rel, back)
+    return pushed
+
+
+def _finish_restore(ctx: AppContext, qid: int, dest_id: int, q_rel: str, back: str) -> None:
     with ctx.db.tx() as conn:
         conn.execute(
             "UPDATE replica SET rel_path = ?, rel_key = ? WHERE dest_id = ? AND rel_path = ?",
-            (back, rel_key(back), e.dest_id, e.q_rel),
+            (back, rel_key(back), dest_id, q_rel),
         )
-        conn.execute("UPDATE quarantine SET restored_at = ? WHERE id = ?", (int(time.time()), e.id))
-    return pushed
+        conn.execute(
+            "UPDATE quarantine SET restored_at = ?, restore_to = NULL WHERE id = ?",
+            (int(time.time()), qid),
+        )
 
 
 def _same_phone(ctx: AppContext, session: DeviceSession, chosen: list[Entry]) -> None:
@@ -346,16 +385,9 @@ def _push_back(ctx: AppContext, session: DeviceSession, local: Path, e: Entry) -
             (to_db(e.phone_path),),
         ).fetchone()
     mtime = int(row[1]) if row else int(local.stat().st_mtime)
-    target = e.phone_path
-    p = PurePosixPath(target)
-    n = 1
-    while transport.stat(target) is not None:  # never over a file on the phone
-        tag = "_restored" if n == 1 else f"_restored{n}"
-        target = str(p.with_name(f"{p.stem}{tag}{p.suffix}"))
-        n += 1
-        if n > 100:
-            raise RestoreRefused(f"No free name for {e.phone_path} on the phone.")
-    transport.push(local, target, mtime)
+    from sift.cleanup.archive import push_verified
+
+    target = push_verified(session, local, e.phone_path, mtime, e.content_hash)
     transport.media_rescan([target])
     with ctx.db.tx() as conn:
         if row is not None and target == e.phone_path:
