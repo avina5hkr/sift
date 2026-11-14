@@ -482,6 +482,19 @@ export type QuarantineEntry = {
   moved_at: number
   purge_after: number
 }
+export type ChatBackupCopy = {
+  content_hash: string
+  name: string
+  app: 'WhatsApp' | 'WhatsApp Business'
+  folder: 'Databases' | 'Backups'
+  size: number
+  date: number
+  drives: ('mac' | 'ssd')[]
+  on_phone: boolean
+  newest: boolean
+  deletable: boolean
+  why_kept: string | null
+}
 export type ReadySet = { set_name: string; files: number; bytes: number; confirmed_at: number }
 
 // Mirrors GET /api/browse and /api/browse/lists.

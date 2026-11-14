@@ -80,6 +80,12 @@ export default function ArchivePage() {
         </Link>
         .
       </p>
+      <p className={`text-sm ${MUTED}`}>
+        <Link to="/archive/chat-backups" className="underline">
+          WhatsApp chat backups
+        </Link>
+        : see them by date and remove old ones.
+      </p>
       {dests.error && (
         <p role="alert" className="text-sm">
           {plain(dests.error)}

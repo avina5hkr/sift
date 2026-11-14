@@ -22,6 +22,7 @@ import ReviewPage from './pages/ReviewPage'
 import SearchPage from './pages/SearchPage'
 import SlatePage from './pages/SlatePage'
 import TeachPage from './pages/TeachPage'
+import ChatBackupsPage from './pages/ChatBackupsPage'
 import QuarantinePage from './pages/QuarantinePage'
 import SettingsPage from './pages/SettingsPage'
 import WizardPage from './pages/Wizard'
@@ -95,6 +96,7 @@ export default function App() {
             <Route path="/health" element={<HealthPage />} />
             <Route path="/health/checklist" element={<ChecklistPage />} />
             <Route path="/archive" element={<ArchivePage />} />
+            <Route path="/archive/chat-backups" element={<ChatBackupsPage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
