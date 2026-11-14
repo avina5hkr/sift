@@ -86,3 +86,19 @@ A teaching file (`Teach, Save teaching`) is the owner's labels by file hash, wit
 came from (a picture's own label, or one label given to a group). It is not a trained model,
 and it helps only where the same pictures exist again. Builds bundle one only when
 `SIFT_TEACHING` names it. A public build carries no one's labels.
+
+## Invariants referenced in the code
+
+Comments and tests refer to these by number. Numbers not listed are not used in the code.
+
+| Id | Invariant |
+| --- | --- |
+| I1 | Nothing in a backup destination is overwritten or deleted. The only exceptions are quarantine purge and old WhatsApp chat backups the owner chooses to remove. |
+| I2 | The copy sequence: pull to a staging file, hash it, then publish it to its final path with an exclusive create that never replaces a file. Content already on a destination is not copied again. |
+| I3 | The delete checks. I3a: every required backup copy is present, the right size, and its content hash matches now. I3b: the phone file is the one that was checked (re-hashed on the phone before deleting, size and time re-checked per file). The others: the phone's identity, the never-delete list, the minimum age, and the owner's confirmation. |
+| I4 | Protected and Keep files are never put in a delete run. |
+| I5 | Crash safety: every durable step can be recovered, and startup recovery finishes or undoes what a crash or kill left half done. |
+| I7 | Nothing is deleted without an explicit request to execute a delete run that passed its checks and was confirmed. |
+| I9 | Before the first delete, a manifest of the run is written to the backup folders. |
+| I10 | Protected apps (WhatsApp and authenticators) are never uninstalled or cleared, whatever the settings say. |
+| I11 | Clean slate: the owner's keep list wins, and its keep rules are decided again at delete time. |
