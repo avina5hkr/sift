@@ -64,6 +64,16 @@ These are not negotiable, and reviewers check them:
   types get a sentence in `src/sift/services/plainwords.py`.
 - Keep modules small with one job, and add a one-line docstring at the top (the code map uses it).
 
+## Branches
+
+| Branch | Holds |
+| --- | --- |
+| `develop` | Work in progress. Pull requests target `develop`, and CI must pass there. |
+| `main` | Released, stable code. It moves only when a release is prepared, by merging `develop`; release tags (`vX.Y.Z`) are always on `main`. |
+
+Name your branch after its purpose, such as `fix/restore-name-clash` or `feat/browse-search`, and
+branch from `develop`.
+
 ## Commits and pull requests
 
 - One logical change per commit, with a message in the style of the history:

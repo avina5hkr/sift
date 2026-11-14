@@ -13,12 +13,15 @@ refuses a tag that does not match `pyproject.toml`.
 
 ## Steps
 
-1. **Start from a green `main`.** CI must pass on the commit you will release.
+1. **Bring `main` up to date.** Work lands on `develop`; when it is ready and CI is green, merge
+   it into `main` (`git checkout main && git merge --ff-only develop`). CI must pass on the
+   commit you will release.
 2. **Bump the version** in `pyproject.toml`, then run `uv lock` (the lock file records Sift's
    own version, and `uv sync --locked` fails if they differ).
 3. **Update `CHANGELOG.md`:** move the items under *Unreleased* to a new
    `## [X.Y.Z] - YYYY-MM-DD` section and add its compare link at the bottom.
-4. Commit (`release: vX.Y.Z`) and push to `main`. Wait for CI.
+4. Commit (`release: vX.Y.Z`) and push to `main`, then bring `develop` level with it
+   (`git checkout develop && git merge --ff-only main && git push`). Wait for CI.
 5. **Optional dry run:** in GitHub, open *Actions → Release → Run workflow* on `main`. It runs
    every check and build step and uploads the dmg as a workflow artifact for a day, without
    tagging or publishing anything. Download it and try it on a Mac.
