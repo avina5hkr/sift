@@ -37,8 +37,8 @@ def normalise(text: str) -> str:
 
 
 @cache
-def languages() -> tuple[str, ...]:
-    """The wanted languages that Vision on this Mac can read (en-US alone if it cannot say)."""
+def languages(wanted: Sequence[str] = WANTED) -> tuple[str, ...]:
+    """The wanted languages (in order) that Vision on this Mac can read."""
     try:
         import Vision  # type: ignore[import-not-found,import-untyped,unused-ignore]
 
@@ -48,8 +48,8 @@ def languages() -> tuple[str, ...]:
         have = set(found or ())
     except Exception:
         return ()
-    langs = tuple(lang for lang in WANTED if lang in have)
-    if "hi-IN" not in langs:
+    langs = tuple(lang for lang in wanted if lang in have)
+    if "hi-IN" in wanted and "hi-IN" not in langs:
         log.warning("Vision cannot read Hindi on this Mac; Hindi text in images is not read")
     return langs
 
@@ -113,6 +113,8 @@ def pending(db: Database, dest_ids: set[int] | None) -> list[tuple[str, str, str
 def run_ocr(
     db: Database,
     *,
+    langs: Sequence[str] = WANTED,
+    threads: int = 0,
     dest_ids: set[int] | None = None,
     reader: Callable[[Path], OcrResult | None] = recognize,
     should_stop: Callable[[], bool] = lambda: False,
@@ -123,7 +125,8 @@ def run_ocr(
     copies: dict[str, list[Path]] = {}
     for digest, root, rel, _d in rows:
         copies.setdefault(digest, []).append(Path(root).expanduser() / rel)
-    lang = "+".join(languages()) if reader is recognize else "test"
+    found_langs = languages(tuple(langs)) if reader is recognize else ("test",)
+    lang = "+".join(found_langs)
     if not lang:  # Vision could not be asked: try again on the next Analyze
         return 0
     todo = [(d, next((p for p in ps if p.is_file()), None)) for d, ps in copies.items()]
@@ -131,12 +134,12 @@ def run_ocr(
     done = n = 0
     # Vision requests are independent: several images are read at once, results are written
     # here, one transaction per batch
-    with ThreadPoolExecutor(max_workers=workers()) as pool:
+    with ThreadPoolExecutor(max_workers=threads or workers()) as pool:
         for start in range(0, len(todo), BATCH):
             if should_stop():
                 break
             part = todo[start : start + BATCH]
-            results = list(pool.map(lambda item: _read(reader, item[1]), part))
+            results = list(pool.map(lambda item: _read(reader, item[1], found_langs), part))
             read = [(d, f) for (d, _p), f in zip(part, results, strict=True) if f is not None]
             failed = [d for (d, _p), f in zip(part, results, strict=True) if f is None]
             with db.tx() as conn:
@@ -159,9 +162,11 @@ def run_ocr(
     return done
 
 
-def _read(reader: Callable[[Path], OcrResult | None], path: Path) -> OcrResult | None:
+def _read(
+    reader: Callable[..., OcrResult | None], path: Path, langs: Sequence[str]
+) -> OcrResult | None:
     try:
-        return reader(path)
+        return reader(path, langs) if reader is recognize else reader(path)
     except Exception as e:  # one bad image is a failed reading, not a failed Analyze
         log.info("OCR failed on %s: %s", path.name, e)
         return None

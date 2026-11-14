@@ -57,7 +57,6 @@ PAGES: dict[str, list[tuple[str, str]]] = {
         ("apps", "protected_packages"),
     ],
     "models": [
-        ("analysis", "ocr_provider"),
         ("analysis", "ocr_languages"),
         ("analysis", "workers"),
     ],
@@ -67,7 +66,6 @@ PAGES: dict[str, list[tuple[str, str]]] = {
         ("scoring", "t_maybe"),
         ("scoring", "min_labels_each"),
         ("analysis", "cluster_cosine"),
-        ("analysis", "neardup_cosine_min"),
         ("cleanup", "max_delete_per_run"),
         ("health", "storage_warn_pct"),
         ("health", "battery_temp_warn_c"),

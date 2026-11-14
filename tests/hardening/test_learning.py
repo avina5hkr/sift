@@ -149,3 +149,36 @@ def test_look_alike_videos_are_never_pre_ticked(rig: Rig, kind: str) -> None:
     groups = tab_groups(rig.ctx.db, 1, "near")
     assert len(groups) == 1 and len(groups[0].copies) == 1  # still shown
     assert groups[0].copies[0].default_checked == (kind == "image")
+
+
+def test_settings_that_did_nothing_are_gone_and_limits_are_explicit(tmp_path) -> None:
+    from sift.core.config import load_config
+
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "[analysis]\nthumb_px = 512\nocr_provider = 'tesseract'\nembedding_batch = 8\n"
+        "neardup_dhash_max = 8\nocr_languages = ['en-US']\nworkers = 3\n"
+    )
+    cfg, warnings = load_config(f)
+    assert not any(
+        "thumb_px" in w or "ocr_provider" in w or "embedding_batch" in w for w in warnings
+    )
+    assert any("neardup_dhash_max" in w for w in warnings)  # over the supported limit: said so
+    assert cfg.analysis.neardup_dhash_max == 6
+    assert cfg.analysis.ocr_languages == ["en-US"] and cfg.analysis.workers == 3
+
+
+def test_ocr_uses_the_configured_languages(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sift.analysis.ocr as ocr
+
+    readable_images(rig, 1)
+    asked: list[tuple] = []
+    monkeypatch.setattr(ocr, "languages", lambda wanted=ocr.WANTED: tuple(wanted))
+
+    def fake_recognize(path, langs=None):
+        asked.append(tuple(langs))
+        return OcrResult("hello", 0.9, 0.1)
+
+    monkeypatch.setattr(ocr, "recognize", fake_recognize)
+    ocr.run_ocr(rig.ctx.db, langs=["en-US"], reader=fake_recognize)
+    assert asked == [("en-US",)]

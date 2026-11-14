@@ -77,6 +77,7 @@ def model_fingerprint(
     """Everything the trained model, its predictions and its threshold depend on: the labels,
     the threshold, the embedding model and its version, the text reader's version, the feature
     and classifier code versions, the word lists as they read now, and the scoring settings."""
+    from sift.analysis.models import CLIP
     from sift.analysis.ocr import VERSION as OCR_VERSION
 
     labelled = conn.execute(
@@ -88,7 +89,8 @@ def model_fingerprint(
         get_setting(conn, LABELS_REV),
         get_setting(conn, T_SUGGEST),
         embed_version,
-        cfg.analysis.embedding_model,
+        CLIP.key,  # the embedding model and its pinned files
+        tuple(f.sha256 for f in CLIP.files),
         OCR_VERSION,
         FEATURES_VERSION,
         CLASSIFIER_VERSION,

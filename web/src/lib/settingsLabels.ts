@@ -138,10 +138,6 @@ export const LABELS: Record<string, FieldText> = {
     label: 'Protected apps',
     help: 'One app package name per line. Sift never offers to remove these.',
   },
-  'analysis.ocr_provider': {
-    label: 'Text reading (OCR) provider',
-    help: 'Auto picks the best one available on this Mac.',
-  },
   'analysis.ocr_languages': {
     label: 'Text reading languages',
     help: 'One language code per line, for example en-US.',
@@ -169,10 +165,6 @@ export const LABELS: Record<string, FieldText> = {
   'analysis.cluster_cosine': {
     label: 'Group similarity',
     help: 'How alike pictures must look to be grouped together. Between 0 and 1.',
-  },
-  'analysis.neardup_cosine_min': {
-    label: 'Near-duplicate similarity',
-    help: 'How alike two pictures must look to count as near-duplicates. Between 0 and 1.',
   },
   'cleanup.max_delete_per_run': {
     label: 'Most files per delete run',

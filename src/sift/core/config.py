@@ -363,22 +363,29 @@ class BackupConfig(_Section):
 
 
 class AnalysisConfig(_Section):
-    thumb_px: Positive = 256
-    neardup_dhash_max: Count = 8
-    neardup_phash_max: Count = 10
-    neardup_cosine_min: Unit = 0.93
+    # Hard limits, not preferences: looser hash distances were not validated against false
+    # matches before image embeddings refine the groups, so a bigger value is refused (review P3.9).
+    neardup_dhash_max: Annotated[int, Field(ge=0, le=6)] = 6
+    neardup_phash_max: Annotated[int, Field(ge=0, le=8)] = 8
     neardup_aspect_tol: Unit = 0.06
-    video_frames: Positive = 5
     video_frame_match_min: Positive = 4
     video_frame_hash_max: Count = 10
     cluster_cosine: Unit = 0.88
     cluster_split_cosine: Unit = 0.92
     cluster_max_size: Positive = 2000
-    ocr_provider: Literal["auto", "vision", "tesseract"] = "auto"
-    ocr_languages: list[str] = Field(default_factory=lambda: ["en-US", "hi-IN"])
-    embedding_model: str = "clip-vit-b32-onnx"
-    embedding_batch: Positive = 32
-    workers: Count = 0  # 0 = CPU cores minus 2
+    # Vision's language codes, in order (Hindi first: Vision reads Devanagari only then)
+    ocr_languages: list[str] = Field(default_factory=lambda: ["hi-IN", "en-US"])
+    workers: Count = 0  # text reading threads; 0 = half the cores (2 to 8)
+
+
+# Settings that older versions wrote but that never changed anything (fixed by the model or the
+# code). An old config.toml that still holds them loads without a warning.
+RETIRED = {
+    "analysis": frozenset(
+        {"thumb_px", "neardup_cosine_min", "video_frames", "ocr_provider", "embedding_model",
+         "embedding_batch"}
+    ),
+}  # fmt: skip
 
 
 class ScoringConfig(_Section):
@@ -809,7 +816,9 @@ def load_config(path: Path) -> tuple[Config, list[str]]:
                         **value,
                         list_key: _clean_paths(value[list_key], f"{key}.{list_key}", warnings),
                     }
-            sections[key] = model.model_validate(_valid_items(model, key, value, warnings))
+            sections[key] = model.model_validate(
+                _valid_items(model, key, value, warnings, skip=RETIRED.get(key, frozenset()))
+            )
             if key == "cleanup" and "never_delete" in value:
                 _warn_missing_floor(cast("CleanupConfig", sections[key]), warnings)
     return Config.model_validate(sections), warnings

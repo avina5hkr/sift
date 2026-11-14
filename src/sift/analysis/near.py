@@ -84,8 +84,8 @@ def _aspect_ok(a: Item, b: Item, tol: float) -> bool:
 
 
 def image_pairs(items: Sequence[Item], cfg: AnalysisConfig) -> set[tuple[str, str]]:
-    dhash_max = min(cfg.neardup_dhash_max, 6)  # stricter until embeddings exist (plan C3)
-    phash_max = min(cfg.neardup_phash_max, 8)
+    dhash_max = cfg.neardup_dhash_max  # stricter until embeddings exist (plan C3)
+    phash_max = cfg.neardup_phash_max
     buckets: dict[tuple[int, int], list[Item]] = {}
     for item in items:
         for band in bands(item.dhash):

@@ -93,7 +93,14 @@ def analyze(ctx: Ctx) -> TaskOut:
         near = store_groups(ctx.db, find_groups(load_items(ctx.db, device_id), ctx.config.analysis))
         dests = {d.id for d in usable_dests(ctx)}
         stop = lambda: control.should_stop  # noqa: E731
-        read = run_ocr(ctx.db, dest_ids=dests, should_stop=stop, on_file=control.progress)
+        read = run_ocr(
+            ctx.db,
+            langs=ctx.config.analysis.ocr_languages,
+            threads=ctx.config.analysis.workers,
+            dest_ids=dests,
+            should_stop=stop,
+            on_file=control.progress,
+        )
         model = embedding_model(ctx)
         embedded = 0
         clusters: int | None = 0

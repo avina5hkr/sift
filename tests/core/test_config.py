@@ -20,7 +20,7 @@ def test_missing_file_gives_spec_defaults(tmp_path: Path) -> None:
     assert cfg.backup.device_label == "Phone"
     assert cfg.backup.ssd_volume_uuid == ""
     assert cfg.backup.required_destinations == ["mac", "ssd"]
-    assert cfg.analysis.neardup_dhash_max == 8
+    assert cfg.analysis.neardup_dhash_max == 6
     assert cfg.analysis.cluster_cosine == 0.88
     assert cfg.scoring.t_suggest == 0.97
     assert cfg.scoring.calibration_sample == 300
