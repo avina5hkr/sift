@@ -5,6 +5,7 @@ import { ReasonButton } from '../components/backup/ReasonButton'
 import { TaskLine } from '../components/backup/TaskLine'
 import { JunkCard } from '../components/cleanup/JunkCard'
 import { ReadyCards } from '../components/cleanup/ReadyCards'
+import { SlateCard } from '../components/cleanup/SlateCard'
 import { ModelCard } from '../components/cleanup/ModelCard'
 import { StorageBar } from '../components/cleanup/StorageBar'
 import { TeachCard } from '../components/cleanup/TeachCard'
@@ -107,6 +108,7 @@ export default function CleanupPage() {
       </section>
 
       <ReadyCards />
+      <SlateCard />
       <ModelCard />
       {data.has_backup && <TeachCard />}
       {data.has_backup && <JunkCard />}

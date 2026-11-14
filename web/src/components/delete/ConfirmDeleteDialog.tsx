@@ -59,9 +59,11 @@ export function ConfirmDeleteDialog({ run, busy, error, outdated, chooseDisposit
         was checked against the phone just now.{' '}
         {chooseDisposition
           ? ''
-          : run.disposition === 'quarantine'
-            ? `Deleted files stay in Quarantine for ${run.quarantine_days ?? 30} days.`
-            : 'The backup keeps every file.'}{' '}
+          : run.source === 'slate'
+            ? `Each kind of file follows the choice you made: kept in the backup, or in Quarantine for ${run.quarantine_days ?? 30} days.`
+            : run.disposition === 'quarantine'
+              ? `Deleted files stay in Quarantine for ${run.quarantine_days ?? 30} days.`
+              : 'The backup keeps every file.'}{' '}
         <strong>This cannot be undone on the phone.</strong>
       </p>
       {run.backups.length > 0 && <p className="text-xs text-neutral-600 dark:text-neutral-400">Backups: {run.backups.join(', ')}</p>}

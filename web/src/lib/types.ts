@@ -430,8 +430,48 @@ export type DeleteBody =
       folders: string[]
       filters?: { q: string; kind: string; older_days: number; min_bytes: number; status: string }
     }
+  | { source: 'slate'; plan: number; dispositions: Record<string, Disposition>; fingerprint?: string }
 /** What happens to the backup copy of a file deleted from Browse. */
 export type Disposition = 'archive' | 'quarantine'
+
+// Mirrors /api/slate/* (Clean slate).
+export type SlateCategory = 'camera' | 'screenshots' | 'whatsapp' | 'documents' | 'junk' | 'other'
+export type SlateTotal = { files: number; bytes: number }
+export type SlateRules = {
+  keep_folders: string[]
+  keep_newer_than_days: number
+  keep_labelled: boolean
+  keep_camera: boolean
+  patterns: string[]
+}
+export type SlatePlan = {
+  id: number
+  fingerprint?: string
+  rules: SlateRules
+  kept_by_hand: { files: number; folders: string[] }
+  remove: SlateTotal
+  keep: SlateTotal
+  protected: SlateTotal
+  never: SlateTotal
+  gaps: SlateTotal
+  gaps_no_set: SlateTotal
+  categories: Record<SlateCategory, SlateTotal>
+  gap_sets: string[]
+}
+export type SlateSide = 'remove' | 'keep' | 'protected'
+export type SlateGroup = { folder: string; files: number; bytes: number; sample_ids: number[]; reasons: Record<string, number> }
+export type SlateFile = {
+  id: number
+  path: string
+  size: number
+  mtime: number
+  kind: string
+  status: string
+  reason: string
+  category: SlateCategory
+  gap: string | null
+}
+export type SlateFilesPage = { total_files: number; files: SlateFile[] }
 
 // Mirrors GET /api/quarantine and GET /api/cleanup/ready.
 export type QuarantineEntry = {

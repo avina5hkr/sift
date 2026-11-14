@@ -50,6 +50,7 @@ REASONS = {
     "hash_mismatch": "The phone's copy does not match the backup",
     "unreadable": "The phone could not read it",
     "over_limit": "More than one run may delete; run it again for the rest",
+    "kept": "A keep rule keeps it",
 }
 
 
@@ -288,6 +289,18 @@ def _keepers(
     return out
 
 
+def _slate_kept(ctx: AppContext, run_id: int, pids: set[int]) -> set[int]:
+    """Files of a slate run that the plan's rules keep now (or that no plan names)."""
+    from sift.cleanup.slate import plan
+
+    with ctx.db.read() as conn:
+        row = conn.execute("SELECT id FROM slate_plan WHERE run_id = ?", (run_id,)).fetchone()
+    if row is None:
+        return set(pids)  # a slate run without its plan deletes nothing
+    removable = {p.row.id for p in plan(ctx, int(row[0])) if p.decision.action == "remove"}
+    return {pid for pid in pids if pid not in removable}
+
+
 def _replicas_ok(ctx: AppContext, files: list[_File]) -> dict[int, str]:
     """(a) every required destination: a verified replica whose file is there, right size."""
     cfg = ctx.config
@@ -391,7 +404,9 @@ def run_preflight(
             f.result = "gone"
         elif source == "cleanup" and r[7] != 1:
             f.result = "not_selected"
-        elif not (in_browse_roots if source == "browse" else in_delete_roots)(cfg, f.path):
+        elif not (in_browse_roots if source in ("browse", "slate") else in_delete_roots)(
+            cfg, f.path
+        ):
             f.result = "outside_roots"
     for pid, why in _replicas_ok(ctx, alive()).items():  # (a)
         next(f for f in files if f.pid == pid).result = why
@@ -402,6 +417,9 @@ def run_preflight(
     if source == "cleanup":
         for pid, why in _keepers(ctx, alive(), selected, device_id).items():
             next(f for f in files if f.pid == pid).result = why
+    if source == "slate":  # I11: the plan's keep rules are decided again, here
+        for pid in _slate_kept(ctx, run_id, {f.pid for f in alive()}):
+            next(f for f in files if f.pid == pid).result = "kept"
     oldest = now() - cfg.cleanup.min_age_days * 86_400
     transport = session.transport
     try:
@@ -452,7 +470,7 @@ def _finish(
     stopped: bool = False,
     source: str = "",
 ) -> None:
-    if blocked is None and not stopped:  # one run deletes at most max_delete_per_run files
+    if blocked is None and not stopped and source != "slate":  # at most max_delete_per_run
         cap = ctx.config.cleanup.max_delete_per_run
         for f in [f for f in files if f.result == "ok"][cap:]:
             f.result = "over_limit"
@@ -477,6 +495,7 @@ def _finish(
                 len(passed),
                 int(
                     len(passed) > TYPED_ABOVE
+                    or (source == "slate" and ctx.config.slate.typed_confirmation)
                     or (
                         source == "browse"
                         and (

@@ -69,6 +69,22 @@ def check_execute(
         )
     if typed and typed_count != int(passed):
         raise ExecuteRefused("typed_count", f"Type the number of files, {passed}, to confirm.")
+    if source == "slate":
+        from sift.cleanup.preflight import _slate_kept
+
+        with ctx.db.read() as conn:
+            ok = {
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT phone_file_id FROM delete_item WHERE run_id = ? "
+                    "AND check_result = 'ok'",
+                    (run_id,),
+                )
+            }
+        if _slate_kept(ctx, run_id, ok):
+            raise ExecuteRefused(
+                "plan_changed", "The plan now keeps some of these files. Check again."
+            )
     if source == "cleanup" and selection_hash(ticked) != sel_hash:
         raise ExecuteRefused("selection_changed", "The ticked files changed. Run the checks again.")
     from sift.cleanup.preflight import copies_problem
@@ -166,6 +182,8 @@ def execute(
     """Delete the run's passed files. `check_execute` must have passed just before."""
     write_manifests(ctx, run_id)  # I9: before the first delete; raises when it cannot
     limit = ctx.config.cleanup.max_delete_per_run
+    if conn_source(ctx, run_id) == "slate":
+        limit = 1_000_000  # Clean slate runs the whole plan, in chunks (spec 10A)
     with ctx.db.tx() as conn:
         conn.execute(
             "UPDATE delete_run SET state = 'running', started_at = ? WHERE id = ?",
@@ -253,7 +271,10 @@ def execute(
             ).fetchone()[0]
         moved = quarantine_run(ctx, run_id) if disposition == "quarantine" else 0
         source = conn_source(ctx, run_id)
-        if source == "browse" and gone_paths:
+        empty_too = source == "browse" or (
+            source == "slate" and ctx.config.slate.remove_empty_folders
+        )
+        if empty_too and gone_paths:
             remove_empty_folders(transport, gone_paths)
     except BaseException:
         final = "failed"  # an unexpected error still ends the run with its counts
