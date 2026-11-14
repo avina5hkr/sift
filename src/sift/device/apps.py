@@ -20,7 +20,7 @@ PROBES = {
 
 
 def valid_package(name: str) -> bool:
-    return bool(PACKAGE_RE.match(name)) and len(name) <= 255
+    return isinstance(name, str) and bool(PACKAGE_RE.fullmatch(name)) and len(name) <= 255
 
 
 @dataclass

@@ -923,7 +923,7 @@ class AdbTransport:
 
         if not valid_package(package):
             raise RemoteError(f"Not a package name: {package!r}", package)
-        out = self._exec(f"pm path {package} 2>/dev/null", self.limits.stat_s)
+        out = self._exec(f"pm path {shlex.quote(package)} 2>/dev/null", self.limits.stat_s)
         return parse_paths(out.decode("utf-8", "replace"))
 
     def _pm(self, words: str, package: str) -> None:
@@ -931,7 +931,7 @@ class AdbTransport:
 
         if not valid_package(package):
             raise RemoteError(f"Not a package name: {package!r}", package)
-        out = self._exec(f"pm {words} {package} 2>&1", self.limits.stat_s * 6)
+        out = self._exec(f"pm {words} {shlex.quote(package)} 2>&1", self.limits.stat_s * 6)
         text = out.decode("utf-8", "replace").strip()
         if "Success" not in text:
             raise RemoteError(f"The phone refused for {package}: {text or 'no answer'}", package)

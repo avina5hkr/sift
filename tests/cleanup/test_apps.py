@@ -153,9 +153,16 @@ def test_trim_caches_and_export_with_apks(rig: Rig) -> None:
     out = c.post("/api/apps/export", headers=h, json={"apks": ["com.example.sideload"]}).json()
     assert out["apks"] == {"saved": 1, "failed": 0}
     root = Path(out["app_list"][0]).parent
-    assert (root / "apks" / "com.example.sideload" / "base.apk").read_bytes() == b"APK bytes"
+    folder = root / "apks" / "com.example.sideload" / "1.0"
+    assert (folder / "base.apk").read_bytes() == b"APK bytes"
     again = c.post("/api/apps/export", headers=h, json={"apks": ["com.example.sideload"]}).json()
-    assert again["apks"]["saved"] == 1  # the existing APK is kept, not replaced
+    assert again["apks"]["saved"] == 1 and sorted(p.name for p in folder.iterdir()) == ["base.apk"]
+    (folder / "base.apk").write_bytes(b"part")  # a short file from elsewhere is kept, not trusted
+    c.post("/api/apps/export", headers=h, json={"apks": ["com.example.sideload"]})
+    assert (folder / "base.apk").read_bytes() == b"part"
+    assert (folder / "base-1.apk").read_bytes() == b"APK bytes"
+    other = c.post("/api/apps/export", headers=h, json={"apks": ["com.not.installed"]}).json()
+    assert other["apks"] == {"saved": 0, "failed": 1}
 
 
 @pytest.mark.parametrize("kind", ["packages", "diskstats", "usagestats", "versions"])
@@ -166,3 +173,117 @@ def test_a_probe_that_fails_is_only_unavailable(rig: Rig, kind: str) -> None:
     c, h = client(rig)
     body = c.get("/api/apps", headers=h)
     assert body.status_code == 200 and body.json()["probes"][kind] is False
+
+
+def _wa_backup(rig: Rig, name: str = "msgstore.db.crypt15", body: bytes = b"chats", age: int = 600):
+    rig.transport.phone.add_file(f"{DB}/{name}", body, mtime=int(time.time()) - age)
+
+
+def _wa_ok(c, h, packages: list[str], action: str = "uninstall"):
+    path = "uninstall" if action == "uninstall" else "clear-data"
+    unlock = {p: {"backup_done": True, "typed_name": "WhatsApp"} for p in packages}
+    return act(c, h, path, packages, action=action, unlock=unlock)
+
+
+@pytest.mark.parametrize(
+    "name", ["com.whatsapp\n", " com.whatsapp", "com.whatsapp ", "COM.WHATSAPP", "com.whatsapp;"]
+)
+def test_p10_package_name_variants_never_reach_the_phone(rig: Rig, name: str) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    c, h = client(rig)
+    for path, action in (("uninstall", "uninstall"), ("clear-data", "clear_data")):
+        assert act(c, h, path, [name], action=action).status_code == 409
+    assert not [e for e in rig.transport.journal if e.op in ("uninstall", "clear_data")]
+    assert "com.whatsapp" in rig.transport.phone.apps
+    assert name == "COM.WHATSAPP" or not valid_package(name)
+
+
+def test_p10_only_listed_third_party_apps_can_be_acted_on(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    c, h = client(rig)
+    for system in ("com.android.providers.contacts", "com.google.android.gms"):
+        refused = act(c, h, "clear-data", [system], action="clear_data")
+        assert refused.status_code == 409 and refused.json()["code"] == "protected"
+    assert not [e for e in rig.transport.journal if e.op == "clear_data"]
+
+
+def test_p10_built_in_protection_survives_an_owner_list(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    rig.ctx.config.apps.protected_packages = ["com.example.oldgame"]
+    c, h = client(rig)
+    by = {a["package"]: a for a in c.get("/api/apps", headers=h).json()["apps"]}
+    assert by["com.whatsapp"]["protected"] and by["com.example.oldgame"]["protected"]
+    assert act(c, h, "uninstall", ["com.whatsapp"], action="uninstall").status_code == 409
+    auth = "com.google.android.apps.authenticator2"
+    assert act(c, h, "clear-data", [auth], action="clear_data").status_code == 409
+    assert act(c, h, "uninstall", ["com.example.oldgame"], action="uninstall").status_code == 409
+    rig.ctx.config.apps.protected_packages = ["COM.EXAMPLE.OLDGAME"]  # case does not matter
+    assert act(c, h, "uninstall", ["com.example.oldgame"], action="uninstall").status_code == 409
+    assert {"com.whatsapp", auth, "com.example.oldgame"} <= set(rig.transport.phone.apps)
+
+
+@pytest.mark.parametrize("case", ["future", "empty", "folder", "wrong_name", "phone_clock_ahead"])
+def test_p10_a_backup_that_is_not_fresh_does_not_unlock_whatsapp(rig: Rig, case: str) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    phone = rig.transport.phone
+    if case == "future":
+        _wa_backup(rig, age=-3600)
+    elif case == "empty":
+        _wa_backup(rig, body=b"")
+    elif case == "folder":
+        phone.add_file(f"{DB}/msgstore.db.crypt15/inner", b"x", mtime=int(time.time()))
+    elif case == "wrong_name":
+        _wa_backup(rig, name="msgstore.db.crypt15.tmp")
+    else:  # the phone's clock is two days ahead of the Mac: a backup the Mac thinks is new
+        phone.time_offset_s = 48 * 3600
+        _wa_backup(rig, age=600)
+    c, h = client(rig)
+    assert _wa_ok(c, h, ["com.whatsapp"]).status_code == 409
+    assert "com.whatsapp" in phone.apps
+
+
+def test_p10_an_unprotect_does_not_survive_an_uninstall(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    c, h = client(rig)
+    auth = "com.google.android.apps.authenticator2"
+    c.post("/api/apps/unprotect", headers=h, json={"package": auth, "confirm": True})
+    assert act(c, h, "uninstall", [auth], action="uninstall").json()["done"] == [auth]
+    rig.transport.phone.apps[auth] = FakeApp(last_used=int(time.time()))  # reinstalled
+    assert act(c, h, "uninstall", [auth], action="uninstall").status_code == 409
+    rig.ctx.config.apps.protected_packages = ["com.example.oldgame"]
+    c.post(
+        "/api/apps/unprotect", headers=h, json={"package": "com.example.oldgame", "confirm": True}
+    )
+    rig.ctx.config.apps.protected_packages = []
+    again = c.post(
+        "/api/apps/unprotect",
+        headers=h,
+        json={"package": "com.example.oldgame", "protect_again": True},
+    )
+    assert again.status_code == 200 and again.json() == {"unprotected": False}
+
+
+def test_p10_no_app_list_no_action(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    real = rig.transport.apps_probe
+    rig.transport.apps_probe = lambda k: None if k == "packages" else real(k)  # type: ignore[method-assign]
+    c, h = client(rig)
+    refused = act(c, h, "uninstall", ["com.example.oldgame"], action="uninstall")
+    assert refused.status_code == 409 and refused.json()["code"] == "no_app_list"
+    assert "com.example.oldgame" in rig.transport.phone.apps
+
+
+def test_the_app_list_csv_is_not_a_formula(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    rig.transport.phone.apps["com.example.oldgame"].version = "=HYPERLINK(1)"
+    c, h = client(rig)
+    out = c.post("/api/apps/export", headers=h, json={}).json()
+    text = Path(out["app_list"][0]).read_text()
+    assert "'=HYPERLINK(1)" in text and ",=HYPERLINK" not in text
