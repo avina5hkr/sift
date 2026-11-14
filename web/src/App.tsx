@@ -17,6 +17,7 @@ import CleanupPage from './pages/CleanupPage'
 import LogsPage from './pages/LogsPage'
 import ReviewPage from './pages/ReviewPage'
 import SearchPage from './pages/SearchPage'
+import SlatePage from './pages/SlatePage'
 import TeachPage from './pages/TeachPage'
 import QuarantinePage from './pages/QuarantinePage'
 import SettingsPage from './pages/SettingsPage'
@@ -86,6 +87,7 @@ export default function App() {
             <Route path="/cleanup/calibration" element={<CalibrationPage />} />
             <Route path="/cleanup/search" element={<SearchPage />} />
             <Route path="/browse" element={<BrowsePage />} />
+            <Route path="/slate" element={<SlatePage />} />
             <Route path="/archive" element={<ArchivePage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />
