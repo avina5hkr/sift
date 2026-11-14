@@ -69,3 +69,16 @@ export function formatDay(epochSeconds: number): string {
   const d = new Date(epochSeconds * 1000)
   return `${d.getDate()} ${d.toLocaleString('en-GB', { month: 'short' })}`
 }
+
+const PREFIXES: [string, string][] = [
+  ['/sdcard/Android/media/com.whatsapp/WhatsApp/Media/', 'WhatsApp/'],
+  ['/sdcard/', ''],
+  ['/storage/emulated/0/', ''],
+]
+
+// Where a file lives, short enough to read under a thumbnail:
+// "/sdcard/DCIM/Camera/a.jpg" -> "DCIM/Camera/a.jpg"; the WhatsApp media folder becomes "WhatsApp/".
+export function shortPath(path: string): string {
+  for (const [from, to] of PREFIXES) if (path.startsWith(from)) return to + path.slice(from.length)
+  return path
+}

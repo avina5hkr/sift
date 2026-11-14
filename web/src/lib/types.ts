@@ -361,6 +361,11 @@ export type ModelStatus = { key: string; installed: boolean; size_bytes: number 
 // Mirrors GET /api/cleanup/clusters, /clusters/{id} and /search.
 export type ClusterLabel = 'junk' | 'keep'
 export type ClusterTag = 'greeting' | 'quote' | 'meme' | 'devotional' | 'other'
+export type Suggestion = {
+  label: ClusterLabel | null
+  reason: string
+  source: 'built-in' | 'built-in + your teaching' | 'your teaching'
+}
 export type Cluster = {
   id: number
   size: number
@@ -368,8 +373,21 @@ export type Cluster = {
   sample_ids: number[]
   sample_text: string | null
   label: ClusterLabel | null
+  /** Members that have a label. */
+  marked: number
+  suggestion: Suggestion | null
 }
-export type ClustersResponse = { images: number; covered: number; clusters: Cluster[] }
+export type ClusterSection = 'to_mark' | 'marked'
+export type ClustersResponse = {
+  images: number
+  covered: number
+  to_mark: number
+  marked: number
+  offset: number
+  clusters: Cluster[]
+}
+// Mirrors POST /api/labels/import.
+export type ImportResult = { read: number; applied: number; waiting: number }
 export type PictureItem = { id: number; path: string; content_hash: string; score: number; label: ClusterLabel | null }
 
 // Mirrors GET /api/delete/runs/{id}.

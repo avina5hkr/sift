@@ -7,6 +7,7 @@ import { ReviewTabs } from '../components/cleanup/ReviewTabs'
 import {
   copyTop,
   columnsFor,
+  CELL_H,
   ESTIMATED_ROW_H,
   rowHeight,
 } from '../components/cleanup/layout'
@@ -114,7 +115,7 @@ function Review({
       if (!el || !at) return
       const rowTop = offsets[at.group] as number
       const top = rowTop + (at.copy < 0 ? 0 : copyTop(at.copy, cols))
-      const bottom = rowTop + (at.copy < 0 ? rowHeight(groups[at.group] as ReviewGroup, cols) : copyTop(at.copy, cols) + 160)
+      const bottom = rowTop + (at.copy < 0 ? rowHeight(groups[at.group] as ReviewGroup, cols) : copyTop(at.copy, cols) + CELL_H)
       if (top < el.scrollTop) el.scrollTop = top - 8
       else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight + 8
       setView((v) => ({ ...v, top: el.scrollTop }))
