@@ -163,3 +163,21 @@ def test_keep_awake_holds_the_mac_and_restores_the_phone(rig: Rig) -> None:
     awake._phone_on()
     assert phone.settings[STAY_ON] == "3"
     assert restore_leftover(rig.ctx) and phone.settings[STAY_ON] == "0"
+
+
+def test_the_junk_model_trains_once_per_fingerprint(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sift.cleanup import junk
+
+    calls = []
+    real = junk.train
+    monkeypatch.setattr(junk, "train", lambda *a: calls.append(1) or real(*a))
+    junk._cache.clear()
+    for _ in range(3):
+        junk.score_all(rig.ctx.db, 1, rig.ctx.config, 2, None)
+    assert len(calls) == 1
+    with rig.ctx.db.tx() as conn:
+        junk.bump_labels(conn)  # a label changed: retrain
+    junk.score_all(rig.ctx.db, 1, rig.ctx.config, 2, None)
+    assert len(calls) == 2

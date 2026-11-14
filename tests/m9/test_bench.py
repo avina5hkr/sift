@@ -16,6 +16,7 @@ def finished(jobs, job_id):  # benchmarks may take minutes
     assert jobs.wait_finished(job_id, 600)
     return next(s for s in jobs.snapshot() if s.id == job_id)
 
+
 pytestmark = pytest.mark.bench
 
 

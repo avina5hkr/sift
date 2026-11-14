@@ -426,6 +426,25 @@ def label_counts(db: Database, embed_version: int) -> dict[str, int]:
     return {str(k): int(v) for k, v in rows}
 
 
+_cache_lock = threading.Lock()
+_cache: dict[tuple[str, int], Model] = {}
+
+
+def _trained(items: Sequence[Item], feats: np.ndarray, cfg: Config, version: int, fp: str) -> Model:
+    """The model for this fingerprint (labels, threshold, embeddings, scoring settings): trained
+    once and reused until any of those change, so the Junk tab does not retrain each rebuild."""
+    key = (fp, version)
+    with _cache_lock:
+        hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    model = train(items, feats, cfg, version)
+    with _cache_lock:
+        _cache.clear()  # one model at a time
+        _cache[key] = model
+    return model
+
+
 def score_all(
     db: Database, device_id: int, cfg: Config, embed_version: int, lexicons: Path | None
 ) -> tuple[list[Item], list[Verdict], Model, dict[str, Any]]:
@@ -441,7 +460,7 @@ def score_all(
         with db.tx() as conn:
             put_setting(conn, MODEL_VERSION, str(version))
             put_setting(conn, TRAINED_REV, str(st["labels_rev"]))
-    model = train(every, feats, cfg, version)
+    model = _trained(every, feats, cfg, version, st["fingerprint"])
     found = verdicts(every, feats, model, cfg, t_suggest=st["t_suggest"], greet=greet, doc=doc)
     keep = [n for n, i in enumerate(every) if i.listed]
     return [every[n] for n in keep], [found[n] for n in keep], model, st
