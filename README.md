@@ -40,9 +40,10 @@ make build          # web UI, locked Python dependencies, PyInstaller, ad-hoc si
 
 The result is `build/package/Sift-VERSION.dmg` (arm64). `build/package/dist/Sift.app/Contents/
 MacOS/Sift --self-check` checks that every native part loads. To start a build with your own
-teaching (your junk/keep choices), save it from the app (Teach, Save teaching) to
-`local/teaching.json` (or set `SIFT_TEACHING`); it is bundled into that build only and loaded on
-a fresh install.
+teaching, save it from the app (Teach, Save teaching) and build with
+`SIFT_TEACHING=path/to/teaching.json make build`; it is bundled into that build only and loaded
+once on a fresh install. Nothing is bundled unless you set it. A teaching file holds your
+junk/keep labels by file hash, not a trained model: it helps only on the same pictures.
 
 ## Develop
 

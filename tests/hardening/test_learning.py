@@ -182,3 +182,49 @@ def test_ocr_uses_the_configured_languages(rig: Rig, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(ocr, "recognize", fake_recognize)
     ocr.run_ocr(rig.ctx.db, langs=["en-US"], reader=fake_recognize)
     assert asked == [("en-US",)]
+
+
+def test_a_group_label_stays_a_group_through_save_and_load(rig: Rig, tmp_path) -> None:
+    """Review P3.12: a saved group label loads as one group decision, not many single ones."""
+    from sift.cleanup.labels_io import export, load
+
+    hashes = readable_images(rig, 3)
+    with rig.ctx.db.tx() as conn:
+        conn.executemany(
+            "INSERT INTO label (content_hash, label, source, cluster_id, created_at) "
+            "VALUES (?, 'junk', 'cluster', 7, 1)",
+            [(h,) for h in hashes[:2]],
+        )
+        conn.execute(
+            "INSERT INTO label (content_hash, label, source, created_at) VALUES (?, 'keep', "
+            "'manual', 1)",
+            (hashes[2],),
+        )
+    saved = export(rig.ctx.db)
+    assert {(x["source"], x["group"]) for x in saved["labels"]} == {
+        ("cluster", "g7"), ("manual", None)
+    }  # fmt: skip
+    with rig.ctx.db.tx() as conn:  # a fresh install of the same pictures
+        conn.execute("DELETE FROM label")
+    load(rig.ctx.db, saved)
+    with rig.ctx.db.read() as conn:
+        rows = conn.execute("SELECT content_hash, source, cluster_id FROM label").fetchall()
+    by = {h: (src, cid) for h, src, cid in rows}
+    assert by[hashes[0]][0] == "cluster" and by[hashes[0]][1] == by[hashes[1]][1] < 0
+    assert by[hashes[2]] == ("manual", None)
+
+
+def test_teaching_file_versions_are_checked(rig: Rig) -> None:
+    from sift.cleanup.labels_io import load
+
+    old = {"format": "sift-teaching", "version": 1, "labels": [{"hash": "a" * 64, "label": "keep"}]}
+    assert load(rig.ctx.db, old)["read"] == 1  # format 1: every label a picture's own
+    with pytest.raises(ValueError, match="newer Sift"):
+        load(rig.ctx.db, {"format": "sift-teaching", "version": 99, "labels": []})
+
+
+def test_a_build_bundles_no_teaching_unless_asked() -> None:
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[2] / "packaging" / "build_dmg.sh").read_text()
+    assert 'TEACHING="${SIFT_TEACHING:-}"' in script and "local/teaching.json" not in script

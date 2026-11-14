@@ -1,14 +1,14 @@
 #!/bin/bash
 # Build Sift.app and Sift.dmg from a clean checkout (spec section 14). arm64 only.
 #   packaging/build_dmg.sh            -> build/dist/Sift.app, build/Sift-VERSION.dmg
-# SIFT_TEACHING=path/to/teaching.json bundles the owner's teaching (default local/teaching.json
-# when it exists). It goes into this build only and is never committed.
+# SIFT_TEACHING=path/to/teaching.json bundles that teaching file into this build only (never
+# committed). Nothing is bundled unless it is set: a public build carries nobody's labels.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export SIFT_ROOT="$ROOT"
 export SIFT_VERSION="$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)"
-TEACHING="${SIFT_TEACHING:-$ROOT/local/teaching.json}"
+TEACHING="${SIFT_TEACHING:-}"
 OUT="$ROOT/build/package"
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -21,7 +21,7 @@ uv sync --locked --quiet
 
 STAGE="$OUT/teaching"
 export SIFT_STARTER_TEACHING=""
-if [ -f "$TEACHING" ]; then
+if [ -n "$TEACHING" ] && [ -f "$TEACHING" ]; then
   mkdir -p "$STAGE"
   cp "$TEACHING" "$STAGE/starter.json"
   export SIFT_STARTER_TEACHING="$STAGE/starter.json"

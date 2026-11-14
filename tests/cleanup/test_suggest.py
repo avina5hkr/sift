@@ -54,7 +54,9 @@ def test_teaching_is_saved_and_loaded_and_waits_for_unknown_pictures(rig) -> Non
     rng = np.random.default_rng(3)
     seed(rig.ctx.db, [{"hash": "a" * 64, "emb": near(A, rng), "label": "junk"}])
     saved = export(rig.ctx.db)
-    assert saved["labels"] == [{"hash": "a" * 64, "label": "junk", "tag": None}]
+    assert saved["labels"] == [
+        {"hash": "a" * 64, "label": "junk", "tag": None, "source": "manual", "group": None}
+    ]
     unknown = "b" * 64
     got = load(
         rig.ctx.db,
