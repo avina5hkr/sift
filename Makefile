@@ -25,3 +25,6 @@ e2e: web
 
 codemap:
 	uv run python scripts/codemap.py > docs/CODEMAP.md
+
+bench:
+	SIFT_TRACKER=off uv run pytest -q -s -m bench tests/m9/test_bench.py
