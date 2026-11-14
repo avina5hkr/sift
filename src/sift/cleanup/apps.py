@@ -18,6 +18,7 @@ from typing import Any
 
 from sift.backup.run import usable_dests
 from sift.core.context import AppContext
+from sift.core.files import link_new, write_new
 from sift.device.apps import (
     PLAY_STORE,
     parse_diskstats,
@@ -27,6 +28,7 @@ from sift.device.apps import (
     valid_package,
 )
 from sift.device.session import DeviceSession
+from sift.device.transport import RemoteEntry
 
 DAY = 86_400
 WHATSAPP = {
@@ -109,15 +111,21 @@ def suggestions(rows: list[AppRow]) -> list[AppRow]:
 
 def whatsapp_backup_age_h(session: DeviceSession, package: str) -> float | None:
     """Hours since the newest local chat backup, by the phone's own clock, or None if there is
-    none or its age cannot be judged. Only regular, non-empty msgstore files count, and a file
-    dated in the future is not a fresh backup."""
+    none or its age cannot be judged."""
+    found = whatsapp_backup(session, package)
+    return None if found is None else found[1]
+
+
+def whatsapp_backup(session: DeviceSession, package: str) -> tuple[RemoteEntry, float] | None:
+    """The newest local chat backup file and its age in hours by the phone's clock. Only
+    regular, non-empty msgstore files count, and a file dated in the future is not fresh."""
     try:
         now = session.transport.info().phone_time
     except Exception:
         return None
     if now is None:
         return None
-    newest = 0
+    newest: RemoteEntry | None = None
     for folder in WHATSAPP[package][1:]:
         try:
             entries = session.transport.list_dir(folder)
@@ -127,9 +135,53 @@ def whatsapp_backup_age_h(session: DeviceSession, package: str) -> float | None:
             name = e.path.rsplit("/", 1)[-1]
             if e.is_dir or e.is_symlink or e.size <= 0 or not MSGSTORE.fullmatch(name):
                 continue
-            if e.mtime <= now:
-                newest = max(newest, e.mtime)
-    return None if not newest else (now - newest) / 3600
+            if e.mtime <= now and (newest is None or e.mtime > newest.mtime):
+                newest = e
+    return None if newest is None else (newest, (now - newest.mtime) / 3600)
+
+
+def saved_in_backup(ctx: AppContext, session: DeviceSession, entry: RemoteEntry) -> bool:
+    """True when this phone file, unchanged, has a verified copy on every required backup
+    folder (and the Mac copy is on disk). Uninstalling WhatsApp removes its folder from the
+    phone, so its chat backup must be safe in Sift's backup first; Sift keeps that copy until
+    the owner deletes it (I1)."""
+    from sift.backup.confirm import current_dest_ids, required_kinds
+    from sift.backup.phonepaths import to_db
+    from sift.backup.run import _stored_device_id
+
+    device_id = _stored_device_id(ctx.db, session.device_uuid)
+    if device_id is None:
+        return False
+    ids = current_dest_ids(ctx.db, ctx.config)
+    need = [ids.get(k, -1) for k in required_kinds(ctx.config)]
+    if any(i < 0 for i in need):
+        return False
+    with ctx.db.read() as conn:
+        row = conn.execute(
+            "SELECT content_hash FROM phone_file WHERE device_id = ? AND remote_path = ? "
+            "AND size = ? AND mtime = ? AND state = 'done' AND content_hash IS NOT NULL",
+            (device_id, to_db(entry.path), entry.size, entry.mtime),
+        ).fetchone()
+        if row is None:
+            return False
+        copies = {
+            int(r[0]): (str(r[1]), int(r[2]))
+            for r in conn.execute(
+                "SELECT dest_id, rel_path, size FROM replica WHERE content_hash = ? "
+                "AND verified_at > 0",
+                (row[0],),
+            )
+        }
+    if any(i not in copies or copies[i][1] != entry.size for i in need):
+        return False
+    mac = {d.id: d for d in usable_dests(ctx) if d.kind == "mac"}
+    for dest_id, dest in mac.items():
+        if dest_id in copies:
+            try:
+                return (Path(dest.root) / copies[dest_id][0]).stat().st_size == entry.size
+            except OSError:
+                return False
+    return False
 
 
 def check(
@@ -148,10 +200,16 @@ def check(
     if action in ("uninstall", "clear_data") and is_protected(ctx, package):
         if package in WHATSAPP:
             name = WHATSAPP[package][0]
-            age = whatsapp_backup_age_h(session, package)
+            found = whatsapp_backup(session, package)
             limit = ctx.config.apps.whatsapp_backup_max_age_hours
-            if age is None or age > limit:
+            if found is None or found[1] > limit:
                 return f"{name}'s chat backup on the phone is not from the last {limit} hours."
+            if not saved_in_backup(ctx, session, found[0]):
+                return (
+                    f"This can remove {name}'s chat backup from the phone. Back up its "
+                    "Databases folder to your backup folders first (Backup page); Sift keeps "
+                    "that copy until you delete it."
+                )
             if not unlock.get("backup_done"):
                 return f"Confirm that your {name} chat backup is complete."
             if str(unlock.get("typed_name", "")).strip().casefold() != name.casefold():
@@ -169,28 +227,6 @@ def check(
 def _cell(value: str) -> str:
     """A CSV cell that a spreadsheet will not run as a formula."""
     return "'" + value if value[:1] in ("=", "+", "-", "@") else value
-
-
-def _write_new(path: Path, body: bytes) -> Path:
-    """Write to a temp file, then link it into place under a name nothing uses yet (I1)."""
-    tmp = path.with_name(f".{path.name}.part-{os.getpid()}-{time.monotonic_ns()}")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    try:
-        os.write(fd, body)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    try:
-        stem, suffix, n = path.stem, path.suffix, 1
-        while True:
-            try:
-                os.link(tmp, path)
-                return path
-            except FileExistsError:
-                path = path.with_name(f"{stem}-{n}{suffix}")
-                n += 1
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def save_app_list(ctx: AppContext, rows: list[AppRow]) -> list[str]:
@@ -216,7 +252,7 @@ def save_app_list(ctx: AppContext, rows: list[AppRow]) -> list[str]:
     for dest in usable_dests(ctx):
         folder = Path(dest.root) / ".sift" / "apps"
         folder.mkdir(parents=True, exist_ok=True)
-        written.append(str(_write_new(folder / f"{stamp}.csv", body)))
+        written.append(str(write_new(folder / f"{stamp}.csv", body)))
     return written
 
 
@@ -269,14 +305,7 @@ def _pull_apk(session: DeviceSession, remote: str, target: Path) -> None:
             os.fsync(out.fileno())
         if tmp.stat().st_size != entry.size:
             raise ValueError(f"short read of {remote}")
-        path, n = target, 1
-        while True:
-            try:
-                os.link(tmp, path)
-                return
-            except FileExistsError:
-                path = target.with_name(f"{target.stem}-{n}{target.suffix}")
-                n += 1
+        link_new(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
 

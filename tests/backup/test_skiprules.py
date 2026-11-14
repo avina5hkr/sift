@@ -9,8 +9,12 @@ LEGACY = "/sdcard/WhatsApp"
 ROOTS = (f"{WA}/Media", f"{WAB}/Media", f"{LEGACY}/Media")
 
 
-def rules(**over: bool) -> SkipRules:
+def rules(*, chat_set: bool = False, **over: bool) -> SkipRules:
+    """Rules from the defaults; the WhatsApp chat backups set (which opts the Databases and
+    Backups folders in) only when `chat_set`."""
     cfg = Config(backup=BackupConfig(**over))
+    if not chat_set:
+        cfg.backup.sets = [s for s in cfg.backup.sets if s.name != "WhatsApp chat backups"]
     return SkipRules.from_config(cfg)
 
 
@@ -157,3 +161,12 @@ def test_skip_lists_survive_a_save_and_load(tmp_path) -> None:  # type: ignore[n
     assert warnings == []
     assert loaded.backup.skip_hidden_folders == [".mine"]
     assert loaded.backup.skip_zero_byte is False
+
+
+@pytest.mark.parametrize("base", [WA, WAB, LEGACY])
+@pytest.mark.parametrize("folder", ["Databases", "Backups"])
+def test_a_set_naming_the_chat_backup_folders_backs_them_up(base: str, folder: str) -> None:
+    on = rules(chat_set=True)
+    assert skipped(f"{base}/{folder}/msgstore.db.crypt15", r=on) is None
+    assert skipped(f"{base}/{folder}", is_dir=True, size=0, r=on) is None
+    assert skipped(f"{base}/{folder}/msgstore.db.crypt15") == "whatsapp_db"  # no such set

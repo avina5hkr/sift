@@ -86,9 +86,12 @@ def test_p10_whatsapp_unlocks_only_with_a_fresh_backup_a_tick_and_its_name(rig: 
     assert uninstall(backup_done=True, typed_name="Whats App").status_code == 409  # wrong name
     for clear in (act(c, h, "clear-data", wa, action="clear_data"),):
         assert clear.status_code == 409  # clear data is protected the same way
+    not_saved = uninstall(backup_done=True, typed_name="whatsapp")
+    assert not_saved.status_code == 409 and "Databases" in not_saved.json()["message"]
     assert not [e for e in rig.transport.journal if e.op in ("uninstall", "clear_data")]
+    backed_up(rig, ["WhatsApp chat backups"])  # the chat backup is now safe on the Mac
     ok = uninstall(backup_done=True, typed_name="whatsapp")
-    assert ok.status_code == 200 and ok.json()["done"] == wa
+    assert ok.status_code == 200 and ok.json()["done"] == wa, ok.json()
     assert ok.json()["app_list"] and Path(ok.json()["app_list"][0]).read_text().startswith(
         "name,package"
     )

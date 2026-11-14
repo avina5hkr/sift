@@ -70,7 +70,7 @@ def test_most_specific_root_wins_and_case_is_ignored() -> None:
 def test_loose_files_and_folder_sets_never_overlap() -> None:
     sets = _sets()
     roots = resolve_roots(sets, [s.name for s in sets])
-    assert len(sets) == 9
+    assert len(sets) == 10
     phone = build_fake_phone()
     checked = 0
     for path, f in phone.files.items():
