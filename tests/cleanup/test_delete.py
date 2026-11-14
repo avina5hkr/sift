@@ -483,3 +483,63 @@ def test_paths_that_could_climb_out_of_a_root_are_refused(rig: Rig) -> None:
     for bad in ("/sdcard/DCIM/../Android/data/x", "/sdcard/DCIM//a.jpg", "/sdcard/DCIM/./a.jpg"):
         assert not in_delete_roots(cfg, bad), bad
     assert not in_delete_roots(cfg, "/sdcard/Android/media/com.whatsapp/WhatsApp/Databases/x")
+
+
+@pytest.mark.real_drives
+def test_two_folders_on_one_drive_are_one_copy(rig: Rig, tmp_path: Path) -> None:
+    from sift.backup.places import one_place
+
+    assert one_place(tmp_path / "Mac", tmp_path / "SSD")  # the same volume
+    assert one_place(tmp_path / "a", tmp_path / "a" / "b")
+    ids = camera(rig)[:2]
+    cfg = rig.ctx.config
+    cfg.backup.ssd_volume_uuid = "uuid-ssd"
+    cfg.backup.required_destinations = ["mac", "ssd"]
+
+    (tmp_path / "fake-ssd").mkdir()
+    with rig.ctx.db.tx() as conn:
+        dest = int(
+            conn.execute(
+                "INSERT INTO destination (kind, root_path, volume_uuid, label) "
+                "VALUES ('ssd', ?, 'uuid-ssd', 'SSD')",
+                (str(tmp_path / "fake-ssd"),),
+            ).lastrowid
+            or 0
+        )
+
+    class Ssd:
+        def state(self):  # an "SSD" whose folder is on the Mac's own drive
+            from sift.services.ssd import SsdState
+
+            return SsdState(
+                True, True, "SSD", str(tmp_path), str(tmp_path / "fake-ssd"), None, dest
+            )
+
+    rig.ctx.ssd = Ssd()  # type: ignore[assignment]
+    _run, counts = preflight(rig, ids)
+    assert counts == {"blocked": 2}
+    assert deletes(rig) == []
+
+
+def test_a_quarantined_file_removed_by_hand_breaks_nothing(rig: Rig) -> None:
+    ids = whatsapp(rig, 2)
+    with rig.ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO label (content_hash, label, source, created_at) "
+            "SELECT content_hash, 'junk', 'manual', 1 FROM phone_file WHERE id = ?",
+            (ids[0],),
+        )
+    run_id, _ = preflight(rig, [ids[0]], source="cleanup", disposition="quarantine")
+    run(rig, run_id)
+    (q,) = entries(rig.ctx)
+    mac = current_dest_ids(rig.ctx.db, rig.ctx.config)["mac"]
+    with rig.ctx.db.tx() as conn:
+        root = conn.execute("SELECT root_path FROM destination WHERE id = ?", (mac,)).fetchone()[0]
+        conn.execute(  # the picture is on the phone again
+            "UPDATE phone_file SET present = 1, state = 'done' WHERE id = ?", (ids[0],)
+        )
+    (Path(root) / q.q_rel).unlink()  # the owner emptied .quarantine by hand
+    _run2, counts = preflight(rig, [ids[1]], source="cleanup", disposition="quarantine")
+    assert counts == {"ok": 1}
+    assert purge_due(rig.ctx, now=time.time() + 40 * 86400) == 0
+    assert entries(rig.ctx) == []

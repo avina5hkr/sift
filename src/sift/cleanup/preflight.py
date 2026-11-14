@@ -121,6 +121,23 @@ def _under(key: str, roots: Sequence[str]) -> bool:
     return any(key == r or key.startswith(r.rstrip("/") + "/") for r in roots)
 
 
+def copies_problem(ctx: AppContext) -> str | None:
+    """Why the required backup folders are not separate copies (one drive, or nested)."""
+    from sift.backup.places import one_place
+
+    dests = current_dest_ids(ctx.db, ctx.config)
+    usable = {d.id: d for d in usable_dests(ctx)}
+    roots = [Path(usable[dests[k]].root) for k in required_kinds(ctx.config) if dests[k] in usable]
+    for n, a in enumerate(roots):
+        for b in roots[n + 1 :]:
+            if one_place(a, b):
+                return (
+                    "The Mac and SSD backup folders are on the same drive, so they are one copy, "
+                    "not two. Choose a folder on the SSD in Settings."
+                )
+    return None
+
+
 def in_delete_roots(cfg: Config, path: str) -> bool:
     key = phone_path_key(path)
     parts = key.split("/")[1:]
@@ -324,6 +341,9 @@ def run_preflight(
         if session.device_uuid != uuid:
             raise RunBlocked("This is not the phone these files were backed up from.")  # I3f
         session.check_identity()
+        problem = copies_problem(ctx)
+        if problem:
+            raise RunBlocked(problem)
     except RunBlocked as e:
         _finish(ctx, run_id, files, blocked=str(e))
         return {"blocked": len(files)}

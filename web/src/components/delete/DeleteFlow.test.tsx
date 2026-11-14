@@ -157,6 +157,8 @@ test('the confirm button waits for the checkbox', async () => {
   const del = within(dialog).getByRole('button', { name: 'Delete 2 files' })
   expect(del).toBeDisabled()
   expect(within(dialog).queryByLabelText(/Type/)).not.toBeInTheDocument()
+  expect(dialog).toHaveTextContent('was checked against the phone just now')
+  expect(dialog).toHaveTextContent('This cannot be undone on the phone.')
   await userEvent.click(within(dialog).getByRole('checkbox', { name: 'I have reviewed these files' }))
   expect(del).toBeEnabled()
   await userEvent.click(del)

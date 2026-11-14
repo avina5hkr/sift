@@ -168,7 +168,13 @@ def revive(ctx: AppContext) -> int:
         return 0
     usable = {d.id for d in usable_dests(ctx)}
     ready = [e.id for e in entries(ctx) if e.id in back and e.dest_id in usable]
-    return restore(ctx, ready, "backup")["restored"] if ready else 0
+    if not ready:
+        return 0
+    try:
+        return restore(ctx, ready, "backup")["restored"]
+    except Exception:  # never let one bad entry stop every check and purge
+        log.exception("Could not bring quarantined files back")
+        return 0
 
 
 def purge_due(ctx: AppContext, *, now: float | None = None) -> int:
@@ -279,6 +285,16 @@ def _restore_one(
 ) -> int:
     pushed = 0
     root = Path(usable[e.dest_id].root)
+    if not (root / e.q_rel).is_file():  # removed by hand: nothing to restore, forget it
+        log.warning("Quarantined file %s is missing; its entry is closed", e.q_rel)
+        with ctx.db.tx() as conn:
+            conn.execute(
+                "DELETE FROM replica WHERE dest_id = ? AND rel_path = ?", (e.dest_id, e.q_rel)
+            )
+            conn.execute(
+                "UPDATE quarantine SET purged_at = ? WHERE id = ?", (int(time.time()), e.id)
+            )
+        return 0
     if to == "phone" and e.content_hash not in phone_done and e.phone_path:
         _push_back(ctx, session, root / e.q_rel, e)  # type: ignore[arg-type]
         phone_done.add(e.content_hash)

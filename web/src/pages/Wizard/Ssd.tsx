@@ -20,7 +20,18 @@ export function Ssd({ next, settings = false }: StepProps & { settings?: boolean
   const [picked, setPicked] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const save = useMutation({
-    mutationFn: (uuid: string | null) => post<Volumes>('/api/setup/ssd', { volume_uuid: uuid }),
+    mutationFn: async (uuid: string | null) => {
+      try {
+        return await post<Volumes>('/api/setup/ssd', { volume_uuid: uuid })
+      } catch (e) {
+        // the current SSD holds backups: stopping its use needs a clear yes
+        if (e instanceof Error && 'code' in e && (e as { code?: string }).code === 'ssd_has_backups') {
+          const ok = window.confirm(`${plain(e)}\n\nStop using this SSD?`)
+          if (ok) return post<Volumes>('/api/setup/ssd', { volume_uuid: uuid, confirm_retire: true })
+        }
+        throw e
+      }
+    },
     onMutate: () => setError(null),
     onSuccess: next,
     onError: (e) => setError(plain(e)),

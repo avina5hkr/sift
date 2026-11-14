@@ -214,9 +214,18 @@ def purge_quarantine(ctx: AppContext) -> None:
     from sift.cleanup.quarantine import purge_due
 
     try:
+        with ctx.db.read() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM quarantine WHERE purged_at IS NULL "
+                    "AND restored_at IS NULL LIMIT 1"
+                ).fetchone()
+                is None
+            ):
+                return  # nothing in quarantine
         purged = purge_due(ctx)
-    except Exception:
-        _log.exception("Purging the quarantine failed")
+    except Exception as e:  # e.g. Sift closing meanwhile; the next start or plug-in tries again
+        _log.warning("Purging the quarantine did not finish: %s", e)
         return
     if purged:
         _log.info("Purged %d quarantined files", purged)

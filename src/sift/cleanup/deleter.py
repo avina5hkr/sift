@@ -70,6 +70,11 @@ def check_execute(
         raise ExecuteRefused("typed_count", f"Type the number of files, {passed}, to confirm.")
     if source == "cleanup" and selection_hash(ticked) != sel_hash:
         raise ExecuteRefused("selection_changed", "The ticked files changed. Run the checks again.")
+    from sift.cleanup.preflight import copies_problem
+
+    problem = copies_problem(ctx)
+    if problem:
+        raise ExecuteRefused("one_copy", problem)
     if session is None:
         raise ExecuteRefused("no_phone", "Connect the phone over USB first.")
     if session.device_uuid != uuid:
@@ -139,65 +144,65 @@ def execute(
     deleted = failed = freed = 0
     gone_paths: list[str] = []
     final = "done"
-    for n, (pid, stored, digest, size, mtime) in enumerate(rows, 1):
-        if should_stop():
-            final = "stopped"
-            break
-        path = from_db(str(stored))
-        state, error = "deleted", None
-        try:
-            entry = transport.stat(path)
-            if entry is None:
-                state = "gone"
-            elif entry.size != size or entry.mtime != mtime:
-                state = "changed"  # edited after the preflight: left alone
-            elif not backups_still_there(ctx, digest, int(size)):
-                state, error = "failed", "The backup copy is missing now."
-            else:
-                transport.delete(path)
-                if transport.stat(path) is not None:
-                    state, error = "failed", "The file is still on the phone."
-        except (DeviceDisconnected, DeviceTimeout) as e:
-            log.warning("The phone went away during a delete run: %s", e)
-            final = "stopped"
-            break
-        except (RemoteError, TransportError) as e:
-            state, error = "failed", str(e)
-        now = int(time.time())
-        with ctx.db.tx() as conn:
-            conn.execute(
-                "UPDATE delete_item SET state = ?, error = ? "
-                "WHERE run_id = ? AND phone_file_id = ?",
-                (state, error, run_id, pid),
-            )
-            if state == "deleted":
-                conn.execute(
-                    "UPDATE phone_file SET state = 'deleted', present = 0 WHERE id = ?", (pid,)
-                )
-                conn.execute("DELETE FROM selection WHERE phone_file_id = ?", (pid,))
-            conn.execute(
-                "UPDATE delete_run SET deleted = deleted + ?, failed = failed + ?, "
-                "bytes_freed = bytes_freed + ? WHERE id = ?",
-                (int(state == "deleted"), int(state == "failed"),
-                 int(size) if state == "deleted" else 0, run_id),
-            )  # fmt: skip
-            if state in ("deleted", "failed"):
-                conn.execute(
-                    "INSERT INTO deletion_log (phone_file_id, remote_path, content_hash, size, "
-                    "deleted_at, result, preflight, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (pid, stored, digest, size, now if state == "deleted" else None, state,
-                     json.dumps({"run": run_id}), run_id),
-                )  # fmt: skip
-        if state == "deleted":
-            deleted += 1
-            freed += int(size)
-            gone_paths.append(path)
-        elif state == "failed":
-            failed += 1
-        if on_progress is not None:
-            on_progress(n, len(rows))
     moved = 0
     try:
+        for n, (pid, stored, digest, size, mtime) in enumerate(rows, 1):
+            if should_stop():
+                final = "stopped"
+                break
+            path = from_db(str(stored))
+            state, error = "deleted", None
+            try:
+                entry = transport.stat(path)
+                if entry is None:
+                    state = "gone"
+                elif entry.size != size or entry.mtime != mtime:
+                    state = "changed"  # edited after the preflight: left alone
+                elif not backups_still_there(ctx, digest, int(size)):
+                    state, error = "failed", "The backup copy is missing now."
+                else:
+                    transport.delete(path)
+                    if transport.stat(path) is not None:
+                        state, error = "failed", "The file is still on the phone."
+            except (DeviceDisconnected, DeviceTimeout) as e:
+                log.warning("The phone went away during a delete run: %s", e)
+                final = "stopped"
+                break
+            except (RemoteError, TransportError) as e:
+                state, error = "failed", str(e)
+            now = int(time.time())
+            with ctx.db.tx() as conn:
+                conn.execute(
+                    "UPDATE delete_item SET state = ?, error = ? "
+                    "WHERE run_id = ? AND phone_file_id = ?",
+                    (state, error, run_id, pid),
+                )
+                if state == "deleted":
+                    conn.execute(
+                        "UPDATE phone_file SET state = 'deleted', present = 0 WHERE id = ?", (pid,)
+                    )
+                    conn.execute("DELETE FROM selection WHERE phone_file_id = ?", (pid,))
+                conn.execute(
+                    "UPDATE delete_run SET deleted = deleted + ?, failed = failed + ?, "
+                    "bytes_freed = bytes_freed + ? WHERE id = ?",
+                    (int(state == "deleted"), int(state == "failed"),
+                     int(size) if state == "deleted" else 0, run_id),
+                )  # fmt: skip
+                if state in ("deleted", "failed"):
+                    conn.execute(
+                        "INSERT INTO deletion_log (phone_file_id, remote_path, content_hash, size, "
+                        "deleted_at, result, preflight, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (pid, stored, digest, size, now if state == "deleted" else None, state,
+                         json.dumps({"run": run_id}), run_id),
+                    )  # fmt: skip
+            if state == "deleted":
+                deleted += 1
+                freed += int(size)
+                gone_paths.append(path)
+            elif state == "failed":
+                failed += 1
+            if on_progress is not None:
+                on_progress(n, len(rows))
         try:
             if gone_paths and not transport.media_rescan(gone_paths):
                 log.info("The phone did not take the media rescan request")
@@ -208,6 +213,9 @@ def execute(
                 "SELECT disposition FROM delete_run WHERE id = ?", (run_id,)
             ).fetchone()[0]
         moved = quarantine_run(ctx, run_id) if disposition == "quarantine" else 0
+    except BaseException:
+        final = "failed"  # an unexpected error still ends the run with its counts
+        raise
     finally:
         with ctx.db.tx() as conn:
             conn.execute(

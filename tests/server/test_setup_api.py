@@ -1054,7 +1054,10 @@ def test_a_folder_on_the_ssd_can_be_chosen(
     moved = post(client, "ssd-folder", {"path": str(mount / "Other")})
     assert moved.status_code == 409 and moved.json()["code"] == "backups_exist"
     # choosing another drive starts its folder afresh
-    assert post(client, "ssd", {"volume_uuid": ""}).status_code == 200
+    # stopping use of an SSD that holds backups needs an explicit confirmation
+    refused = post(client, "ssd", {"volume_uuid": ""})
+    assert refused.status_code == 409 and refused.json()["code"] == "ssd_has_backups"
+    assert post(client, "ssd", {"volume_uuid": "", "confirm_retire": True}).status_code == 200
     assert ctx.config.backup.ssd_folder == ""
 
 

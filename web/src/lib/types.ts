@@ -399,6 +399,8 @@ export type DeleteRun = {
   bytes_freed: number
   manifests: string[]
   backups: string[]
+  backed_up_on?: string
+  quarantine_days?: number
   items: DeleteItem[]
 }
 export type DeleteBody = { source: 'cleanup'; ids: number[] } | { source: 'analysis'; sets: string[] }

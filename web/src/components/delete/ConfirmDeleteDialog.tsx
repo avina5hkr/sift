@@ -33,6 +33,8 @@ type Props = {
 }
 
 const BTN = 'rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800'
+const DANGER =
+  'rounded-md bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50'
 const PRIMARY =
   'rounded-md border border-neutral-900 bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300'
 
@@ -42,19 +44,22 @@ export function ConfirmDeleteDialog({ run, busy, error, outdated, onConfirm, onC
   const [typed, setTyped] = useState('')
   const [note] = useState(() => !noteSeen() && run.items.some((i) => i.check === 'ok' && /whatsapp/i.test(i.path)))
   const n = run.passed
-  const typedOk = !run.typed_required || typed.trim() === String(n)
+  const typedOk = !run.typed_required || typed.replace(/[\s,.]/g, '') === String(n)
   const ready = reviewed && typedOk && !busy && !outdated
   const files = `${formatCount(n)} ${n === 1 ? 'file' : 'files'}`
 
   return (
     <Modal label="Delete from the phone" onClose={busy ? undefined : onCancel}>
-      <h2 className="text-lg font-semibold">
-        Delete {files} ({formatBytes(run.passed_bytes)}) from the phone?
-      </h2>
+      <h2 className="text-lg font-semibold">Delete {files} from your phone?</h2>
       <p className="text-sm">
-        Backups: {run.backups.length > 0 ? run.backups.join(', ') : 'none found'}
+        About {formatBytes(run.passed_bytes)}. Every file is backed up on {run.backed_up_on ?? 'your Mac'} and
+        was checked against the phone just now.{' '}
+        {run.disposition === 'quarantine'
+          ? `Deleted files stay in Quarantine for ${run.quarantine_days ?? 30} days.`
+          : 'The backup keeps every file.'}{' '}
+        <strong>This cannot be undone on the phone.</strong>
       </p>
-      <p className="text-sm font-semibold">This cannot be undone on the phone.</p>
+      {run.backups.length > 0 && <p className="text-xs text-neutral-600 dark:text-neutral-400">Backups: {run.backups.join(', ')}</p>}
       {note && <p className="rounded-md bg-neutral-100 px-3 py-2 text-sm dark:bg-neutral-800">{NOTE}</p>}
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={reviewed} onChange={(e) => setReviewed(e.target.checked)} />
@@ -62,7 +67,7 @@ export function ConfirmDeleteDialog({ run, busy, error, outdated, onConfirm, onC
       </label>
       {run.typed_required && (
         <label className="flex flex-col gap-1 text-sm">
-          Type {n} to confirm
+          Type {formatCount(n)} to confirm
           <input
             inputMode="numeric"
             autoComplete="off"
@@ -93,7 +98,7 @@ export function ConfirmDeleteDialog({ run, busy, error, outdated, onConfirm, onC
             if (note) markNoteSeen()
             onConfirm(run.typed_required ? n : undefined)
           }}
-          className={PRIMARY}
+          className={DANGER}
         >
           Delete {files}
         </button>

@@ -81,7 +81,14 @@ def get_run(ctx: Ctx, run_id: int) -> dict[str, Any]:
     found = summary(ctx, run_id)
     if found is None:
         raise ApiError(404, "unknown_run", "There is no such delete run.")
-    found["backups"] = [d.root.as_posix() for d in _dests(ctx)]
+    from sift.backup.confirm import current_dest_ids, required_kinds
+
+    kinds = required_kinds(ctx.config)
+    ids = current_dest_ids(ctx.db, ctx.config)
+    usable = {d.id: d for d in _dests(ctx)}
+    found["backups"] = [usable[ids[k]].root.as_posix() for k in kinds if ids[k] in usable]
+    found["backed_up_on"] = "your Mac and SSD" if "ssd" in kinds else "your Mac"
+    found["quarantine_days"] = ctx.config.cleanup.quarantine_days
     return found
 
 

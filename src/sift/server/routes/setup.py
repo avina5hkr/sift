@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, StrictStr
 
 from sift.backup.destination import DEFAULT_LABEL, check_mac_root, sanitize_label
 from sift.backup.phonepaths import shown
+from sift.backup.places import one_place
 from sift.backup.readers import ReaderTestCancelled, run_reader_test
 from sift.backup.run import mac_target
 from sift.core.config import BackupSet, save_config
@@ -39,7 +40,7 @@ from sift.server.errors import ApiError
 from sift.server.routes.backup import _job_error, _run_lock, _sets_lock, _unknown_set
 from sift.server.routes.devices import AdbManagerDep
 from sift.services.plainwords import describe
-from sift.services.ssd import ssd_root
+from sift.services.ssd import drive_folder, ssd_root
 from sift.services.volumes import Volume, list_external_volumes
 
 router = APIRouter(prefix="/setup")
@@ -485,6 +486,7 @@ def list_volumes(ctx: Ctx, lister: VolumeLister) -> VolumesOut:
 
 class SsdRequest(BaseModel):
     volume_uuid: StrictStr | None = None  # null skips the SSD
+    confirm_retire: bool = False  # stop using a drive that holds backups
 
 
 @router.post("/ssd")
@@ -497,10 +499,30 @@ def save_ssd(ctx: Ctx, body: SsdRequest, lister: VolumeLister) -> VolumesOut:
             "unknown_volume",
             "That drive is not connected any more. Plug it in and choose again.",
         )
+    with ctx.db.read() as conn:
+
+        def held(uuid: str) -> str | None:
+            row = conn.execute(
+                "SELECT d.root_path FROM destination d WHERE d.kind = 'ssd' AND d.volume_uuid = ? "
+                "AND EXISTS (SELECT 1 FROM replica r WHERE r.dest_id = d.id)",
+                (uuid,),
+            ).fetchone()
+            return None if row is None else str(row[0])
+
+        current = ctx.config.backup.ssd_volume_uuid
+        leaving = held(current) if current and wanted != current else None
+        coming = held(wanted) if wanted else None
+    if leaving is not None and not body.confirm_retire:
+        raise ApiError(
+            409,
+            "ssd_has_backups",
+            "The current SSD holds backups. Deletes then count only the other copies. "
+            "Confirm to stop using it.",
+        )
     with _config_lock:
         previous = ctx.config.backup.ssd_volume_uuid, ctx.config.backup.ssd_folder
-        if wanted != previous[0]:  # another drive: its folder is chosen afresh
-            ctx.config.backup.ssd_folder = ""
+        if wanted != previous[0]:  # another drive: its own folder, if it held backups before
+            ctx.config.backup.ssd_folder = drive_folder(coming) if coming else ""
         ctx.config.backup.ssd_volume_uuid = wanted
         try:
             save_config(ctx.config, ctx.paths.config)
@@ -569,6 +591,13 @@ def save_ssd_folder(ctx: Ctx, body: SsdFolderRequest, lister: VolumeLister) -> S
             422, "drive_root", "Choose or make a folder on the drive, not the drive itself."
         )
     root = ssd_root(str(mount), ctx.config.backup.mac_root, folder)
+    if one_place(root, Path(ctx.config.backup.mac_root)):
+        raise ApiError(
+            422,
+            "same_drive",
+            "That folder is on the same drive as the Mac backup folder, so it would not be a "
+            "second copy. Choose a folder on the SSD.",
+        )
     with ctx.db.read() as conn:
         dest = conn.execute(
             "SELECT d.root_path, EXISTS (SELECT 1 FROM replica r WHERE r.dest_id = d.id) "
