@@ -8,6 +8,7 @@ The one value it reads is `RemoteError.errno`, to pick between fixed sentences.
 
 from sift.analysis.cluster import Stopped as ClusteringStopped
 from sift.analysis.models import ConsentNeeded, DownloadStopped, ModelDownloadError
+from sift.analysis.near import NearStopped
 from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
@@ -80,6 +81,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (BugReportStopped, "The bug report was stopped."),
     (ChatBackupKept, "Sift kept that chat backup."),
     (WifiError, "Sift could not connect to the phone over Wi-Fi."),
+    (NearStopped, "Finding near-duplicates was stopped."),
     (NothingToRepairFrom, "No good copy of this file is on another backup drive."),
     (SourceCorrupt, "A backed-up file no longer matches its checksum, so it was not copied."),
     (ScanNotPending, "That scan is no longer waiting for your confirmation."),
