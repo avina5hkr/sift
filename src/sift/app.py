@@ -1,6 +1,7 @@
 """Launcher: single-instance lock, database, local API server, and the desktop window."""
 
 import argparse
+import contextlib
 import json
 import logging
 import multiprocessing
@@ -48,6 +49,7 @@ from sift.device.fake_transport import FaultPlan
 from sift.device.tracker import DeviceTracker, adb_tracker
 from sift.server.app import create_app
 from sift.services.afterrun import after_run
+from sift.services.keepawake import KeepAwake, restore_at_launch
 from sift.services.notify import MacNotifier, Notifier, NullNotifier
 from sift.services.plainwords import describe
 from sift.services.ssd import SsdWatcher
@@ -241,6 +243,19 @@ def ssd_connected(ctx: AppContext) -> None:
     purge_quarantine(ctx)
 
 
+def reconnect_wifi(ctx: AppContext) -> None:
+    """Reconnect phones paired over Wi-Fi that are on the network now (spec 6)."""
+    from sift.device import wifi
+
+    try:
+        done = wifi.reconnect(ctx.db, ctx.config.phone.adb_server_port)
+    except Exception as e:  # never stops the app
+        _log.info("Wi-Fi reconnect skipped: %s", e)
+        return
+    if done:
+        _log.info("Reconnected over Wi-Fi: %d phone(s)", len(done))
+
+
 def purge_quarantine(ctx: AppContext) -> None:
     """Remove quarantined files past their date on the mounted destinations (spec 10)."""
     from sift.cleanup.quarantine import purge_due
@@ -349,7 +364,9 @@ def build_jobs(ctx: AppContext, notifier: Notifier | None = None) -> JobManager:
     notify = notifier if notifier is not None else NullNotifier()
 
     def runner(control: JobControl) -> None:
-        run_backup(ctx, control, control.sets, control.dry_run)  # leaves its run_summary row
+        awake = ctx.awake
+        with awake.hold() if awake is not None else contextlib.nullcontext():
+            run_backup(ctx, control, control.sets, control.dry_run)  # leaves its run_summary row
 
     jobs = JobManager(
         ctx,
@@ -574,6 +591,13 @@ def main(argv: list[str] | None = None) -> int:
             shutdown.add("tracker", tracker.stop, timeout_s=_TRACKER_STEP_S)  # before the DB closes
             tracker.start()
         if mode == "adb":  # the real app; tests and fake-phone runs never look at real drives
+            ctx.awake = KeepAwake(ctx)
+            threading.Thread(
+                target=reconnect_wifi, args=(ctx,), name="sift-wifi-reconnect", daemon=True
+            ).start()
+            threading.Thread(
+                target=restore_at_launch, args=(ctx,), name="sift-stay-on", daemon=True
+            ).start()
             ssd = SsdWatcher(ctx, on_connect=lambda _state: ssd_connected(ctx))
             ctx.ssd = ssd
             shutdown.add("ssd", ssd.stop, timeout_s=40.0)  # waits for its copy to stop

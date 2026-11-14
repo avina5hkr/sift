@@ -47,6 +47,7 @@ from sift.device.transport import (
     RemoteError,
     TransportError,
 )
+from sift.device.wifi import WifiError
 from sift.health.bugreport import BugReportStopped
 from sift.server.errors import ApiError
 from sift.services.tasks import TaskBusy
@@ -78,6 +79,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (RestoreRefused, "Sift could not restore these files."),
     (BugReportStopped, "The bug report was stopped."),
     (ChatBackupKept, "Sift kept that chat backup."),
+    (WifiError, "Sift could not connect to the phone over Wi-Fi."),
     (NothingToRepairFrom, "No good copy of this file is on another backup drive."),
     (SourceCorrupt, "A backed-up file no longer matches its checksum, so it was not copied."),
     (ScanNotPending, "That scan is no longer waiting for your confirmation."),

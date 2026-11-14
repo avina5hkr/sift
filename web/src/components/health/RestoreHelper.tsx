@@ -16,6 +16,7 @@ export function RestoreHelper() {
   const [sentTo, setSentTo] = useState<string | null>(null)
   const send = useTaskRun(
     '/api/reset-checklist/restore/contacts',
+    'restore',
     (t) => setSentTo(String((t.result as { phone_path?: string }).phone_path ?? '')),
     { confirm: true },
   )

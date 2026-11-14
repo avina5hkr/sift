@@ -4,6 +4,7 @@ Each task gets a `TaskControl` to report progress (a `task` event at most every 
 check whether it should stop. Shutdown asks the running task to stop and waits a bounded time.
 """
 
+import contextlib
 import logging
 import threading
 import time
@@ -83,8 +84,10 @@ class TaskRunner:
             control = TaskControl(self, status)
 
             def run() -> None:
+                awake = self._ctx.awake
                 try:
-                    status.result = work(control)
+                    with awake.hold() if awake is not None else contextlib.nullcontext():
+                        status.result = work(control)
                     status.state = "stopped" if self._stop.is_set() else "done"
                 except Exception as e:
                     logger.exception("The %s task failed", kind)

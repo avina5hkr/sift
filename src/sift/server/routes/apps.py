@@ -80,6 +80,10 @@ def _act(ctx: Ctx, body: AppsRequest, action: str) -> dict[str, Any]:
         raise ApiError(409, "not_confirmed", "Confirm first.")
     _no_backup_running(ctx)
     session = _phone(ctx)
+    from sift.device.wifi import delete_blocked
+
+    if why := delete_blocked(ctx.config.phone.allow_delete_over_wifi, session):
+        raise ApiError(409, "wifi", why)
     try:
         session.check_identity()
     except Exception as e:
@@ -135,6 +139,10 @@ def trim_caches(ctx: Ctx, body: Confirm) -> dict[str, bool]:
         raise ApiError(409, "not_confirmed", "Confirm first.")
     _no_backup_running(ctx)
     session = _phone(ctx)
+    from sift.device.wifi import delete_blocked
+
+    if why := delete_blocked(ctx.config.phone.allow_delete_over_wifi, session):
+        raise ApiError(409, "wifi", why)
     try:
         session.check_identity()
     except Exception as e:

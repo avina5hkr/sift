@@ -198,6 +198,7 @@ class FakeTransport:
         self.clock = clock
         self.sleep = sleep
         self.stall_timeout_s = stall_timeout_s
+        self.serial = phone.serial or "FAKE"  # like adb's serial: USB unless set to host:port
         self.journal: list[JournalEntry] = []
         self.listed: list[str] = []  # every folder a walk listed (or tried to), in order
         self.bytes_served = 0
@@ -471,6 +472,13 @@ class FakeTransport:
                     for p, a in apps.items()
                 )
             raise ValueError(kind)
+
+    def global_setting(self, name: str, value: str | None) -> str | None:
+        self._begin("global_setting", name, mutating=value is not None)
+        if value is None:
+            return self.phone.settings.get(name, "0")
+        self.phone.settings[name] = value
+        return value
 
     def health_probe(self, kind: str) -> str | None:
         from sift.device.fake_health import canned

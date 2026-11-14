@@ -11,7 +11,12 @@ from sift.cleanup.preflight import create_run, run_preflight
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.server.routes.cleanup import _device
-from sift.server.routes.delete import PreflightStarted, _no_backup_running, _session
+from sift.server.routes.delete import (
+    PreflightStarted,
+    _no_backup_running,
+    _session,
+    _usb_for_delete,
+)
 from sift.server.routes.vault import start_task
 from sift.services.tasks import TaskControl
 
@@ -176,6 +181,7 @@ class SlateRun(BaseModel):
 def start_checks(ctx: Ctx, plan_id: int, body: SlateRun) -> PreflightStarted:
     """The plan's removal set, checked like every delete (spec 10A step 5)."""
     _no_backup_running(ctx)
+    _usb_for_delete(ctx)
     device_id = _device(ctx)
     items = _items(ctx, plan_id)
     if any(p.gap is not None for p in items):

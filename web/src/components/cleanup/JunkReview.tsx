@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { apiFetch } from '../../lib/api'
 import { formatBytes, formatCount } from '../../lib/format'
@@ -30,6 +30,7 @@ function JunkRow({
   onOpen,
   onNotJunk,
   busy,
+  focusedId,
 }: {
   group: ReviewGroup
   review: Review
@@ -37,12 +38,13 @@ function JunkRow({
   onOpen: (item: ReviewItem) => void
   onNotJunk: (group: ReviewGroup) => void
   busy: boolean
+  focusedId: number | null
 }) {
   return (
     <section data-testid="junk-item" aria-label="Suggested file" className="flex flex-wrap items-start gap-4 border-b border-neutral-200 px-4 py-3 dark:border-neutral-800">
       <div className="flex flex-wrap gap-2">
         {group.copies.map((c) => (
-          <Tile key={c.id} item={c} checked={review.isChecked(c)} focused={false} onToggle={onToggle} onOpen={onOpen} />
+          <Tile key={c.id} item={c} checked={review.isChecked(c)} focused={focusedId === c.id} onToggle={onToggle} onOpen={onOpen} />
         ))}
       </div>
       <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
@@ -69,6 +71,7 @@ function JunkList({ status, sort, showMaybe, onLabelled }: { status: JunkStatus;
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [openId, setOpenId] = useState<number | null>(null)
+  const [focusedId, setFocusedId] = useState<number | null>(null)
 
   const maybeIds = useMemo(() => new Set(maybe.copies.map((c) => c.id)), [maybe.copies])
   const items = useMemo(() => (showMaybe ? [...junk.flat.items, ...maybe.flat.items] : junk.flat.items), [showMaybe, junk.flat, maybe.flat])
@@ -108,6 +111,39 @@ function JunkList({ status, sort, showMaybe, onLabelled }: { status: JunkStatus;
     await flow.start({ source: 'cleanup', ids })
   }
 
+  // Keyboard: J/ArrowDown and K/ArrowUp move between files, Space ticks, Enter opens the picture.
+  const keys = useRef<(e: KeyboardEvent) => void>(() => undefined)
+  useEffect(() => {
+    keys.current = (e) => {
+      if (openId != null || flow.phase !== 'idle' || e.metaKey || e.ctrlKey || e.altKey) return
+      const t = e.target as HTMLElement
+      if (t.closest('input, textarea, select, [contenteditable="true"]')) return
+      if (items.length === 0) return
+      const at = focusedId == null ? -1 : items.findIndex((x) => x.id === focusedId)
+      const key = e.key.toLowerCase()
+      let next: number | null = null
+      if (key === 'arrowdown' || key === 'j') next = Math.min(items.length - 1, at + 1)
+      else if (key === 'arrowup' || key === 'k') next = Math.max(0, at - 1)
+      else if (key === ' ' || key === 'enter') {
+        const item = at >= 0 ? items[at] : undefined
+        if (!item || t.closest('button, a, [role="button"]')) return
+        if (key === ' ') toggle(item)
+        else open(item)
+        e.preventDefault()
+        return
+      } else return
+      e.preventDefault()
+      const item = items[next] as ReviewItem
+      setFocusedId(item.id)
+      document.getElementById(`tile-${item.id}`)?.scrollIntoView?.({ block: 'nearest' })
+    }
+  })
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => keys.current(e)
+    document.addEventListener('keydown', on)
+    return () => document.removeEventListener('keydown', on)
+  }, [])
+
   const shown = showMaybe ? [junk, maybe] : [junk]
   const count = shown.reduce((n, r) => n + r.totals.count, 0)
   const bytes = shown.reduce((n, r) => n + r.totals.bytes, 0)
@@ -119,7 +155,7 @@ function JunkList({ status, sort, showMaybe, onLabelled }: { status: JunkStatus;
     <div role="group" aria-label={label}>
       {r.loaded && r.groups.length === 0 && <p className={`p-6 ${MUTED}`}>{empty}</p>}
       {r.groups.map((g) => (
-        <JunkRow key={g.group_id} group={g} review={r} onToggle={toggle} onOpen={open} onNotJunk={(x) => void notJunk(x, r)} busy={busy} />
+        <JunkRow key={g.group_id} group={g} review={r} onToggle={toggle} onOpen={open} onNotJunk={(x) => void notJunk(x, r)} busy={busy} focusedId={focusedId} />
       ))}
       {r.more && (
         <div className="p-4">

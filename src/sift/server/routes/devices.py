@@ -103,3 +103,70 @@ def retry_device(ctx: Ctx) -> Response:
         raise ApiError(409, "no_tracker", "Sift is not looking for a phone right now.")
     ctx.tracker.retry()
     return Response(status_code=204)
+
+
+# -- Wi-Fi (spec 6) ------------------------------------------------------------------------
+
+
+class WifiPair(BaseModel):
+    address: str
+    code: str
+
+
+class WifiConnect(BaseModel):
+    address: str
+
+
+class WifiForget(BaseModel):
+    name: str
+    address: str
+
+
+def _adb_port(ctx: Ctx) -> int:
+    return ctx.config.phone.adb_server_port
+
+
+@router.get("/phone/wifi")
+def wifi_status(ctx: Ctx) -> dict[str, object]:
+    """Remembered phones and the ones announcing Wireless debugging on this network now."""
+    from dataclasses import asdict
+
+    from sift.device import wifi
+
+    return {
+        "remembered": [asdict(r) for r in wifi.remembered(ctx.db)],
+        "found": [asdict(s) for s in wifi.services(_adb_port(ctx))],
+        "allow_delete": ctx.config.phone.allow_delete_over_wifi,
+    }
+
+
+@router.post("/phone/wifi/pair")
+def wifi_pair(ctx: Ctx, body: WifiPair) -> dict[str, str | None]:
+    from sift.device import wifi
+
+    try:
+        return wifi.pair_and_connect(ctx.db, _adb_port(ctx), body.address, body.code)
+    except wifi.WifiError as e:
+        raise ApiError(409, "wifi", str(e)) from e
+
+
+@router.post("/phone/wifi/connect")
+def wifi_connect(ctx: Ctx, body: WifiConnect) -> dict[str, str]:
+    from sift.device import wifi
+
+    try:
+        address = wifi.check_address(body.address)
+        answer = wifi.connect(_adb_port(ctx), address)
+    except wifi.WifiError as e:
+        raise ApiError(409, "wifi", str(e)) from e
+    name = next((s.name for s in wifi.services(_adb_port(ctx)) if s.address == address), "")
+    wifi.remember(ctx.db, name, address, connected=True)
+    return {"connected": address, "answer": answer}
+
+
+@router.post("/phone/wifi/forget", status_code=204)
+def wifi_forget(ctx: Ctx, body: WifiForget) -> Response:
+    from sift.device import wifi
+
+    wifi.forget(ctx.db, body.name, body.address)
+    return Response(status_code=204)

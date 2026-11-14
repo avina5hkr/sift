@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -12,6 +12,7 @@ const item = (over: Partial<ChecklistItem>): ChecklistItem => ({
 })
 let list: Checklist
 let phone = true
+let slowFirst = false
 let calls: { method: string; path: string; body: Record<string, unknown> | null }[]
 const reply = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status }))
 
@@ -23,6 +24,7 @@ beforeEach(() => {
   )
   calls = []
   phone = true
+  slowFirst = false
   list = {
     phone: true,
     items: [
@@ -39,7 +41,12 @@ beforeEach(() => {
       if (url === '/api/reset-checklist' && !init.method) return reply({ ...list, phone })
       if (url === '/api/reset-checklist/4' && init.method === 'PUT') {
         list = { ...list, items: list.items.map((i) => (i.id === 4 ? { ...i, ...body, green: body?.ticked === true } : i)) }
-        return reply(list)
+        const answer = list
+        if (slowFirst && calls.filter((c) => c.method === 'PUT').length === 1) {
+          const old = { ...list, items: list.items.map((i) => (i.id === 4 ? { ...i, ticked: false, green: false } : i)) }
+          return new Promise<Response>((r) => setTimeout(() => r(new Response(JSON.stringify(old), { status: 200 })), 150))
+        }
+        return reply(answer)
       }
       if (url === '/api/reset-checklist/restore') {
         return reply({
@@ -119,4 +126,21 @@ test('Export checklist shows the saved path', async () => {
   await screen.findByText('1 of 3 done')
   await user.click(screen.getByRole('button', { name: 'Export checklist' }))
   expect(await screen.findByText('/Backups/reports/list.md')).toBeInTheDocument()
+})
+
+test('ticking and then setting the date: both PUTs carry the tick, and an older answer is ignored', async () => {
+  slowFirst = true
+  const user = userEvent.setup()
+  renderPage()
+  await screen.findByText('1 of 3 done')
+  await user.click(screen.getByRole('checkbox', { name: 'I did this' }))
+  fireEvent.change(screen.getByLabelText('Done on'), { target: { value: '2026-05-01' } })
+  await waitFor(() => expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2))
+  const puts = calls.filter((c) => c.method === 'PUT')
+  expect(puts[0]?.body).toEqual({ ticked: true, done_on: null, note: null })
+  expect(puts[1]?.body).toEqual({ ticked: true, done_on: '2026-05-01', note: null })
+  expect(await screen.findByText('2 of 3 done')).toBeInTheDocument()
+  await new Promise((r) => setTimeout(r, 250))
+  expect(screen.getByText('2 of 3 done')).toBeInTheDocument()
+  expect(screen.getByRole('checkbox', { name: 'I did this' })).toBeChecked()
 })

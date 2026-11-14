@@ -922,6 +922,21 @@ class AdbTransport:
         except TransportError:
             return None
 
+    def global_setting(self, name: str, value: str | None) -> str | None:
+        if not re.fullmatch(r"[a-z_]{1,64}", name) or (
+            value is not None and not re.fullmatch(r"\d{1,3}", value)
+        ):
+            raise RemoteError(f"Not a setting Sift changes: {name}={value}")
+        if value is None:
+            try:
+                out = self._exec(f"settings get global {name}", self.limits.stat_s)
+            except TransportError:
+                return None
+            text = out.decode("utf-8", "replace").strip()
+            return "0" if text == "null" else text if text.isdigit() else None
+        self._exec(f"settings put global {name} {value}", self.limits.stat_s)
+        return value
+
     def health_probe(self, kind: str) -> str | None:
         from sift.device.health import PROBES
 

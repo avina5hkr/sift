@@ -80,8 +80,13 @@ def mac_target(db: Database, config: Config, device_uuid: str | None = None) -> 
 
 
 def reader_count(config: Config, session: DeviceSession) -> int:
-    """`phone.parallel_reads_usb`, leaving one of the phone's connection slots for the rest."""
-    wanted = config.phone.parallel_reads_usb
+    """`phone.parallel_reads_usb` (or `_wifi` over Wi-Fi), leaving one of the phone's
+    connection slots for the rest."""
+    from sift.device.adb_transport import is_wifi_serial
+
+    serial = str(getattr(session.transport, "serial", "") or "")
+    wifi = is_wifi_serial(serial)
+    wanted = config.phone.parallel_reads_wifi if wifi else config.phone.parallel_reads_usb
     most = getattr(getattr(session.transport, "limits", None), "max_connections", None)
     return wanted if most is None else max(1, min(wanted, most - 1))
 

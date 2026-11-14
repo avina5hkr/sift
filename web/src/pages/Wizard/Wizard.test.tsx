@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -94,7 +94,7 @@ function renderWizard(initial = '/setup') {
         <Routes>
           <Route path="/setup" element={<WizardPage />} />
           <Route path="/backup" element={<h1>Backup page</h1>} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings/:page" element={<SettingsPage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -414,14 +414,21 @@ test('Back goes to the step before', async () => {
 
 test('Settings links back to the setup and switching phones needs the typed word', async () => {
   mockApi({
+    'GET /api/settings': () => ({ pages: {}, warnings: [] }),
     'GET /api/setup/state': () => ({ ...STATE, complete: true }),
     'GET /api/setup/devices': () => ({
       phones: [{ ...PHONES.phones[0], stored: true }, PHONES.phones[1]],
     }),
     'POST /api/setup/switch-phone': () => ({ uuid: 'u2', model: 'Beta 2', last4: '0002', label: 'Beta 2' }),
   })
-  renderWizard('/settings')
+  renderWizard('/settings/phone')
+  expect(await screen.findByText('Sift backs up Test phone ending 0001.')).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: 'Run the setup again' })).toBeNull()
+  cleanup()
+  renderWizard('/settings/general')
   expect(await screen.findByRole('link', { name: 'Run the setup again' })).toHaveAttribute('href', '/setup')
+  cleanup()
+  renderWizard('/settings/phone')
   expect(await screen.findByText('Sift backs up Test phone ending 0001.')).toBeInTheDocument()
   await click('Switch phone…')
   await userEvent.click(await screen.findByRole('radio', { name: /Beta 2/ }))
@@ -440,13 +447,14 @@ test('Settings links back to the setup and switching phones needs the typed word
 
 test('the server refusing a switch is shown in plain words', async () => {
   mockApi({
+    'GET /api/settings': () => ({ pages: {}, warnings: [] }),
     'GET /api/setup/state': () => ({ ...STATE, complete: true }),
     'GET /api/setup/devices': () => PHONES,
     'POST /api/setup/switch-phone': () => fail(409, 'job_conflict', 'A backup is running. Stop it before switching phones.'),
     'GET /api/setup/volumes': () => ({ volumes: [], selected_uuid: '' }),
     'GET /api/setup/folder': () => ({ ok: true, path: '/x', problem: null, free_bytes: 1 }),
   })
-  renderWizard('/settings')
+  renderWizard('/settings/phone')
   await click('Switch phone…')
   await userEvent.click(await screen.findByRole('radio', { name: /Beta 2/ }))
   await userEvent.type(screen.getByLabelText('Type SWITCH to confirm'), 'SWITCH')
@@ -457,6 +465,7 @@ test('the server refusing a switch is shown in plain words', async () => {
 test('Settings lets the owner choose the Mac and SSD backup folders with the folder dialog', async () => {
   const saved: unknown[] = []
   mockApi({
+    'GET /api/settings': () => ({ pages: {}, warnings: [] }),
     'GET /api/setup/state': () => ({ ...STATE, complete: true }),
     'GET /api/setup/devices': () => PHONES,
     'GET /api/setup/folder': () => ({ ok: true, path: '/Users/me/Backups', problem: null, free_bytes: 5e11 }),
@@ -472,7 +481,7 @@ test('Settings lets the owner choose the Mac and SSD backup folders with the fol
       return { volume_uuid: 'u1', volume_name: 'T7', folder: 'Backups', root: '/Volumes/T7/Backups', free_bytes: 1 }
     },
   })
-  renderWizard('/settings')
+  renderWizard('/settings/destinations')
   await click('Choose…')
   expect(await screen.findByDisplayValue('/Users/me/Backups')).toBeInTheDocument()
   expect(await screen.findByText(/free here/)).toBeInTheDocument() // the folder was checked

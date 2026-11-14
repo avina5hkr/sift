@@ -72,5 +72,6 @@ markers = [
     "slow: slow test",
     "e2e: end-to-end test",
     "real_drives: sees the real same-drive rule (two folders on one volume are one copy)",
+    "bench: benchmark, run with `make bench` (not part of the test run)",
 ]
-addopts = '-m "not realphone"'
+addopts = '-m "not realphone and not bench"'

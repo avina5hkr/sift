@@ -23,6 +23,8 @@ let report: unknown
 const reply = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status }))
 const task = (kind: string, over: object = {}) => ({ kind, state: 'done', done: 1, total: 1, message: null, result: {}, ...over })
 
+let running: object | null = null
+
 beforeEach(() => {
   initToken(
     new URL('http://127.0.0.1:1/?t=abc') as unknown as Location,
@@ -42,6 +44,7 @@ beforeEach(() => {
       }
       if (url === '/api/health/bugreport') return reply(task('bugreport', { state: 'running' }))
       if (url === '/api/tasks/current') {
+        if (running) return reply(running)
         const last = calls.filter((c) => c.method === 'POST').at(-1)?.path
         return reply(last === '/api/health/bugreport' ? task('bugreport', { result: { paths: ['/Backups/reports/bug.zip'] } }) : task('health'))
       }
@@ -50,7 +53,10 @@ beforeEach(() => {
     }),
   )
 })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  running = null
+})
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -93,4 +99,11 @@ test('bug report and export show where the files went', async () => {
   await user.click(screen.getByRole('button', { name: 'Export as Markdown' }))
   expect(await screen.findByText('/Backups/reports/health.md')).toBeInTheDocument()
   await waitFor(() => expect(calls.some((c) => c.path === '/api/health/export' && c.method === 'POST')).toBe(true))
+})
+
+test('a health report that is still running when the page opens shows its progress', async () => {
+  running = task('health', { state: 'running', done: 2, total: 5, message: 'Reading the battery' })
+  renderPage()
+  expect(await screen.findByText(/Reading the battery/)).toBeInTheDocument()
+  expect(calls.some((c) => c.method === 'POST')).toBe(false)
 })

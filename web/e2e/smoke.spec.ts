@@ -65,3 +65,16 @@ test('the phone chip changes from No phone to the fake phone without a reload', 
   expect(reloaded).toBe(false)
   await expect(page.getByText('SSD not connected')).toBeVisible()
 })
+
+test('Settings opens on General and Logs shows the activity table', async ({ page, sift }) => {
+  await sift.complete()
+  await page.goto('/?t=e2e')
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Settings' }).click()
+  await expect(page).toHaveURL(/\/settings\/general$/)
+  await expect(page.getByLabel('Keep the phone awake during jobs')).toBeVisible()
+  await page.getByRole('navigation', { name: 'Settings pages' }).getByRole('link', { name: 'Advanced' }).click()
+  await page.getByRole('link', { name: 'Open the logs and export diagnostics' }).click()
+  await expect(page).toHaveURL(/\/logs$/)
+  await expect(page.getByRole('heading', { level: 1, name: 'Logs' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Message' })).toBeVisible()
+})
