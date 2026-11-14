@@ -1,0 +1,228 @@
+name: Release
+
+# Release builds of Sift for macOS on Apple Silicon.
+#
+# - Push a tag vMAJOR.MINOR.PATCH on a commit that is on main and whose pyproject.toml version is
+#   MAJOR.MINOR.PATCH: `build` runs the checks, builds Sift.app and the .dmg, verifies the frozen
+#   app, and uploads it; `publish` creates the GitHub Release "Sift vX.Y.Z" with
+#   Sift-X.Y.Z-macos-arm64.dmg and its .sha256.
+# - Run manually (workflow_dispatch, from main only): a dry run. `build` does everything and
+#   uploads the .dmg as a short-lived workflow artifact. `publish` never runs: no tag, no release.
+#
+# The app is ad-hoc signed, not notarised (no Apple Developer ID is used), so macOS asks once
+# before the first launch; the release notes and README say how.
+#
+# `build` has read-only access and no secrets. Only `publish` can write, to create the release.
+# GitHub context is passed to scripts through env:, never interpolated into run:, so tag or
+# branch names cannot inject shell code.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    # No inputs: a manual run is always a dry run.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Check, build and verify Sift.app
+    # Pinned: Apple Silicon, and release tooling must not change under a moving label.
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      label: ${{ steps.version.outputs.label }}
+    steps:
+      - name: Check out
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check ref and derive version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          project=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)
+          if [[ ! "$project" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::pyproject.toml version '$project' is not MAJOR.MINOR.PATCH."
+            exit 1
+          fi
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ "$REF_TYPE" != "branch" ] || [ "$REF" != "refs/heads/main" ]; then
+              echo "::error::A dry run may only be started from main (got $REF)."
+              exit 1
+            fi
+            label="${project}-dryrun"
+            echo "Dry run from main: nothing will be published."
+          elif [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            if [[ ! "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::Tag '$REF_NAME' is not of the form vMAJOR.MINOR.PATCH."
+              exit 1
+            fi
+            if [ "${REF_NAME#v}" != "$project" ]; then
+              echo "::error::Tag $REF_NAME does not match pyproject.toml version $project. Bump the version first."
+              exit 1
+            fi
+
+            tag_commit=$(git rev-parse "refs/tags/${REF_NAME}^{commit}")
+            if ! git rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
+              git fetch --no-tags origin main:refs/remotes/origin/main
+            fi
+            if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+              echo "::error::Tag $REF_NAME points to $tag_commit, which is not on origin/main."
+              exit 1
+            fi
+
+            if out=$(gh api "repos/${REPO}/releases/tags/${REF_NAME}" 2>&1); then
+              echo "::error::A GitHub Release already exists for $REF_NAME."
+              exit 1
+            elif ! grep -q 'HTTP 404' <<<"$out"; then
+              echo "::error::Could not check for an existing release: $out"
+              exit 1
+            fi
+            label="$project"
+          else
+            echo "::error::Unexpected trigger: $EVENT on $REF."
+            exit 1
+          fi
+          echo "version=$project label=$label"
+          {
+            echo "version=$project"
+            echo "label=$label"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up uv
+        # astral-sh/setup-uv v10.3.3
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          enable-cache: true
+
+      - name: Set up Node
+        # actions/setup-node v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      - name: Lint (ruff, mypy)
+        run: make lint
+
+      - name: Python tests
+        env:
+          HYPOTHESIS_PROFILE: ci
+        run: make test
+
+      - name: Build Sift.app and the dmg
+        env:
+          SIFT_TEACHING: ''  # a public build never carries anyone's labels
+        run: packaging/build_dmg.sh
+
+      - name: Verify the frozen app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          app=build/package/dist/Sift.app
+          plist="$app/Contents/Info.plist"
+          got=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
+          [ "$got" = "$VERSION" ] || { echo "::error::Info.plist version is '$got', expected '$VERSION'"; exit 1; }
+          archs=$(lipo -archs "$app/Contents/MacOS/Sift")
+          [ "$archs" = "arm64" ] || { echo "::error::Sift is built for '$archs', expected arm64"; exit 1; }
+          codesign --verify --deep --strict "$app"
+          if find "$app" -path '*teaching*' | grep -q .; then
+            echo "::error::A teaching file was bundled into a public build."
+            exit 1
+          fi
+          home=$(mktemp -d)
+          SIFT_HOME="$home" SIFT_TRACKER=off "$app/Contents/MacOS/Sift" --self-check
+          rm -rf "$home"
+
+      - name: Package the dmg and checksum
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          LABEL: ${{ steps.version.outputs.label }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="Sift-${LABEL}-macos-arm64.dmg"
+          cp "build/package/Sift-${VERSION}.dmg" "dist/$name"
+          hdiutil verify "dist/$name"
+          (cd dist && shasum -a 256 "$name" > "$name.sha256")
+          cat "dist/$name.sha256"
+
+      - name: Upload artifact
+        # actions/upload-artifact v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sift-dmg
+          path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 1 || 7 }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    # Tag pushes only. A dry run (workflow_dispatch) never gets here.
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        # actions/download-artifact v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: sift-dmg
+          path: dist
+
+      - name: Check the checksum
+        run: cd dist && sha256sum --check ./*.sha256
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          LABEL: ${{ needs.build.outputs.label }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error::A release for $TAG already exists; not overwriting it."
+            exit 1
+          fi
+          dmg="Sift-${LABEL}-macos-arm64.dmg"
+          notes=$(cat <<EOF
+          Sift $TAG for macOS 14 or later on Apple Silicon.
+
+          **Install:** open \`$dmg\`, drag Sift to Applications. Sift is ad-hoc signed, not notarised, so the first launch needs one approval: open it once, then System Settings → Privacy & Security → **Open Anyway**. Check the download against \`$dmg.sha256\` (\`shasum -a 256 -c $dmg.sha256\`).
+
+          See the README for setup, and CHANGELOG.md for what changed.
+          EOF
+          )
+          # Without --clobber, gh also refuses to replace an existing asset.
+          gh release create "$TAG" "dist/$dmg" "dist/$dmg.sha256" \
+            --repo "$REPO" --verify-tag --title "Sift $TAG" --notes "$notes" --generate-notes
