@@ -31,10 +31,15 @@ MB = 1_000_000
 
 
 class ModelStream(io.RawIOBase):
+    """Serves bytes at the phone's per-reader speed. Paced against a deadline, not one sleep per
+    chunk: a sleep that overshoots (a busy CI machine) makes the next one shorter, so the average
+    speed stays what the model says however coarse the sleeps are."""
+
     def __init__(self, phone: ThroughputPhone, size: int) -> None:
         super().__init__()
         self._phone = phone
         self._left = size
+        self._due = time.monotonic()  # when the bytes served so far are due
 
     def readable(self) -> bool:
         return True
@@ -43,7 +48,10 @@ class ModelStream(io.RawIOBase):
         n = min(self._left, 64 * 1024 if size is None or size < 0 else min(size, 64 * 1024))
         if n <= 0:
             return b""
-        time.sleep(n / self._phone.per_reader_bps())
+        self._due += n / self._phone.per_reader_bps()
+        wait = self._due - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
         self._left -= n
         return bytes(n)
 
@@ -81,9 +89,15 @@ class ThroughputPhone:
 FILES = [RemoteEntry(f"/sdcard/DCIM/Camera/V{i}.mp4", 10**9, 0, False, False) for i in range(4)]
 
 
-def test_reader_test_picks_the_fastest_reader_count() -> None:
+@pytest.mark.parametrize("oversleep_s", [0.0, 0.02])
+def test_reader_test_picks_the_fastest_reader_count(
+    oversleep_s: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Also when every sleep overshoots by 20 ms, as measured on a busy CI runner."""
+    real_sleep = time.sleep
+    monkeypatch.setattr(time, "sleep", lambda s: real_sleep(s + oversleep_s))
     phone = ThroughputPhone({1: 10 * MB, 2: 30 * MB, 3: 24 * MB, 4: 18 * MB})
-    result = measure_readers(phone, FILES, duration_s=0.2)  # type: ignore[arg-type]
+    result = measure_readers(phone, FILES, duration_s=0.5)  # type: ignore[arg-type]
     assert result.readers == 2
     speeds = dict(result.speeds)
     assert speeds[2] > speeds[4] > speeds[1]
