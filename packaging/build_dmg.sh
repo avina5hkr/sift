@@ -39,12 +39,12 @@ codesign --verify --deep --strict "$APP"
 
 echo "==> dmg"
 DMG="$OUT/Sift-$SIFT_VERSION.dmg"
+SRC="$OUT/dmg-src"
+mkdir -p "$SRC"
+cp -R "$APP" "$SRC/"
 if command -v create-dmg >/dev/null; then
-  create-dmg --volname "Sift" --app-drop-link 400 150 "$DMG" "$APP"
+  create-dmg --volname "Sift" --app-drop-link 400 150 "$DMG" "$SRC"
 else
-  SRC="$OUT/dmg-src"
-  mkdir -p "$SRC"
-  cp -R "$APP" "$SRC/"
   ln -s /Applications "$SRC/Applications"
   hdiutil create -quiet -volname "Sift" -srcfolder "$SRC" -ov -format UDZO "$DMG"
 fi

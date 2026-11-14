@@ -3,12 +3,14 @@
 Tracebacks go only to the log file and crash reports, never into events the UI shows.
 """
 
+import contextlib
 import json
 import logging
 import logging.handlers
 import sys
 import threading
 import traceback
+from collections.abc import Callable
 from datetime import datetime
 from types import TracebackType
 
@@ -122,6 +124,19 @@ def _record_crash(
     logging.getLogger(f"{_ROOT}.crash").critical(
         "Unexpected error (%s): %s", saved, exc_type.__name__, exc_info=exc_info
     )
+    listener = _crash_listener
+    if name and listener is not None:
+        with contextlib.suppress(Exception):  # telling the window must never fail the hook
+            listener(name)
+
+
+_crash_listener: Callable[[str], None] | None = None
+
+
+def on_crash(listener: Callable[[str], None] | None) -> None:
+    """Call `listener(report_name)` after each crash report (the window's crash dialog)."""
+    global _crash_listener
+    _crash_listener = listener
 
 
 def install_crash_handler(paths: AppPaths) -> None:

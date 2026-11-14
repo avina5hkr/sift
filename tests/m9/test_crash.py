@@ -16,6 +16,9 @@ def test_a_thread_crash_writes_a_report_and_the_dialog_shows_it_once(
     monkeypatch.setattr(rig.ctx.bus, "publish", lambda kind, data: events.append((kind, data)))
     old_main, old_thread = __import__("sys").excepthook, threading.excepthook
     try:
+        from sift.core.logging import install_crash_handler
+
+        install_crash_handler(rig.ctx.paths)
         crash.install(rig.ctx)
 
         def boom() -> None:
@@ -25,9 +28,13 @@ def test_a_thread_crash_writes_a_report_and_the_dialog_shows_it_once(
         t.start()
         t.join()
     finally:
+        from sift.core.logging import on_crash
+
+        on_crash(None)
         __import__("sys").excepthook, threading.excepthook = old_main, old_thread
     reports = list(rig.ctx.paths.logs.glob("crash-*.txt"))
     assert len(reports) == 1 and "RuntimeError: something broke" in reports[0].read_text()
+    # an older report seen earlier does not hide this one (ordered by time, compared by name)
     assert events and events[-1][0] == "crash"
     c, h = client(rig)
     shown = c.get("/api/crash", headers=h).json()["crash"]

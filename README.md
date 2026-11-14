@@ -24,7 +24,7 @@ or quarantined files you choose to remove.
    the SSD folder. Sift asks before it downloads adb (Google's platform-tools) and the image
    models; after that it works offline. macOS asks once for access to the external drive.
 
-Requires an Apple Silicon Mac with macOS 13 or later, and an Android phone (Wi-Fi needs
+Requires an Apple Silicon Mac with macOS 14 or later, and an Android phone (Wi-Fi needs
 Android 11+).
 
 ## Remove

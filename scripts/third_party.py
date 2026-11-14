@@ -14,6 +14,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Where package metadata understates what the wheel ships.
+OVERRIDES = {
+    "pillow-heif": "BSD-3-Clause; its macOS wheel bundles libheif and libde265 (LGPL-3.0) and "
+    "the x265 encoder (GPL-2.0), so a build containing it is GPL-2.0 as a whole",
+}
+NATIVE = [
+    ("CPython", "3.14", "PSF-2.0"),
+    ("PyInstaller bootloader", "6.22.3", "GPL-2.0 with the bootloader exception"),
+    ("ONNX Runtime native library", "via onnxruntime", "MIT"),
+    ("libheif, libde265", "via pillow-heif", "LGPL-3.0"),
+    ("x265", "via pillow-heif", "GPL-2.0"),
+    ("libjpeg-turbo, libpng, libtiff, libwebp, zlib, freetype", "via Pillow",
+     "BSD-style, zlib, FreeType (permissive)"),
+    ("Hugging Face tokenizers (Rust)", "via tokenizers", "Apache-2.0"),
+]  # fmt: skip
+
 
 def python_packages() -> list[tuple[str, str, str]]:
     out = subprocess.run(
@@ -32,6 +48,7 @@ def python_packages() -> list[tuple[str, str, str]]:
             classes = [c.split("::")[-1].strip() for c in meta.get_all("Classifier") or []
                        if c.startswith("License ::")]  # fmt: skip
             lic = ", ".join(classes) or (lic[:60] + "..." if lic else "see package")
+        lic = OVERRIDES.get(name.lower(), lic)
         rows.append((name, md.version(name), lic.replace("\n", " ")))
     return rows
 
@@ -58,8 +75,10 @@ def main() -> None:
     lines = [
         "# Third-party software",
         "",
-        "Sift.app bundles the Python and web packages below, each under its own licence. The "
-        "licence texts are in each package's metadata inside the app bundle.",
+        "Sift.app bundles the software below, each under its own licence (from each package's "
+        "metadata; the full texts are in each project's source repository). Sift is built for "
+        "personal use; because pillow-heif's wheel includes the GPL-2.0 x265 encoder, a "
+        "redistributed build is covered by GPL-2.0.",
         "",
         "## Downloaded on first use (with your consent)",
         "",
@@ -68,6 +87,12 @@ def main() -> None:
         "| Android SDK Platform-Tools (adb) | dl.google.com "
         "| Android Software Development Kit License |",
         "| CLIP ViT-B/32 ONNX model and tokenizer | pinned URLs in the app | MIT (OpenAI CLIP) |",
+        "",
+        "## Runtime and native libraries",
+        "",
+        "| Library | Version | Licence |",
+        "| --- | --- | --- |",
+        *[f"| {n} | {v} | {lic} |" for n, v, lic in NATIVE],
         "",
         "## Python packages",
         "",

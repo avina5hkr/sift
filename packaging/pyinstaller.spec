@@ -74,7 +74,7 @@ app = BUNDLE(
         "CFBundleDisplayName": "Sift",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
-        "LSMinimumSystemVersion": "13.0",
+        "LSMinimumSystemVersion": "14.0",  # numpy and onnxruntime wheels need 14
         "NSHighResolutionCapable": True,
         "NSRemovableVolumesUsageDescription": "Sift saves backups to your external drive.",
         "LSApplicationCategoryType": "public.app-category.utilities",
