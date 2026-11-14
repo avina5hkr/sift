@@ -108,7 +108,7 @@ export function ConfirmDeleteDialog({ run, busy, error, outdated, chooseDisposit
             Run the checks again
           </button>
         )}
-        <button type="button" onClick={onCancel} disabled={busy} className={BTN}>
+        <button type="button" data-autofocus onClick={onCancel} disabled={busy} className={BTN}>
           Cancel
         </button>
         <button

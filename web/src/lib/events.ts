@@ -62,7 +62,7 @@ function asTask(data: unknown): TaskEvent | null {
   return typeof t.kind === 'string' && typeof t.state === 'string' ? (t as TaskEvent) : null
 }
 
-const EVENT_NAMES = ['hello', 'device', 'job', 'progress', 'log', 'toast', 'ssd', 'task', 'replication'] as const
+const EVENT_NAMES = ['hello', 'device', 'job', 'progress', 'log', 'toast', 'ssd', 'task', 'replication', 'crash'] as const
 
 export function startEventStream(qc: QueryClient): () => void {
   const es = new EventSource(withToken('/api/events'))

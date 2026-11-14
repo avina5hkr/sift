@@ -8,6 +8,7 @@ from sift.server.routes import (
     backup,
     browse,
     cleanup,
+    crash,
     delete,
     devices,
     events,
@@ -46,6 +47,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.include_router(health.router, prefix="/api")
     app.include_router(settings.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
+    app.include_router(crash.router, prefix="/api")
     app.include_router(delete.router, prefix="/api")
     app.include_router(browse.router, prefix="/api")
     app.include_router(slate.router, prefix="/api")

@@ -1,8 +1,9 @@
 """Saving and loading the owner's teaching as a file (labels by content hash).
 
-The file stays on the owner's Mac; it never ships with Sift. Loading applies labels at once for
-pictures Sift knows, and keeps the rest in `label_import` until a backup brings them in.
-A label already given in this app is never replaced by a loaded one.
+The file stays on the owner's Mac; it is never committed. A build made with SIFT_TEACHING bundles
+it as `resources/teaching/starter.json`, which a fresh install loads once (`load_starter`).
+Loading applies labels at once for pictures Sift knows, and keeps the rest in `label_import`
+until a backup brings them in. A label already given in this app is never replaced.
 """
 
 import json
@@ -75,3 +76,43 @@ def apply_pending(db: Database) -> int:
 
 def dumps(data: dict[str, Any]) -> str:
     return json.dumps(data, indent=1)
+
+
+STARTER_DONE = "starter_teaching_loaded"
+
+
+def starter_path() -> Any:
+    from importlib.resources import files
+
+    return files("sift.resources").joinpath("teaching", "starter.json")
+
+
+def load_starter(db: Database, path: Any = None) -> dict[str, int] | None:
+    """On a fresh install only (no labels yet, never loaded before), load the teaching bundled
+    with this build. Returns what `load` did, or None when there was nothing to do."""
+    path = path if path is not None else starter_path()
+    try:
+        if not path.is_file():
+            return None
+    except OSError:
+        return None
+    with db.read() as conn:
+        done = conn.execute("SELECT 1 FROM setting WHERE key = ?", (STARTER_DONE,)).fetchone()
+        labelled = conn.execute(
+            "SELECT (SELECT count(*) FROM label) + (SELECT count(*) FROM label_import)"
+        ).fetchone()[0]
+    if done is not None or labelled:
+        return None
+    try:
+        result = load(db, json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as e:
+        import logging
+
+        logging.getLogger("sift.cleanup").warning("The bundled teaching could not be read: %s", e)
+        result = None
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO setting (key, value) VALUES (?, ?)",
+            (STARTER_DONE, str(int(time.time()))),
+        )
+    return result

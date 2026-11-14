@@ -8,6 +8,7 @@ import type { Form, SettingField } from '../lib/settingsForm'
 import { SpeedTest } from '../components/settings/SpeedTest'
 import { WifiSection } from '../components/settings/WifiSection'
 import { apiFetch } from '../lib/api'
+import { useStatus } from '../lib/useStatus'
 import { PAGE_TITLES } from '../lib/settingsLabels'
 import type { SetupState } from '../lib/types'
 import { MacFolder } from './Wizard/MacFolder'
@@ -106,6 +107,7 @@ function PageForm({ page }: { page: string }) {
       )}
       {page === 'destinations' && <Folders />}
       {page === 'general' && <GeneralLinks />}
+      {page === 'general' && <About />}
       {fields.length > 0 && (
         <form
           className="mt-2"
@@ -182,6 +184,40 @@ function GeneralLinks() {
           Run the setup again
         </Link>
       </p>
+    </section>
+  )
+}
+
+function About() {
+  const status = useStatus()
+  const version = status.data?.app.version
+  const [error, setError] = useState<string | null>(null)
+  const openLogs = useMutation({
+    mutationFn: () => apiFetch<void>('/api/logs/open', { method: 'POST' }),
+    onMutate: () => setError(null),
+    onError: (e) => setError(plain(e)),
+  })
+  return (
+    <section aria-labelledby="about-title" className="mt-6 flex flex-col gap-2">
+      <h2 id="about-title" className="text-lg font-semibold">
+        About Sift
+      </h2>
+      <p>Version {version ?? '…'}</p>
+      <p>No automatic updates: a new version is a new .dmg.</p>
+      <p>
+        To remove Sift: Drag Sift to the Bin, then delete ~/Library/Application Support/Sift and ~/Library/Caches/Sift. Your
+        backups are never touched.
+      </p>
+      <p>
+        <button type="button" className={BTN} disabled={openLogs.isPending} onClick={() => openLogs.mutate()}>
+          Open logs folder
+        </button>
+      </p>
+      {error && (
+        <p role="alert" className="text-sm text-red-700 dark:text-red-400">
+          {error}
+        </p>
+      )}
     </section>
   )
 }

@@ -49,6 +49,7 @@ from sift.device.fake_transport import FaultPlan
 from sift.device.tracker import DeviceTracker, adb_tracker
 from sift.server.app import create_app
 from sift.services.afterrun import after_run
+from sift.services.crash import install as install_crash_reports
 from sift.services.keepawake import KeepAwake, restore_at_launch
 from sift.services.notify import MacNotifier, Notifier, NullNotifier
 from sift.services.plainwords import describe
@@ -241,6 +242,19 @@ def ssd_connected(ctx: AppContext) -> None:
     ssd = ctx.ssd
     replicate_now(ctx, should_stop=lambda: ssd is not None and ssd.stopping)
     purge_quarantine(ctx)
+
+
+def load_starter_teaching(ctx: AppContext) -> None:
+    """A fresh install of a build with the owner's teaching bundled starts with it."""
+    from sift.cleanup.labels_io import load_starter
+
+    try:
+        result = load_starter(ctx.db)
+    except Exception as e:  # never stops the app
+        _log.warning("The bundled teaching was not loaded: %s", e)
+        return
+    if result:
+        _log.info("Loaded the bundled teaching: %d labels", result["read"])
 
 
 def reconnect_wifi(ctx: AppContext) -> None:
@@ -499,6 +513,28 @@ def _run_window(url: str, shutdown: Shutdown, ctx: AppContext | None = None) -> 
     webview.start(gui="cocoa")
 
 
+def self_check() -> int:
+    """Import the native parts a packaged build needs (onnxruntime, HEIF, Vision, AVFoundation,
+    notifications, tokenizers, the window) and the bundled files; 0 when all load."""
+    import importlib
+
+    failed = []
+    for name in ("numpy", "onnxruntime", "pillow_heif", "PIL.Image", "tokenizers", "Vision",
+                 "AVFoundation", "UserNotifications", "webview", "yaml"):  # fmt: skip
+        try:
+            importlib.import_module(name)
+        except Exception as e:  # report every part, then fail
+            failed.append(f"{name}: {e}")
+    if find_web_dist() is None:
+        failed.append("web UI: not found")
+    from importlib.resources import files
+
+    if not files("sift.resources").joinpath("migrations").is_dir():
+        failed.append("migrations: not found")
+    print("self-check: " + ("ok" if not failed else "FAILED\n  " + "\n  ".join(failed)))
+    return 0 if not failed else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(prog="sift", description="Back up an Android phone.")
@@ -509,7 +545,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="with --no-window: show a fake phone instead of looking for a real one (dev, tests)",
     )
+    parser.add_argument(
+        "--self-check", action="store_true", help="load every native part, print the result"
+    )
     args = parser.parse_args(argv)
+    if args.self_check:
+        return self_check()
 
     mode = tracker_mode(fake_phone=args.fake_phone, no_window=args.no_window, env=os.environ)
     if mode == "fake" and not os.environ.get("SIFT_HOME"):
@@ -573,10 +614,12 @@ def main(argv: list[str] | None = None) -> int:
         if mode == "fake":  # SIFT_HOME is set (checked above)
             keep_fake_backups_at_home(ctx.config, os.environ["SIFT_HOME"])
         setup_logging(paths, ctx.bus, level="INFO")
+        install_crash_reports(ctx)
         shutdown.add("logging", teardown_logging, timeout_s=_LOGGING_STEP_S)
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
         recover_at_startup(ctx)  # before any job can start
+        load_starter_teaching(ctx)
         threading.Thread(target=purge_quarantine, args=(ctx,), daemon=True).start()
         # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
         jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())

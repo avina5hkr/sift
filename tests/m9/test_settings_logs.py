@@ -124,3 +124,19 @@ def test_redaction_hides_names_with_spaces_serials_and_drives(rig: Rig) -> None:
     for secret in ("family", "IMG-2024", "FAKE-0001", "Galaxy Test 9", "R5CT12", "My SSD",
                    "1234-ABCD-UUID"):  # fmt: skip
         assert secret not in out, (secret, out)
+
+
+def test_starter_teaching_loads_once_on_a_fresh_install(rig: Rig, tmp_path: Path) -> None:
+    from sift.cleanup.labels_io import export, load_starter
+
+    starter = tmp_path / "starter.json"
+    starter.write_text(json.dumps({"format": "sift-teaching", "version": 1, "labels": [
+        {"hash": "a" * 64, "label": "junk", "tag": None},
+        {"hash": "b" * 64, "label": "keep", "tag": None},
+    ]}))  # fmt: skip
+    assert load_starter(rig.ctx.db, starter)["read"] == 2
+    assert len(export(rig.ctx.db)["labels"]) == 2
+    with rig.ctx.db.tx() as conn:
+        conn.execute("DELETE FROM label_import")
+    assert load_starter(rig.ctx.db, starter) is None  # once only, even if emptied later
+    assert load_starter(rig.ctx.db, tmp_path / "missing.json") is None

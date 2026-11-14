@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { Navigate, Route, Routes, useNavigate } from 'react-router'
 import { ConfigWarnings } from './components/ConfigWarnings'
+import { CrashDialog } from './components/CrashDialog'
 import { DeviceBanner } from './components/DeviceBanner'
 import { Sidebar } from './components/Sidebar'
 import { StatusBar } from './components/StatusBar'
@@ -106,6 +107,7 @@ export default function App() {
         </main>
       </div>
       <Toasts />
+      <CrashDialog />
     </div>
   )
 }

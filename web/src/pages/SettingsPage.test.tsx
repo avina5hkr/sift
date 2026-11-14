@@ -42,6 +42,8 @@ beforeEach(() => {
       const method = init.method ?? 'GET'
       calls.push({ method, path: url, body: init.body ? JSON.parse(init.body as string) : null })
       if (url === '/api/settings') return Promise.resolve(method === 'PUT' ? putReply() : json(SETTINGS))
+      if (url === '/api/status') return Promise.resolve(json({ app: { version: '1.2.3', schema_version: 1, config_warnings: [] } }))
+      if (url === '/api/logs/open') return Promise.resolve(new Response(null, { status: 204 }))
       if (url === '/api/phone/wifi') {
         return Promise.resolve(json({
           remembered: [{ name: 'Pixel', address: '192.168.1.5:5555', paired_at: 1, last_connected: null }],
@@ -141,4 +143,14 @@ test('the connection test shows MB/s', async () => {
   renderAt('/settings/phone')
   await userEvent.click(await screen.findByRole('button', { name: 'Test the connection' }))
   expect(await screen.findByText(/38\.0 MB\/s with 3 files read at once/)).toBeInTheDocument()
+})
+
+test('General shows About with the version, the update note and removal steps; Open logs folder posts', async () => {
+  renderAt('/settings/general')
+  expect(await screen.findByRole('heading', { name: 'About Sift' })).toBeInTheDocument()
+  expect(await screen.findByText('Version 1.2.3')).toBeInTheDocument()
+  expect(screen.getByText('No automatic updates: a new version is a new .dmg.')).toBeInTheDocument()
+  expect(screen.getByText(/Drag Sift to the Bin, then delete ~\/Library\/Application Support\/Sift and ~\/Library\/Caches\/Sift\. Your backups are never touched\./)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Open logs folder' }))
+  await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/api/logs/open')).toBe(true))
 })
