@@ -210,7 +210,7 @@ export type ReaderTestResult = {
 }
 
 // The `task` event and TaskOut: one long job (verify, adopt, rebuild, confirm, analyse) at a time.
-export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model' | 'preflight' | 'delete'
+export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model' | 'preflight' | 'delete' | 'restore'
 export type TaskEvent = {
   kind: TaskKind
   state: 'running' | 'done' | 'stopped' | 'failed'
@@ -424,7 +424,12 @@ export type DeleteRun = {
 export type DeleteBody =
   | { source: 'cleanup'; ids: number[] }
   | { source: 'analysis'; sets: string[] }
-  | { source: 'browse'; ids: number[]; folders: string[] }
+  | {
+      source: 'browse'
+      ids: number[]
+      folders: string[]
+      filters?: { q: string; kind: string; older_days: number; min_bytes: number; status: string }
+    }
 /** What happens to the backup copy of a file deleted from Browse. */
 export type Disposition = 'archive' | 'quarantine'
 

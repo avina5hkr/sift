@@ -309,7 +309,16 @@ export default function TeachPage() {
       <button type="button" disabled={changing || offset === 0} onClick={() => goTo(section, Math.max(0, offset - PAGE))} className={SMALL_BTN}>
         Previous page
       </button>
-      <button type="button" disabled={changing || last >= total} onClick={() => goTo(section, offset + PAGE)} className={SMALL_BTN}>
+      <button
+        type="button"
+        disabled={changing || last >= total}
+        onClick={() => {
+          // groups marked on this page leave "To mark", so the next page starts that much earlier
+          const markedHere = data.clusters.filter((c) => shown[slot(c.id)] && !c.marked).length
+          goTo(section, section === 'to_mark' ? offset + PAGE - markedHere : offset + PAGE)
+        }}
+        className={SMALL_BTN}
+      >
         Next page
       </button>
       {total > 0 && (

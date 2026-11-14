@@ -149,7 +149,12 @@ test('Delete selected posts the ids and folders and lists the skipped files', as
   expect(screen.getByText('2 files and 1 folder selected')).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
   await screen.findByRole('dialog', { name: 'Result of the checks' })
-  expect(posted('/api/delete/preflight')[0]?.body).toEqual({ source: 'browse', ids: [1, 5], folders: ['/sdcard/DCIM'] })
+  expect(posted('/api/delete/preflight')[0]?.body).toEqual({
+    source: 'browse',
+    ids: [1, 5],
+    folders: ['/sdcard/DCIM'],
+    filters: { q: '', kind: '', older_days: 0, min_bytes: 0, status: '' },
+  })
   const summary = screen.getByText('2 files in these folders are not backed up and will be skipped')
   expect(summary.closest('details')).not.toHaveAttribute('open')
 })

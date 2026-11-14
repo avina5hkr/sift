@@ -12,6 +12,8 @@ const KIND_LABEL = { mac: 'Mac', ssd: 'SSD' }
 const plural = (n: number, one: string, many: string) => `${formatCount(n)} ${n === 1 ? one : many}`
 
 /** The backup copies of files that were deleted from the phone and kept: look through them and put some back. */
+type RestoreResult = { restored: number; already_on_phone: number; failed?: number; not_done?: number }
+
 export default function ArchivePage() {
   const qc = useQueryClient()
   const dests = useQuery({ queryKey: ['archive', 'destinations'], queryFn: () => apiFetch<ArchiveDestination[]>('/api/archive/destinations') })
@@ -29,12 +31,24 @@ export default function ArchivePage() {
   })
 
   const restore = useMutation({
-    mutationFn: () => post<{ restored: number; already_on_phone: number }>('/api/archive/restore', { dest, paths: [...picked] }),
+    mutationFn: async () => {
+      // restoring runs as a background task: start it, then wait for it to finish
+      await post('/api/archive/restore', { dest, paths: [...picked] })
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 400))
+        const t = await apiFetch<{ state: string; message: string | null; result: RestoreResult }>('/api/tasks/current')
+        if (t.state === 'running') continue
+        if (t.state === 'failed') throw new Error(t.message ?? 'Sift could not restore these files.')
+        return t.result
+      }
+    },
     onMutate: () => setMessage(null),
     onSuccess: (r) => {
       setPicked(new Set())
       const parts = [`Put ${plural(r.restored, 'file', 'files')} back on the phone.`]
       if (r.already_on_phone > 0) parts.push(`${plural(r.already_on_phone, 'file was', 'files were')} already there.`)
+      if (r.failed) parts.push(`${plural(r.failed, 'file', 'files')} could not be restored; see Logs.`)
+      if (r.not_done) parts.push(`${plural(r.not_done, 'file was', 'files were')} not restored (stopped or the phone went away).`)
       setMessage({ text: parts.join(' '), bad: false })
     },
     onError: (e) => setMessage({ text: plain(e), bad: true }),

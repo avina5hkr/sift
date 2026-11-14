@@ -37,7 +37,10 @@ beforeEach(() => {
       if (url === '/api/archive/restore') {
         return refuse
           ? reply({ code: 'restore_refused', message: 'The phone is not connected.', detail: null }, 409)
-          : reply({ restored: 2, already_on_phone: 1 })
+          : reply({ kind: 'restore', state: 'running', done: 0, total: 2, message: null, result: {} })
+      }
+      if (url === '/api/tasks/current') {
+        return reply({ kind: 'restore', state: 'done', done: 2, total: 2, message: null, result: { restored: 2, already_on_phone: 1, failed: 0, not_done: 0 } })
       }
       return reply({ code: 'nope', message: 'No.', detail: null }, 404)
     }),

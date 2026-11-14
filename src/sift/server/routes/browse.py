@@ -12,6 +12,8 @@ from sift.cleanup.errors import RestoreRefused
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.server.routes.cleanup import _device
+from sift.server.routes.vault import TaskOut, start_task
+from sift.services.tasks import TaskControl
 
 router = APIRouter()
 FILES_PAGE = 500
@@ -124,9 +126,24 @@ class ArchiveRestore(BaseModel):
 
 
 @router.post("/archive/restore")
-def archive_restore(ctx: Ctx, body: ArchiveRestore) -> dict[str, int]:
+def archive_restore(ctx: Ctx, body: ArchiveRestore) -> TaskOut:
+    """Restore to the phone as a task (progress, Stop); refused while a backup runs."""
+    from sift.server.routes.delete import _no_backup_running
+
+    _no_backup_running(ctx)
     session = ctx.tracker.session() if ctx.tracker is not None else None
-    try:
-        return archive.restore(ctx, body.dest, body.paths, session)
-    except RestoreRefused as e:
-        raise ApiError(409, "restore_refused", str(e)) from e
+
+    def work(control: TaskControl) -> dict[str, Any]:
+        try:
+            return archive.restore(
+                ctx,
+                body.dest,
+                body.paths,
+                session,
+                should_stop=lambda: control.should_stop,
+                on_progress=control.progress,
+            )
+        except RestoreRefused as e:
+            raise ApiError(409, "restore_refused", str(e)) from e
+
+    return start_task(ctx, "restore", work)

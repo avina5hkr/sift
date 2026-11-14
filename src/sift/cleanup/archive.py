@@ -7,6 +7,8 @@ selection plus 2 GB; then a media rescan. A file whose content is already presen
 at that path is skipped.
 """
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -15,6 +17,9 @@ from sift.backup.run import usable_dests
 from sift.cleanup.errors import RestoreRefused
 from sift.core.context import AppContext
 from sift.device.session import DeviceSession
+from sift.device.transport import RemoteError, TransportError
+
+log = logging.getLogger("sift.cleanup")
 
 ROOM_BYTES = 2 * 1024**3
 
@@ -75,7 +80,13 @@ def listing(
 
 
 def restore(
-    ctx: AppContext, dest_id: int, rel_paths: list[str], session: DeviceSession | None
+    ctx: AppContext,
+    dest_id: int,
+    rel_paths: list[str],
+    session: DeviceSession | None,
+    *,
+    should_stop: Callable[[], bool] = lambda: False,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, int]:
     usable = {d.id: d for d in usable_dests(ctx)}
     dest = usable.get(dest_id)
@@ -85,7 +96,7 @@ def restore(
         raise RestoreRefused("Connect the phone over USB first.")
     with ctx.db.read() as conn:
         plan = []
-        for rel in rel_paths:
+        for rel in dict.fromkeys(rel_paths):  # each file once
             row = conn.execute(
                 "SELECT r.content_hash, r.size, p.id, p.remote_path, p.mtime, p.present, d.uuid "
                 "FROM replica r JOIN phone_file p ON p.content_hash = r.content_hash "
@@ -107,8 +118,25 @@ def restore(
     if free is None or free < need + ROOM_BYTES:
         raise RestoreRefused("The phone needs room for these files plus 2 GB.")
     pushed: list[str] = []
-    for rel, _digest, _size, pid, stored, mtime, _present, _uuid in todo:
-        target = push_one(session, Path(dest.root) / rel, from_db(str(stored)), int(mtime))
+    failed = 0
+    for n, (rel, _digest, size, pid, stored, mtime, _present, _uuid) in enumerate(todo, 1):
+        if should_stop():
+            break
+        local = Path(dest.root) / rel
+        try:
+            if local.stat().st_size != int(size):
+                raise OSError("the backup copy is not the right size")
+            target = push_one(session, local, from_db(str(stored)), int(mtime))
+        except (OSError, RemoteError) as e:
+            log.warning("Could not restore %s: %s", rel, e)
+            failed += 1
+            continue
+        except TransportError as e:  # the phone went away: stop, report what was done
+            log.warning("Restore stopped: %s", e)
+            break
+        finally:
+            if on_progress is not None:
+                on_progress(n, len(todo))
         pushed.append(target)
         with ctx.db.tx() as conn:
             if target == from_db(str(stored)):
@@ -123,8 +151,16 @@ def restore(
                     (to_db(target), int(mtime), int(pid)),
                 )
     if pushed:
-        session.transport.media_rescan(pushed)
-    return {"restored": len(pushed), "already_on_phone": len(plan) - len(todo)}
+        try:
+            session.transport.media_rescan(pushed)
+        except Exception as e:  # best effort
+            log.info("Media rescan failed: %s", e)
+    return {
+        "restored": len(pushed),
+        "already_on_phone": len(plan) - len(todo),
+        "failed": failed,
+        "not_done": len(todo) - len(pushed) - failed,
+    }
 
 
 def push_one(session: DeviceSession, local: Path, phone_path: str, mtime: int) -> str:

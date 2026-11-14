@@ -130,7 +130,12 @@ def test_the_never_delete_list_wins_in_browse(rig: Rig) -> None:
     assert results(rig, run_id)[pid] == "outside_roots"
 
 
-def test_p8_faults_through_the_browse_path(rig: Rig) -> None:
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_p8_faults_through_the_browse_path(rig: Rig, seed: int) -> None:
+    """P4's fault cases through Browse: a folder selection, random faults before and after the
+    checks; whatever was deleted had a verified backup, an unchanged phone copy, and was shown."""
+    import random
+
     backed_up(rig, ["Camera"])
     with rig.ctx.db.read() as conn:
         ids = [
@@ -139,18 +144,85 @@ def test_p8_faults_through_the_browse_path(rig: Rig) -> None:
                 "SELECT id FROM phone_file WHERE remote_path LIKE '%/DCIM/Camera/%' AND present = 1"
             )
         ]
-    edited, corrupted, hashed = ids[:3]
-    rig.transport.phone.modify(path_of(rig, edited), b"x", int(time.time()) - 40 * 86400)
-    local_of(rig, corrupted).write_bytes(b"")
-    rig.transport.faults.wrong_sha256.add(path_of(rig, hashed))
-    run_id = create_run(rig.ctx, device_id(rig), "browse", ids, "archive")
-    run_preflight(rig.ctx, run_id, rig.session)
-    late = ids[3]
-    rig.transport.phone.modify(path_of(rig, late), b"late", int(time.time()) - 40 * 86400)
-    check_execute(rig.ctx, run_id, rig.session, confirm=True, typed_count=None)
-    execute(rig.ctx, run_id, rig.session)
+    rng = random.Random(seed)
+    picked = rng.sample(ids, 7)
+    faults = ["edit", "corrupt", "remove_replica", "never_list", "hash_only"]
+    rng.shuffle(faults)
+    phone = rig.transport.phone
+    for pid, fault in zip(picked[:5], faults, strict=True):
+        path = path_of(rig, pid)
+        if fault == "edit":
+            phone.modify(path, b"x", int(time.time()) - 40 * 86400)
+        elif fault == "corrupt":
+            local_of(rig, pid).write_bytes(b"")
+        elif fault == "remove_replica":
+            local_of(rig, pid).unlink()
+        elif fault == "never_list":
+            rig.ctx.config.browse.never_delete_extra.append(path)
+        else:
+            rig.transport.faults.wrong_sha256.add(path)
+    c, h = client(rig)
+    run = browse_preflight(rig, c, h, folders=["/sdcard/DCIM/Camera"])
+    assert run["state"] == "ready"
+    late_edit, late_loss = picked[5], picked[6]
+    phone.modify(path_of(rig, late_edit), b"late", int(time.time()) - 40 * 86400)
+    local_of(rig, late_loss).unlink()  # a backup lost after the checks
+    c.post(
+        "/api/delete/execute",
+        headers=h,
+        json={"run_id": run["id"], "confirm": True, "typed_count": run["passed"]},
+    )
+    assert rig.ctx.tasks.wait(60)
     gone = set(deletes(rig))
-    assert gone and not gone & {path_of(rig, p) for p in (edited, corrupted, hashed, late)}
+    bad = {path_of(rig, p) for p in picked}
+    assert gone and not gone & bad
+    for pid in ids:
+        if path_of(rig, pid) in gone:
+            assert local_of(rig, pid).is_file()
+
+
+def test_a_folder_means_only_the_files_the_filters_showed(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    c, h = client(rig)
+    shown = c.get("/api/browse?path=/sdcard/DCIM/Camera&q=.mp4", headers=h).json()["files"]
+    run = browse_preflight(rig, c, h, folders=["/sdcard/DCIM"], filters={"q": ".mp4"})
+    assert run["passed"] == len(shown) and all(i["path"].endswith(".mp4") for i in run["items"])
+    assert (
+        c.post(
+            "/api/delete/preflight", headers=h, json={"source": "browse", "folders": [""]}
+        ).status_code
+        == 422
+    )  # never "the whole phone"
+
+
+def test_browse_may_delete_in_download_but_never_in_app_data(rig: Rig) -> None:
+    from sift.cleanup.preflight import in_browse_roots, in_delete_roots
+
+    cfg = rig.ctx.config
+    assert in_browse_roots(cfg, "/sdcard/Download/old.apk")
+    assert not in_delete_roots(cfg, "/sdcard/Download/old.apk")  # not from the suggestion tabs
+    assert not in_browse_roots(cfg, "/sdcard/Android/data/com.app/x")
+    assert not in_browse_roots(cfg, "/sdcard/WhatsApp/Databases/msgstore.db.crypt14")
+
+
+def test_a_loaded_protected_label_counts_before_any_check(rig: Rig) -> None:
+    from sift.cleanup.labels_io import load
+
+    backed_up(rig, ["Camera"])
+    with rig.ctx.db.read() as conn:
+        pid, digest = conn.execute(
+            "SELECT id, content_hash FROM phone_file "
+            "WHERE remote_path LIKE '%/DCIM/Camera/%' LIMIT 1"
+        ).fetchone()
+    with rig.ctx.db.tx() as conn:  # loaded while that content was unknown, so it waits
+        conn.execute(
+            "INSERT INTO label_import (content_hash, label, created_at) VALUES (?, 'protected', 1)",
+            (digest,),
+        )
+    del load
+    run_id = create_run(rig.ctx, device_id(rig), "browse", [pid], "archive")
+    run_preflight(rig.ctx, run_id, rig.session)
+    assert results(rig, run_id)[pid] == "protected"
 
 
 def test_p9_the_manifest_lists_every_planned_path_whenever_the_app_dies(rig: Rig) -> None:
@@ -208,9 +280,18 @@ def test_the_archive_browser_lists_the_backup_and_restores_to_the_phone(rig: Rig
     rig.transport.phone.remove(path)  # gone from the phone (deleted earlier)
     with rig.ctx.db.tx() as conn:
         conn.execute("UPDATE phone_file SET present = 0, state = 'deleted' WHERE id = ?", (pid,))
-    out = c.post("/api/archive/restore", headers=h, json={"dest": mac, "paths": [rel]}).json()
-    assert out == {"restored": 1, "already_on_phone": 0}
+
+    def restore() -> dict:
+        assert (
+            c.post(
+                "/api/archive/restore", headers=h, json={"dest": mac, "paths": [rel, rel]}
+            ).status_code
+            == 200
+        )
+        assert rig.ctx.tasks.wait(60)
+        return rig.ctx.tasks.current().result
+
+    assert restore() == {"restored": 1, "already_on_phone": 0, "failed": 0, "not_done": 0}
     back = rig.transport.phone.entry(path)
     assert back is not None and back.mtime == entry.mtime
-    again = c.post("/api/archive/restore", headers=h, json={"dest": mac, "paths": [rel]}).json()
-    assert again == {"restored": 0, "already_on_phone": 1}
+    assert restore()["already_on_phone"] == 1

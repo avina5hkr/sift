@@ -265,14 +265,15 @@ export default function BrowsePage() {
             <tbody>
               {dirs.map((d) => {
                 const { backed } = folderCounts(d.status)
-                const blocked = d.files > 0 && backed === 0
+                const filtering = Boolean(q || kind || Number(older) > 0 || Number(minimum) > 0 || status)
+                const blocked = (d.files > 0 && backed === 0) || filtering
                 return (
                   <tr key={d.path} className="border-b border-neutral-100 dark:border-neutral-900">
                     <td className="py-1.5">
                       <input
                         type="checkbox"
                         aria-label={`Select folder ${d.name}`}
-                        title={blocked ? 'Not backed up yet' : undefined}
+                        title={filtering ? 'Clear the filters to select a whole folder' : blocked ? 'Not backed up yet' : undefined}
                         disabled={blocked}
                         checked={folders.has(d.path)}
                         onChange={() => toggleFolder(d.path)}
@@ -361,7 +362,14 @@ export default function BrowsePage() {
             primary
             placement="above"
             reason={reason}
-            onClick={() => void flow.start({ source: 'browse', ids: [...ids], folders: [...folders] })}
+            onClick={() =>
+              void flow.start({
+                source: 'browse',
+                ids: [...ids],
+                folders: [...folders],
+                filters: { q, kind, older_days: Math.floor(Number(older) || 0), min_bytes: Math.round((Number(minimum) || 0) * 1_000_000), status },
+              })
+            }
           >
             Delete selected
           </ReasonButton>

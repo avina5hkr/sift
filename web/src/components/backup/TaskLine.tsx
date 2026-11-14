@@ -11,6 +11,7 @@ const LABEL: Record<TaskKind, string> = {
   model: 'Downloading the picture model',
   preflight: 'Checking the files',
   delete: 'Deleting from the phone',
+  restore: 'Restoring to the phone',
 }
 const ENDED = { done: 'finished', stopped: 'stopped', failed: 'could not finish' }
 

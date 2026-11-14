@@ -147,14 +147,13 @@ def _safe_key(path: str) -> str | None:
 
 
 def in_browse_roots(cfg: Config, path: str) -> bool:
-    """Browse and delete (spec 10B): anywhere under /sdcard except the never-delete list."""
+    """Browse and delete (spec 10B): anywhere under /sdcard except the built-in never-delete
+    list and the owner's additions (Download and Documents are allowed here, unlike the
+    suggestion tabs)."""
     key = _safe_key(path)
     if key is None:
         return False
-    never = [
-        phone_path_key(p)
-        for p in (*NEVER_DELETE_FLOOR, *cfg.cleanup.never_delete, *cfg.browse.never_delete_extra)
-    ]
+    never = [phone_path_key(p) for p in (*NEVER_DELETE_FLOOR, *cfg.browse.never_delete_extra)]
     return key.startswith("/sdcard/") and not _under(key, never)
 
 
@@ -352,8 +351,10 @@ def run_preflight(
     files = [
         _File(int(r[0]), from_db(str(r[1])), str(r[1]), r[2], int(r[3]), int(r[4])) for r in rows
     ]
+    from sift.cleanup.labels_io import apply_pending
     from sift.cleanup.quarantine import revive
 
+    apply_pending(ctx.db)  # a loaded "protected" label counts before anything is checked
     revive(ctx)  # content back on a phone leaves quarantine first
     try:
         if session is None:
