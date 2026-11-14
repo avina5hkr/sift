@@ -16,15 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Where package metadata understates what the wheel ships.
 OVERRIDES = {
-    "pillow-heif": "BSD-3-Clause; its macOS wheel bundles libheif and libde265 (LGPL-3.0) and "
-    "the x265 encoder (GPL-2.0), so a build containing it is GPL-2.0 as a whole",
+    "pi-heif": "BSD-3-Clause; its macOS wheel bundles libheif and the libde265 decoder "
+    "(LGPL-3.0) as shared libraries; it has no encoder",
 }
 NATIVE = [
     ("CPython", "3.14", "PSF-2.0"),
     ("PyInstaller bootloader", "6.22.3", "GPL-2.0 with the bootloader exception"),
     ("ONNX Runtime native library", "via onnxruntime", "MIT"),
-    ("libheif, libde265", "via pillow-heif", "LGPL-3.0"),
-    ("x265", "via pillow-heif", "GPL-2.0"),
+    ("libheif, libde265", "via pi-heif", "LGPL-3.0"),
     ("libjpeg-turbo, libpng, libtiff, libwebp, zlib, freetype", "via Pillow",
      "BSD-style, zlib, FreeType (permissive)"),
     ("Hugging Face tokenizers (Rust)", "via tokenizers", "Apache-2.0"),
@@ -76,9 +75,11 @@ def main() -> None:
         "# Third-party software",
         "",
         "Sift.app bundles the software below, each under its own licence (from each package's "
-        "metadata; the full texts are in each project's source repository). Sift is built for "
-        "personal use; because pillow-heif's wheel includes the GPL-2.0 x265 encoder, a "
-        "redistributed build is covered by GPL-2.0.",
+        "metadata; the full texts are in each project's source repository). Sift itself is "
+        "MIT-licensed (see LICENSE). libheif and libde265 (LGPL-3.0) are separate shared "
+        "libraries in `Sift.app/Contents/Frameworks`; you may replace them with your own builds, "
+        "and their source is at https://github.com/strukturag/libheif and "
+        "https://github.com/strukturag/libde265.",
         "",
         "## Downloaded on first use (with your consent)",
         "",

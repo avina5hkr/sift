@@ -519,7 +519,7 @@ def self_check() -> int:
     import importlib
 
     failed = []
-    for name in ("numpy", "onnxruntime", "pillow_heif", "PIL.Image", "tokenizers", "Vision",
+    for name in ("numpy", "onnxruntime", "pi_heif", "PIL.Image", "tokenizers", "Vision",
                  "AVFoundation", "UserNotifications", "webview", "yaml"):  # fmt: skip
         try:
             importlib.import_module(name)

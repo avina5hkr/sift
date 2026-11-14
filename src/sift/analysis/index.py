@@ -28,8 +28,8 @@ VERSION = 2  # 1: index (stage A); 2: perceptual hashes and video fingerprints (
 THUMB_PX = 256
 Image.MAX_IMAGE_PIXELS = 400_000_000  # big panoramas are real photos, not decompression bombs
 
-try:  # HEIC/HEIF from phone cameras
-    from pillow_heif import register_heif_opener
+try:  # HEIC/HEIF from phone cameras (pi-heif: decode only, no GPL encoder)
+    from pi_heif import register_heif_opener  # type: ignore[import-untyped]
 
     register_heif_opener()
 except ImportError:  # pragma: no cover - the dependency is installed; stay usable without it

@@ -20,7 +20,7 @@ datas += collect_data_files("onnxruntime")
 datas += collect_data_files("webview")
 
 binaries = []
-for pkg in ("onnxruntime", "pillow_heif", "tokenizers"):
+for pkg in ("onnxruntime", "pi_heif", "tokenizers"):
     binaries += collect_dynamic_libs(pkg)
 
 hiddenimports = [
@@ -30,7 +30,7 @@ hiddenimports = [
     "Quartz",
     "UserNotifications",
     "webview.platforms.cocoa",
-    "pillow_heif",
+    "pi_heif",
     "uvicorn.lifespan.on",
     "uvicorn.loops.asyncio",
     "uvicorn.protocols.http.h11_impl",

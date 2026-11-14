@@ -225,3 +225,16 @@ def test_a_drive_not_found_by_uuid_is_never_read(rig: Rig, tmp_path) -> None:
     with rig.ctx.db.read() as conn:
         pid = conn.execute("SELECT id FROM phone_file WHERE remote_path = ?", (CAM,)).fetchone()[0]
     assert client_for(rig.ctx).get(f"/api/media/{pid}/thumb", headers=H).status_code == 404
+
+
+def test_heic_photos_are_decoded() -> None:
+    """Phone cameras save HEIC; Sift reads them through pi-heif (decode only). The fixture was
+    made with macOS `sips`, since pi-heif has no encoder."""
+    from pathlib import Path
+
+    import sift.analysis.index  # noqa: F401  (registers the HEIC opener)
+
+    with Image.open(Path(__file__).parent / "fixtures" / "sample.heic") as im:
+        assert im.format == "HEIF" and im.size == (160, 120)
+        r, _g, b = im.convert("RGB").getpixel((80, 60))  # type: ignore[misc]
+        assert r > 200 and b < 100  # the yellow square in the middle

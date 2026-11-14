@@ -1,6 +1,6 @@
 # Third-party software
 
-Sift.app bundles the software below, each under its own licence (from each package's metadata; the full texts are in each project's source repository). Sift is built for personal use; because pillow-heif's wheel includes the GPL-2.0 x265 encoder, a redistributed build is covered by GPL-2.0.
+Sift.app bundles the software below, each under its own licence (from each package's metadata; the full texts are in each project's source repository). Sift itself is MIT-licensed (see LICENSE). libheif and libde265 (LGPL-3.0) are separate shared libraries in `Sift.app/Contents/Frameworks`; you may replace them with your own builds, and their source is at https://github.com/strukturag/libheif and https://github.com/strukturag/libde265.
 
 ## Downloaded on first use (with your consent)
 
@@ -16,8 +16,7 @@ Sift.app bundles the software below, each under its own licence (from each packa
 | CPython | 3.14 | PSF-2.0 |
 | PyInstaller bootloader | 6.22.3 | GPL-2.0 with the bootloader exception |
 | ONNX Runtime native library | via onnxruntime | MIT |
-| libheif, libde265 | via pillow-heif | LGPL-3.0 |
-| x265 | via pillow-heif | GPL-2.0 |
+| libheif, libde265 | via pi-heif | LGPL-3.0 |
 | libjpeg-turbo, libpng, libtiff, libwebp, zlib, freetype | via Pillow | BSD-style, zlib, FreeType (permissive) |
 | Hugging Face tokenizers (Rust) | via tokenizers | Apache-2.0 |
 
@@ -44,8 +43,8 @@ Sift.app bundles the software below, each under its own licence (from each packa
 | onnxruntime | 1.32.0 | MIT License |
 | opentelemetry-api | 1.45.2 | Apache-2.0 |
 | packaging | 26.3 | Apache-2.0 OR BSD-2-Clause |
+| pi-heif | 1.4.0 | BSD-3-Clause; its macOS wheel bundles libheif and the libde265 decoder (LGPL-3.0) as shared libraries; it has no encoder |
 | pillow | 13.0.0 | MIT-CMU |
-| pillow-heif | 1.8.1 | BSD-3-Clause; its macOS wheel bundles libheif and libde265 (LGPL-3.0) and the x265 encoder (GPL-2.0), so a build containing it is GPL-2.0 as a whole |
 | protobuf | 7.36.2 | 3-Clause BSD License |
 | proxy-tools | 0.1.0 | MIT |
 | pydantic | 2.14.3 | MIT |
