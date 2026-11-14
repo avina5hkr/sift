@@ -12,7 +12,6 @@ for files the owner deleted from the phone and chose to quarantine.
 """
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -46,11 +45,16 @@ def _free_name(root: Path, rel: str, suffix: str = "_restored") -> str:
 
 
 def _move(root: Path, src_rel: str, dst_rel: str) -> None:
+    """Rename within the backup folder, never over a file (I1), atomically where the volume
+    allows (the backup's own no-replace rename), so a file appearing meanwhile is never lost."""
+    from sift.backup.staging import TargetExists, _rename_no_replace
+
     dst = root / dst_rel
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():  # never replace a file (I1)
-        raise FileExistsError(str(dst))
-    os.rename(root / src_rel, dst)
+    try:
+        _rename_no_replace(root / src_rel, dst)
+    except TargetExists as e:
+        raise FileExistsError(str(dst)) from e
 
 
 def quarantine_run(ctx: AppContext, run_id: int) -> int:

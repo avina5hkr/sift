@@ -314,3 +314,35 @@ def test_a_crash_while_quarantining_is_repaired(
     rel = _tracked(rig, digest)
     assert (rig.root / rel).read_bytes() == digest_bytes  # tracked where the bytes are
     assert rel.startswith(".quarantine/") == (where == "after_move")
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("post", "/api/diagnostics"),
+        ("post", "/api/logs/open"),
+        ("get", "/api/archive/chat-backups"),
+        ("post", "/api/archive/chat-backups/delete"),
+        ("post", "/api/archive/restore"),
+        ("post", "/api/quarantine/restore"),
+        ("post", "/api/apps/uninstall"),
+        ("put", "/api/settings"),
+    ],
+)
+def test_sensitive_routes_need_the_token(rig: Rig, method: str, path: str) -> None:
+    from tests.cleanup.test_browse import client
+
+    c, _h = client(rig)
+    r = c.get(path) if method == "get" else getattr(c, method)(path, json={})
+    assert r.status_code in (401, 403), (path, r.status_code)
+
+
+def test_a_quarantine_move_never_replaces_a_file(tmp_path) -> None:
+    from sift.cleanup.quarantine import _move
+
+    (tmp_path / "a.jpg").write_bytes(b"moving")
+    (tmp_path / "b.jpg").write_bytes(b"already here")
+    with pytest.raises(FileExistsError):
+        _move(tmp_path, "a.jpg", "b.jpg")
+    assert (tmp_path / "b.jpg").read_bytes() == b"already here"
+    assert (tmp_path / "a.jpg").read_bytes() == b"moving"
