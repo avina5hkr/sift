@@ -7,9 +7,9 @@ behaviour.
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.0.1] - 2026-11-15
 
-The first public release.
+The first public build, a beta.
 
 ### Added
 
@@ -38,5 +38,5 @@ The first public release.
 - Model suggestions are not ticked for deletion unless you turn that on (beta) and a
   calibration with at least 50 items passes on the current pipeline.
 
-[Unreleased]: https://github.com/avina5hkr/sift/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/avina5hkr/sift/releases/tag/v0.1.0
+[Unreleased]: https://github.com/avina5hkr/sift/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/avina5hkr/sift/releases/tag/v0.0.1

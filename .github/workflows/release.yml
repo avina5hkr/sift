@@ -215,8 +215,13 @@ jobs:
             exit 1
           fi
           dmg="Sift-${LABEL}-macos-arm64.dmg"
+          title="Sift $TAG"
+          stage=""
+          case "$TAG" in
+            v0.*) title="Sift $TAG (beta)"; stage="This is a beta: keep your own extra backup until you trust it. " ;;
+          esac
           notes=$(cat <<EOF
-          Sift $TAG for macOS 14 or later on Apple Silicon.
+          Sift $TAG for macOS 14 or later on Apple Silicon. ${stage}
 
           **Install:** open \`$dmg\`, drag Sift to Applications. Sift is ad-hoc signed, not notarised, so the first launch needs one approval: open it once, then System Settings → Privacy & Security → **Open Anyway**. Check the download against \`$dmg.sha256\` (\`shasum -a 256 -c $dmg.sha256\`).
 
@@ -225,4 +230,4 @@ jobs:
           )
           # Without --clobber, gh also refuses to replace an existing asset.
           gh release create "$TAG" "dist/$dmg" "dist/$dmg.sha256" \
-            --repo "$REPO" --verify-tag --title "Sift $TAG" --notes "$notes" --generate-notes
+            --repo "$REPO" --verify-tag --title "$title" --notes "$notes" --generate-notes
