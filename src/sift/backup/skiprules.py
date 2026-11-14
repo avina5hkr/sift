@@ -31,6 +31,8 @@ class SkipRules:
     include_whatsapp_db: bool
     include_whatsapp_statuses: bool
     whatsapp_media_roots: tuple[str, ...]
+    # Databases/Backups folders an enabled set names itself (the owner chose to back them up)
+    chosen_db_paths: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, cfg: Config) -> SkipRules:
@@ -43,6 +45,9 @@ class SkipRules:
             include_whatsapp_db=b.include_whatsapp_db,
             include_whatsapp_statuses=b.include_whatsapp_statuses,
             whatsapp_media_roots=WHATSAPP_MEDIA_ROOTS,
+            chosen_db_paths=tuple(
+                p for s in b.sets if s.enabled for p in s.paths if _is_db_folder(p)
+            ),
         )
 
     @functools.cached_property
@@ -72,12 +77,22 @@ class SkipRules:
         )
 
 
+def _is_db_folder(path: str) -> bool:
+    key = phone_path_key(path)
+    return any(
+        key == f"{_parent(phone_path_key(root))}/{name.casefold()}"
+        for root in WHATSAPP_MEDIA_ROOTS
+        for name in _DB_FOLDERS
+    )
+
+
 def is_skipped(path: str, *, is_dir: bool, size: int, rules: SkipRules) -> str | None:
     """The name of the first rule that skips `path`, or None. `size` only matters for files."""
     key = phone_path_key(path)
     if not rules.include_whatsapp_db:
+        chosen = {phone_path_key(p) for p in rules.chosen_db_paths}
         for db in rules._db_keys:
-            if key == db or key.startswith(db + "/"):
+            if (key == db or key.startswith(db + "/")) and db not in chosen:
                 return "whatsapp_db"
     names = key.split("/")[1:]
     folders = names if is_dir else names[:-1]

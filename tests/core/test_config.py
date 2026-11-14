@@ -152,6 +152,7 @@ def test_default_sets() -> None:
         "Pictures and Movies",
         "WhatsApp media",
         "WhatsApp Business",
+        "WhatsApp chat backups",
         "Documents",
         "Downloads",
         "Recordings",
@@ -353,8 +354,8 @@ def test_sets_roundtrip_as_array_of_tables(tmp_path: Path) -> None:
     f = tmp_path / "config.toml"
     save_config(Config(), f)
     text = f.read_text()
-    assert text.count("[[backup.sets]]") == 9
-    assert text.count("shallow_paths") == 9
+    assert text.count("[[backup.sets]]") == 10
+    assert text.count("shallow_paths") == 10
     # `delete_roots` is a real key; only the legacy `backup.roots` must be gone.
     assert not any(line.startswith("roots") for line in text.splitlines())
     assert load_config(f) == (Config(), [])
@@ -590,7 +591,7 @@ def test_set_needs_paths_or_shallow_paths(tmp_path: Path) -> None:
     )
     cfg, w = load_config(f)
     assert [s.name for s in cfg.backup.sets] == DEFAULT_NAMES
-    assert len(cfg.backup.sets) == 9
+    assert len(cfg.backup.sets) == 10
     assert FALLBACK_WARNING in w
     assert any('("Bad").shallow_paths: "/etc"' in x for x in w)
 
@@ -623,11 +624,11 @@ def test_exclude_cannot_target_shallow_paths(tmp_path: Path) -> None:
         )
 
 
-def test_fallback_has_nine_sets_none_deletable(tmp_path: Path) -> None:
+def test_fallback_has_ten_sets_none_deletable(tmp_path: Path) -> None:
     f = tmp_path / "config.toml"
     f.write_text("[backup]\nsets = []\n")
     cfg, w = load_config(f)
-    assert len(cfg.backup.sets) == 9
+    assert len(cfg.backup.sets) == 10
     assert all(not s.deletable for s in cfg.backup.sets)
     assert FALLBACK_WARNING in w
 
@@ -675,6 +676,8 @@ FLOOR = [
     "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
     "/sdcard/WhatsApp/Databases",
     "/sdcard/WhatsApp/Backups",
+    "/sdcard/WhatsApp Business/Databases",
+    "/sdcard/WhatsApp Business/Backups",
 ]
 
 
@@ -799,7 +802,7 @@ def test_two_set_asides_in_the_same_second_keep_both(
 
 def test_default_sets_cannot_be_mutated() -> None:
     assert isinstance(DEFAULT_SETS, tuple)
-    assert len(DEFAULT_SETS) == 9
+    assert len(DEFAULT_SETS) == 10
     first = DEFAULT_SETS[0]
     with pytest.raises((ValidationError, TypeError, AttributeError)):
         first.name = "x"  # type: ignore[misc]
@@ -863,3 +866,17 @@ def test_exclude_is_matched_case_insensitively(tmp_path: Path) -> None:
             enabled=True,
             deletable=True,
         )
+
+
+def test_a_set_added_later_joins_a_saved_config_once() -> None:
+    from sift.core.config import join_added_sets
+
+    cfg = Config()
+    cfg.backup.sets = [s for s in cfg.backup.sets if s.name != "WhatsApp chat backups"]
+    assert join_added_sets(cfg, set()) == ["WhatsApp chat backups"]
+    added = cfg.backup.sets[-1]
+    assert added.enabled and not added.deletable
+    assert "/sdcard/WhatsApp/Databases" in added.paths
+    assert join_added_sets(cfg, set()) == []  # already there
+    cfg.backup.sets.pop()
+    assert join_added_sets(cfg, {"WhatsApp chat backups"}) == []  # the owner removed it

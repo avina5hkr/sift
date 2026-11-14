@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from sift.cleanup import archive
 from sift.cleanup.browse import Filters, level, load_rows, smart_lists, sort_key
-from sift.cleanup.errors import RestoreRefused
+from sift.cleanup.errors import ChatBackupKept, RestoreRefused
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.server.routes.cleanup import _device
@@ -147,3 +147,32 @@ def archive_restore(ctx: Ctx, body: ArchiveRestore) -> TaskOut:
             raise ApiError(409, "restore_refused", str(e)) from e
 
     return start_task(ctx, "restore", work)
+
+
+@router.get("/archive/chat-backups")
+def chat_backup_list(ctx: Ctx) -> dict[str, Any]:
+    """Saved WhatsApp chat backups in the backup folders, newest first per app and folder."""
+    from sift.cleanup import chat_backups
+
+    return {"copies": [chat_backups.as_dict(c) for c in chat_backups.listing(ctx)]}
+
+
+class ChatBackupDelete(BaseModel):
+    hashes: list[str] = Field(min_length=1, max_length=5000)
+    confirm: bool = False
+
+
+@router.post("/archive/chat-backups/delete")
+def chat_backup_delete(ctx: Ctx, body: ChatBackupDelete) -> dict[str, Any]:
+    """Delete older chat backup copies from every backup folder (the owner's explicit choice;
+    the newest and anything still on the phone are kept)."""
+    from sift.cleanup import chat_backups
+    from sift.server.routes.delete import _no_backup_running
+
+    if not body.confirm:
+        raise ApiError(409, "not_confirmed", "Confirm first.")
+    _no_backup_running(ctx)
+    try:
+        return chat_backups.delete(ctx, body.hashes)
+    except ChatBackupKept as e:
+        raise ApiError(409, "delete_refused", str(e)) from e

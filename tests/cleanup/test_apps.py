@@ -86,9 +86,15 @@ def test_p10_whatsapp_unlocks_only_with_a_fresh_backup_a_tick_and_its_name(rig: 
     assert uninstall(backup_done=True, typed_name="Whats App").status_code == 409  # wrong name
     for clear in (act(c, h, "clear-data", wa, action="clear_data"),):
         assert clear.status_code == 409  # clear data is protected the same way
+    not_saved = uninstall(backup_done=True, typed_name="whatsapp")
+    assert not_saved.status_code == 409 and "chat backups set" in not_saved.json()["message"]
     assert not [e for e in rig.transport.journal if e.op in ("uninstall", "clear_data")]
+    backed_up(rig, ["WhatsApp chat backups"])  # the chat backup is now safe on the Mac
+    media = uninstall(backup_done=True, typed_name="whatsapp")
+    assert media.status_code == 409 and "WhatsApp media" in media.json()["message"]
+    backed_up(rig, ["WhatsApp media"])  # and the media the uninstall would remove
     ok = uninstall(backup_done=True, typed_name="whatsapp")
-    assert ok.status_code == 200 and ok.json()["done"] == wa
+    assert ok.status_code == 200 and ok.json()["done"] == wa, ok.json()
     assert ok.json()["app_list"] and Path(ok.json()["app_list"][0]).read_text().startswith(
         "name,package"
     )
@@ -287,3 +293,49 @@ def test_the_app_list_csv_is_not_a_formula(rig: Rig) -> None:
     out = c.post("/api/apps/export", headers=h, json={}).json()
     text = Path(out["app_list"][0]).read_text()
     assert "'=HYPERLINK(1)" in text and ",=HYPERLINK" not in text
+
+
+def _wa_ready(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    phone_with_apps(rig)
+    _wa_backup(rig)
+    backed_up(rig, ["WhatsApp chat backups", "WhatsApp media"])
+
+
+def test_p10_the_guard_needs_the_ssd_plugged_in(rig: Rig) -> None:
+    _wa_ready(rig)
+    c, h = client(rig)
+    rig.ctx.config.backup.ssd_volume_uuid = "not-plugged-in"  # an SSD is now required
+    refused = _wa_ok(c, h, ["com.whatsapp"])
+    assert refused.status_code == 409 and "Plug in the SSD" in refused.json()["message"]
+    assert "com.whatsapp" in rig.transport.phone.apps
+
+
+def test_p10_a_quarantined_or_missing_copy_is_not_a_backup(rig: Rig) -> None:
+    _wa_ready(rig)
+    c, h = client(rig)
+    with rig.ctx.db.tx() as conn:
+        conn.execute(
+            "UPDATE replica SET rel_path = '.quarantine/2026-11-14/' || rel_path WHERE "
+            "content_hash IN (SELECT content_hash FROM phone_file WHERE remote_path LIKE "
+            "'%msgstore%')"
+        )
+    assert _wa_ok(c, h, ["com.whatsapp"]).status_code == 409
+    assert "com.whatsapp" in rig.transport.phone.apps
+
+
+def test_p10_unsaved_whatsapp_media_blocks_the_uninstall(rig: Rig) -> None:
+    _wa_ready(rig)
+    c, h = client(rig)
+    with rig.ctx.db.read() as conn:
+        rel = conn.execute(
+            "SELECT p.rel_path FROM phone_file p WHERE p.remote_path LIKE '%WhatsApp/Media/%' "
+            "AND p.state = 'done' LIMIT 1"
+        ).fetchone()
+    assert rel is not None
+    for f in rig.root.rglob("*"):  # one backed-up media file goes missing from the Mac
+        if f.is_file() and f.as_posix().endswith(str(rel[0])):
+            f.unlink()
+            break
+    refused = _wa_ok(c, h, ["com.whatsapp"])
+    assert refused.status_code == 409 and "not backed up" in refused.json()["message"]

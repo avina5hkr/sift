@@ -17,3 +17,7 @@ class ExecuteRefused(Exception):
 
 class RestoreRefused(Exception):
     pass
+
+
+class ChatBackupKept(Exception):
+    """A chat backup copy that may not be deleted now (newest, on the phone, drive missing)."""

@@ -15,7 +15,13 @@ from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.backup.verifier import NothingToRepairFrom
 from sift.cleanup.calibration import NothingToCalibrate
-from sift.cleanup.errors import ExecuteRefused, ManifestBlocked, RestoreRefused, RunBlocked
+from sift.cleanup.errors import (
+    ChatBackupKept,
+    ExecuteRefused,
+    ManifestBlocked,
+    RestoreRefused,
+    RunBlocked,
+)
 from sift.core.db import (
     DatabaseBusyError,
     DatabaseCorruptError,
@@ -41,6 +47,7 @@ from sift.device.transport import (
     RemoteError,
     TransportError,
 )
+from sift.health.bugreport import BugReportStopped
 from sift.server.errors import ApiError
 from sift.services.tasks import TaskBusy
 
@@ -69,6 +76,8 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (ManifestBlocked, "Sift did not delete anything: it could not save the delete list first."),
     (RunBlocked, "Sift could not check these files. Nothing was deleted."),
     (RestoreRefused, "Sift could not restore these files."),
+    (BugReportStopped, "The bug report was stopped."),
+    (ChatBackupKept, "Sift kept that chat backup."),
     (NothingToRepairFrom, "No good copy of this file is on another backup drive."),
     (SourceCorrupt, "A backed-up file no longer matches its checksum, so it was not copied."),
     (ScanNotPending, "That scan is no longer waiting for your confirmation."),

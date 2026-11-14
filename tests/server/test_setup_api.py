@@ -541,14 +541,14 @@ def phone_ctx(paths: AppPaths, tmp_path: Path) -> AppContext:
     return ctx
 
 
-def test_the_tree_lists_the_nine_default_sets_before_any_scan(phone_ctx: AppContext) -> None:
+def test_the_tree_lists_the_ten_default_sets_before_any_scan(phone_ctx: AppContext) -> None:
     tree = get(client_for(phone_ctx), "sets").json()
     assert tree["phone_connected"] is True and tree["scanning"] is False
     names = [s["name"] for s in tree["sets"]]
-    assert len(names) == 9 and names[0] == "Camera" and names[-1] == "Loose files"
+    assert len(names) == 10 and names[0] == "Camera" and names[-1] == "Loose files"
     assert all(s["files"] is None and s["bytes"] is None for s in tree["sets"])
     ticked = {s["name"]: s["enabled"] for s in tree["sets"]}
-    assert ticked["Downloads"] is False and sum(ticked.values()) == 8
+    assert ticked["Downloads"] is False and sum(ticked.values()) == 9
     camera = next(s for s in tree["sets"] if s["name"] == "Camera")
     assert camera["paths"] == ["/sdcard/DCIM"]
     loose = next(s for s in tree["sets"] if s["name"] == "Loose files")
@@ -602,7 +602,7 @@ def test_ticking_an_unknown_set_is_422_and_changes_nothing(phone_ctx: AppContext
     resp = post(client, "sets", {"enabled": ["Camera", "Nope"]})
     assert resp.status_code == 422 and resp.json()["code"] == "unknown_set"
     assert "Nope" in resp.json()["message"]
-    assert sum(s.enabled for s in phone_ctx.config.backup.sets) == 8
+    assert sum(s.enabled for s in phone_ctx.config.backup.sets) == 9
 
 
 def test_at_least_one_set_must_be_ticked(phone_ctx: AppContext) -> None:

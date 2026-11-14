@@ -205,6 +205,21 @@ _DEFAULT_SET_LIST: list[BackupSet] = [
         deletable=True,
     ),
     BackupSet(
+        name="WhatsApp chat backups",
+        paths=[
+            "/sdcard/Android/media/com.whatsapp/WhatsApp/Databases",
+            "/sdcard/Android/media/com.whatsapp/WhatsApp/Backups",
+            "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Databases",
+            "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
+            "/sdcard/WhatsApp/Databases",
+            "/sdcard/WhatsApp/Backups",
+            "/sdcard/WhatsApp Business/Databases",
+            "/sdcard/WhatsApp Business/Backups",
+        ],
+        enabled=True,
+        deletable=False,  # never freed from the phone (NEVER_DELETE_FLOOR); kept in the backup
+    ),
+    BackupSet(
         name="Documents",
         paths=["/sdcard/Documents"],
         enabled=True,
@@ -392,6 +407,8 @@ NEVER_DELETE_FLOOR: tuple[str, ...] = (
     "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business/Backups",
     "/sdcard/WhatsApp/Databases",
     "/sdcard/WhatsApp/Backups",
+    "/sdcard/WhatsApp Business/Databases",
+    "/sdcard/WhatsApp Business/Backups",
 )
 
 
@@ -651,6 +668,23 @@ def _load_sets(raw: object, warnings: list[str]) -> list[BackupSet]:
         warnings.append(_FALLBACK_WARNING)
         return _fallback_sets()
     return sets
+
+
+# Built-in sets added after the first release; `join_added_sets` brings them into an owner's
+# saved config once, at app start.
+ADDED_LATER = ("WhatsApp chat backups",)
+
+
+def join_added_sets(cfg: Config, already: set[str]) -> list[str]:
+    """Append each ADDED_LATER set missing from `cfg` and not in `already` (the names joined
+    before, so a set the owner removed stays removed). Returns the names added."""
+    have = {_name_key(s.name) for s in cfg.backup.sets}
+    added = []
+    for d in DEFAULT_SETS:
+        if d.name in ADDED_LATER and d.name not in already and _name_key(d.name) not in have:
+            cfg.backup.sets.append(d.to_backup_set())
+            added.append(d.name)
+    return added
 
 
 _SKIP_NAME_LISTS = ("skip_hidden_folders", "skip_name_prefixes", "skip_name_suffixes")

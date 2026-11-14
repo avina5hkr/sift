@@ -17,7 +17,13 @@ from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.backup.verifier import NothingToRepairFrom
 from sift.cleanup.calibration import NothingToCalibrate
-from sift.cleanup.errors import ExecuteRefused, ManifestBlocked, RestoreRefused, RunBlocked
+from sift.cleanup.errors import (
+    ChatBackupKept,
+    ExecuteRefused,
+    ManifestBlocked,
+    RestoreRefused,
+    RunBlocked,
+)
 from sift.core.db import (
     DatabaseBusyError,
     DatabaseCorruptError,
@@ -43,6 +49,7 @@ from sift.device.transport import (
     RemoteError,
     TransportError,
 )
+from sift.health.bugreport import BugReportStopped
 from sift.server.errors import ApiError
 from sift.services import plainwords
 from sift.services.plainwords import describe
@@ -71,6 +78,8 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "ManifestBlocked": ManifestBlocked,
     "RunBlocked": RunBlocked,
     "RestoreRefused": RestoreRefused,
+    "BugReportStopped": BugReportStopped,
+    "ChatBackupKept": ChatBackupKept,
     "NothingToRepairFrom": NothingToRepairFrom,
     "TaskBusy": TaskBusy,
     "ScanNotPending": ScanNotPending,

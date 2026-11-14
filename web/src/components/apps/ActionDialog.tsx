@@ -139,6 +139,11 @@ export function ActionDialog({ action, rows, onClose, onFinished }: Props) {
       {whatsapps.map((r) => (
         <fieldset key={r.package} className="flex flex-col gap-2 rounded-md border border-neutral-200 p-3 text-sm dark:border-neutral-700">
           <legend className="px-1 font-medium">{r.name}</legend>
+          <p className="text-neutral-600 dark:text-neutral-400">
+            This removes {r.name}'s chat backup from the phone too. Sift goes ahead only after the
+            newest chat backup is copied to your backup folders (the WhatsApp chat backups set),
+            and keeps every copy there until you delete it.
+          </p>
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
