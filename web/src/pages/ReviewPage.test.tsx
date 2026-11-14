@@ -125,6 +125,15 @@ test('a group shows the keeper labelled KEEP with no checkbox, and the copies wi
   expect(screen.getAllByText('1.0 MB').length).toBeGreaterThan(0)
 })
 
+test('every picture shows its folder and name under it, with the full path as a tooltip', async () => {
+  groups = [group(2)]
+  await open()
+  const caption = within(screen.getAllByTestId('copy')[0] as HTMLElement).getByText(/^DCIM\/Camera\/IMG_\d+\.jpg$/)
+  expect(caption).toHaveClass('truncate', 'text-xs')
+  expect(caption).toHaveAttribute('title', expect.stringMatching(/^\/sdcard\/DCIM\/Camera\/IMG_\d+\.jpg$/))
+  expect(within(screen.getByTestId('keeper')).getByText(/^DCIM\/Camera\//)).toBeInTheDocument()
+})
+
 test('a video is a tile with a VIDEO badge and no thumbnail fetch', async () => {
   groups = [group(1, { kind: 'video' })]
   await open()

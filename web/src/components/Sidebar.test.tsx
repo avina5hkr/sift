@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router'
 import { expect, test } from 'vitest'
 import { Sidebar } from './Sidebar'
 
-test('lists the five areas in order', () => {
+test('lists the areas in order', () => {
   render(
     <MemoryRouter>
       <Sidebar />
@@ -13,7 +13,7 @@ test('lists the five areas in order', () => {
     within(screen.getByRole('navigation', { name: 'Main' }))
       .getAllByRole('link')
       .map((l) => l.textContent),
-  ).toEqual(['Backup', 'Cleanup', 'Quarantine', 'Logs', 'Settings'])
+  ).toEqual(['Backup', 'Cleanup', 'Browse', 'Archive', 'Quarantine', 'Logs', 'Settings'])
 })
 
 test('marks the current area with aria-current', () => {

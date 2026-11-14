@@ -13,11 +13,11 @@ export function TeachCard() {
   const navigate = useNavigate()
   const [q, setQ] = useState('')
   const clusters = useQuery({
-    queryKey: ['cleanup', 'clusters'],
-    queryFn: () => apiFetch<ClustersResponse>('/api/cleanup/clusters'),
+    queryKey: ['cleanup', 'clusters', 'counts'],
+    queryFn: () => apiFetch<ClustersResponse>('/api/cleanup/clusters?limit=1'),
     retry: false,
   })
-  const groups = clusters.data?.clusters.length
+  const groups = clusters.data ? clusters.data.to_mark + clusters.data.marked : undefined
   const search = () => {
     const text = q.trim()
     if (text) navigate(`/cleanup/search?q=${encodeURIComponent(text)}`)

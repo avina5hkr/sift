@@ -138,6 +138,25 @@ def copies_problem(ctx: AppContext) -> str | None:
     return None
 
 
+def _safe_key(path: str) -> str | None:
+    key = phone_path_key(path)
+    parts = key.split("/")[1:]
+    if any(part in ("", ".", "..") for part in parts) or "\n" in key:
+        return None
+    return key
+
+
+def in_browse_roots(cfg: Config, path: str) -> bool:
+    """Browse and delete (spec 10B): anywhere under /sdcard except the built-in never-delete
+    list and the owner's additions (Download and Documents are allowed here, unlike the
+    suggestion tabs)."""
+    key = _safe_key(path)
+    if key is None:
+        return False
+    never = [phone_path_key(p) for p in (*NEVER_DELETE_FLOOR, *cfg.browse.never_delete_extra)]
+    return key.startswith("/sdcard/") and not _under(key, never)
+
+
 def in_delete_roots(cfg: Config, path: str) -> bool:
     key = phone_path_key(path)
     parts = key.split("/")[1:]
@@ -332,8 +351,10 @@ def run_preflight(
     files = [
         _File(int(r[0]), from_db(str(r[1])), str(r[1]), r[2], int(r[3]), int(r[4])) for r in rows
     ]
+    from sift.cleanup.labels_io import apply_pending
     from sift.cleanup.quarantine import revive
 
+    apply_pending(ctx.db)  # a loaded "protected" label counts before anything is checked
     revive(ctx)  # content back on a phone leaves quarantine first
     try:
         if session is None:
@@ -370,7 +391,7 @@ def run_preflight(
             f.result = "gone"
         elif source == "cleanup" and r[7] != 1:
             f.result = "not_selected"
-        elif not in_delete_roots(cfg, f.path):
+        elif not (in_browse_roots if source == "browse" else in_delete_roots)(cfg, f.path):
             f.result = "outside_roots"
     for pid, why in _replicas_ok(ctx, alive()).items():  # (a)
         next(f for f in files if f.pid == pid).result = why
@@ -415,7 +436,7 @@ def run_preflight(
     except TransportError as e:
         _finish(ctx, run_id, files, blocked=f"The phone stopped answering: {e}")
         return {"blocked": len(files)}
-    _finish(ctx, run_id, files)
+    _finish(ctx, run_id, files, source=source)
     counts: dict[str, int] = {}
     for f in files:
         counts[f.result] = counts.get(f.result, 0) + 1
@@ -429,6 +450,7 @@ def _finish(
     *,
     blocked: str | None = None,
     stopped: bool = False,
+    source: str = "",
 ) -> None:
     if blocked is None and not stopped:  # one run deletes at most max_delete_per_run files
         cap = ctx.config.cleanup.max_delete_per_run
@@ -453,7 +475,16 @@ def _finish(
                 reason,
                 int(time.time()),
                 len(passed),
-                int(len(passed) > TYPED_ABOVE),
+                int(
+                    len(passed) > TYPED_ABOVE
+                    or (
+                        source == "browse"
+                        and (
+                            len(passed) > ctx.config.browse.typed_confirmation_over_files
+                            or any(not in_delete_roots(ctx.config, f.path) for f in passed)
+                        )
+                    )
+                ),
                 selection_hash([f.pid for f in passed]),
                 run_id,
             ),

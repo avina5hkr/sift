@@ -3,6 +3,8 @@ import { NavLink } from 'react-router'
 const AREAS = [
   { to: '/backup', label: 'Backup' },
   { to: '/cleanup', label: 'Cleanup' },
+  { to: '/browse', label: 'Browse' },
+  { to: '/archive', label: 'Archive' },
   { to: '/quarantine', label: 'Quarantine' },
   { to: '/logs', label: 'Logs' },
   { to: '/settings', label: 'Settings' },

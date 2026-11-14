@@ -69,6 +69,24 @@ function Failed({ items }: { items: DeleteItem[] }) {
   )
 }
 
+/** Browse: files in the chosen folders that are not backed up and so are left out. */
+function Skipped({ paths }: { paths: string[] }) {
+  if (paths.length === 0) return null
+  return (
+    <details className="text-sm">
+      <summary className="cursor-pointer">
+        {plural(paths.length, 'file', 'files')} in these folders {paths.length === 1 ? 'is' : 'are'} not backed up and will be skipped
+      </summary>
+      <ul className={`mt-1 max-h-48 list-none overflow-auto break-all pl-4 text-xs ${MUTED}`}>
+        {paths.slice(0, SHOWN).map((p) => (
+          <li key={p}>{p}</li>
+        ))}
+        {paths.length > SHOWN && <li>and {formatCount(paths.length - SHOWN)} more</li>}
+      </ul>
+    </details>
+  )
+}
+
 function Result({ flow, run }: { flow: DeleteRunApi; run: DeleteRun }) {
   const canDelete = run.state === 'ready' && run.passed > 0
   let title: string
@@ -82,6 +100,7 @@ function Result({ flow, run }: { flow: DeleteRunApi; run: DeleteRun }) {
       {canDelete && run.items.some((i) => i.check !== 'ok') && (
         <p className={`text-sm ${MUTED}`}>The other files will be left alone.</p>
       )}
+      <Skipped paths={flow.skipped} />
       <Failed items={run.items} />
       <div className="flex flex-wrap justify-end gap-2">
         <button type="button" onClick={flow.close} className={BTN}>
@@ -175,7 +194,8 @@ export function DeleteFlow({ flow }: { flow: DeleteRunApi }) {
         busy={flow.executing}
         error={flow.error}
         outdated={flow.errorCode != null && OUTDATED.includes(flow.errorCode)}
-        onConfirm={(typed) => void flow.execute(typed)}
+        chooseDisposition={run.source === 'browse'}
+        onConfirm={(typed, disposition) => void flow.execute(typed, disposition)}
         onCancel={flow.closeConfirm}
         onRecheck={flow.recheck}
       />

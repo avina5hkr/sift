@@ -439,6 +439,17 @@ class FakeTransport:
                 raise RemoteError(f"cannot write {remote}: permission denied", remote)
             self.phone.add_file(remote, local.read_bytes(), mtime=mtime)
 
+    def remove_dir(self, path: str) -> None:
+        self._begin("remove_dir", path, mutating=True)
+        with self._slot(self.limits.delete_s):
+            self._shell("remove_dir")
+            entry = self.phone.entry(path)
+            if entry is None or not entry.is_dir:
+                raise RemoteError(f"cannot remove {path}: not a folder", path)
+            if self._list(path):
+                raise RemoteError(f"cannot remove {path}: folder not empty", path)
+            self.phone.remove(path)
+
     def media_rescan(self, paths: list[str]) -> bool:
         self._record_each("media_rescan", paths, mutating=True)
         self.check_online()

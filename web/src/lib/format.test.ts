@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { formatAgo, formatBytes, formatCount, formatDuration, formatEta, formatSpeed } from './format'
+import { formatAgo, formatBytes, formatCount, formatDuration, formatEta, formatSpeed, shortPath } from './format'
 
 test('formatBytes', () => {
   expect(formatBytes(0)).toBe('0 B')
@@ -32,4 +32,14 @@ test('formatAgo says how long ago in plain words', () => {
   expect(formatAgo(1000, 1000 + 5 * 60)).toBe('5 minutes ago')
   expect(formatAgo(1000, 1000 + 3600)).toBe('1 hour ago')
   expect(formatAgo(1000, 1000 + 3 * 86_400)).toBe('3 days ago')
+})
+
+test('shortPath drops the storage root and shortens the WhatsApp media folder', () => {
+  expect(shortPath('/sdcard/DCIM/Camera/20240101_1.jpg')).toBe('DCIM/Camera/20240101_1.jpg')
+  expect(shortPath('/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/IMG-2024-1.jpg')).toBe(
+    'WhatsApp/WhatsApp Images/IMG-2024-1.jpg',
+  )
+  expect(shortPath('/sdcard/WhatsApp/Media/WhatsApp Images/a.jpg')).toBe('WhatsApp/Media/WhatsApp Images/a.jpg')
+  expect(shortPath('/sdcard/a.jpg')).toBe('a.jpg')
+  expect(shortPath('/mnt/other/a.jpg')).toBe('/mnt/other/a.jpg')
 })

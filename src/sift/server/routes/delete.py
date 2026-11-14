@@ -35,23 +35,30 @@ def _no_backup_running(ctx: Ctx) -> None:
 
 
 class PreflightRequest(BaseModel):
-    source: Literal["cleanup", "analysis"]
-    ids: list[int] = Field(default_factory=list, max_length=50_000)  # cleanup: the ticked files
+    source: Literal["cleanup", "analysis", "browse"]
+    ids: list[int] = Field(default_factory=list, max_length=50_000)  # cleanup/browse: files
     sets: list[str] = Field(default_factory=list)  # analysis: the sets to free
+    folders: list[str] = Field(default_factory=list, max_length=500)  # browse: whole folders
+    filters: dict[str, Any] = Field(default_factory=dict)  # browse: the filters shown
 
 
 class PreflightStarted(BaseModel):
     run_id: int
     task: TaskOut
+    skipped: list[str] = []  # browse: files in the chosen folders that are not backed up
 
 
 @router.post("/delete/preflight")
 def start_preflight(ctx: Ctx, body: PreflightRequest) -> PreflightStarted:
     device_id = _device(ctx)
     _no_backup_running(ctx)
+    skipped: list[str] = []
     if body.source == "analysis":
         ids = ids_for_sets(ctx, device_id, body.sets)
         disposition = "archive"
+    elif body.source == "browse":
+        ids, skipped = browse_selection(ctx, device_id, body.ids, body.folders, body.filters)
+        disposition = ctx.config.browse.disposition_default
     else:
         with ctx.db.read() as conn:  # only files the owner ticked count
             ticked = {
@@ -73,7 +80,49 @@ def start_preflight(ctx: Ctx, body: PreflightRequest) -> PreflightStarted:
             on_progress=control.progress,
         )
 
-    return PreflightStarted(run_id=run_id, task=start_task(ctx, "preflight", work))
+    return PreflightStarted(
+        run_id=run_id, task=start_task(ctx, "preflight", work), skipped=skipped[:1000]
+    )
+
+
+def browse_selection(
+    ctx: Ctx,
+    device_id: int,
+    ids: list[int],
+    folders: list[str],
+    filters: dict[str, Any] | None = None,
+) -> tuple[list[int], list[str]]:
+    """Files and whole folders from Browse; a folder means the files in it that the owner saw
+    (the same filters as the listing). Files not backed up are skipped and named."""
+    import time
+
+    from sift.cleanup.browse import Filters, backed_up, load_rows, matches
+    from sift.core.config import phone_path_key
+
+    f = filters or {}
+    shown = Filters(
+        str(f.get("q") or ""), str(f.get("kind") or ""), int(f.get("older_days") or 0),
+        int(f.get("min_bytes") or 0), str(f.get("origin") or ""), str(f.get("status") or ""),
+    )  # fmt: skip
+    for folder in folders:
+        parts = phone_path_key(folder).strip("/").split("/")
+        if len(parts) < 2 or parts[0] != "sdcard" or any(p in ("", ".", "..") for p in parts):
+            raise ApiError(422, "bad_folder", f"Sift cannot delete the folder {folder}.")
+    rows = load_rows(ctx.db, ctx.config, device_id)
+    wanted = set(ids)
+    prefixes = [phone_path_key(f).rstrip("/") + "/" for f in folders]
+    now = time.time()
+    chosen, skipped = [], []
+    for r in rows:
+        key = phone_path_key(r.path)
+        in_folder = any(key.startswith(p) for p in prefixes) and matches(shown, r, now)
+        if r.id not in wanted and not in_folder:
+            continue
+        if backed_up(ctx.config, r.status):
+            chosen.append(r.id)
+        else:
+            skipped.append(r.path)
+    return chosen, skipped
 
 
 @router.get("/delete/runs/{run_id}")
@@ -102,6 +151,7 @@ class ExecuteRequest(BaseModel):
     run_id: int
     confirm: bool = False
     typed_count: int | None = None
+    disposition: Literal["archive", "quarantine"] | None = None  # browse: chosen in the dialog
 
 
 @router.post("/delete/execute")
@@ -114,6 +164,12 @@ def start_execute(ctx: Ctx, body: ExecuteRequest) -> TaskOut:
         raise ApiError(409, e.code, str(e)) from e
 
     def work(control: TaskControl) -> dict[str, Any]:
+        if body.disposition is not None:  # chosen in the dialog (browse only)
+            with ctx.db.tx() as conn:
+                conn.execute(
+                    "UPDATE delete_run SET disposition = ? WHERE id = ? AND source = 'browse'",
+                    (body.disposition, body.run_id),
+                )
         try:
             return execute(
                 ctx,

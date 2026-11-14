@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiFetch } from '../../lib/api'
 import { useEventStore } from '../../lib/events'
-import type { DeleteBody, DeleteRun, TaskEvent, TaskKind } from '../../lib/types'
+import type { DeleteBody, DeleteRun, Disposition, TaskEvent, TaskKind } from '../../lib/types'
 import { plain, post } from '../../pages/Wizard/request'
 
 /** Where the delete flow is: nothing, the checks, the result of the checks, deleting, or the end. */
@@ -26,6 +26,7 @@ export function useDeleteRun({ onFinished }: Options = {}) {
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<string | null>(null)
   const [hint, setHint] = useState(0)
+  const [skipped, setSkipped] = useState<string[]>([])
   const lastBody = useRef<DeleteBody | null>(null)
 
   const kind: TaskKind = stage === 'checks' ? 'preflight' : 'delete'
@@ -86,11 +87,13 @@ export function useDeleteRun({ onFinished }: Options = {}) {
       setStage('checks')
       setConfirming(false)
       setExecuting(false)
-      setHint(body.source === 'cleanup' ? body.ids.length : 0)
+      setHint(body.source === 'cleanup' || body.source === 'browse' ? body.ids.length : 0)
+      setSkipped([])
       setStarting(true)
       try {
-        const started = await post<{ run_id: number; task: TaskEvent }>('/api/delete/preflight', body)
+        const started = await post<{ run_id: number; task: TaskEvent; skipped?: string[] }>('/api/delete/preflight', body)
         useEventStore.setState({ task: started.task })
+        setSkipped(started.skipped ?? [])
         setRunId(started.run_id)
       } catch (e) {
         fail(e)
@@ -113,7 +116,7 @@ export function useDeleteRun({ onFinished }: Options = {}) {
   }, [])
 
   const execute = useCallback(
-    async (typed?: number) => {
+    async (typed?: number, disposition?: Disposition) => {
       if (runId == null) return
       setExecuting(true)
       setError(null)
@@ -123,6 +126,7 @@ export function useDeleteRun({ onFinished }: Options = {}) {
           run_id: runId,
           confirm: true,
           ...(typed != null ? { typed_count: typed } : {}),
+          ...(disposition ? { disposition } : {}),
         })
         useEventStore.setState({ task: t })
         setHint(run?.passed ?? 0)
@@ -155,6 +159,8 @@ export function useDeleteRun({ onFinished }: Options = {}) {
     error,
     errorCode,
     checksFailed,
+    /** Browse: files inside the chosen folders that are not backed up and so are left out. */
+    skipped,
     confirming,
     executing,
     stopping,

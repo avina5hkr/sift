@@ -47,9 +47,6 @@ export const GroupRow = memo(function GroupRow({ group, cols, top, height, check
       <div className="flex" style={{ paddingLeft: PAD, paddingRight: PAD, gap: COLUMN_GAP }}>
         <div className="shrink-0" style={{ width: KEEPER_W }}>
           <Tile item={keeper} checked={false} focused={focusId === keeper.id} keeper onOpen={onOpen} />
-          <p className="truncate pt-1 text-xs text-neutral-600 dark:text-neutral-400" style={{ height: 28 }} title={keeper.path}>
-            {baseName(keeper.path)}
-          </p>
         </div>
         <div className="grid content-start" style={{ gridTemplateColumns: `repeat(${cols}, ${TILE}px)`, gap: GAP }}>
           {group.copies.map((c) => (

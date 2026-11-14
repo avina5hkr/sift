@@ -210,7 +210,7 @@ export type ReaderTestResult = {
 }
 
 // The `task` event and TaskOut: one long job (verify, adopt, rebuild, confirm, analyse) at a time.
-export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model' | 'preflight' | 'delete'
+export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model' | 'preflight' | 'delete' | 'restore'
 export type TaskEvent = {
   kind: TaskKind
   state: 'running' | 'done' | 'stopped' | 'failed'
@@ -361,6 +361,11 @@ export type ModelStatus = { key: string; installed: boolean; size_bytes: number 
 // Mirrors GET /api/cleanup/clusters, /clusters/{id} and /search.
 export type ClusterLabel = 'junk' | 'keep'
 export type ClusterTag = 'greeting' | 'quote' | 'meme' | 'devotional' | 'other'
+export type Suggestion = {
+  label: ClusterLabel | null
+  reason: string
+  source: 'built-in' | 'built-in + your teaching' | 'your teaching'
+}
 export type Cluster = {
   id: number
   size: number
@@ -368,8 +373,21 @@ export type Cluster = {
   sample_ids: number[]
   sample_text: string | null
   label: ClusterLabel | null
+  /** Members that have a label. */
+  marked: number
+  suggestion: Suggestion | null
 }
-export type ClustersResponse = { images: number; covered: number; clusters: Cluster[] }
+export type ClusterSection = 'to_mark' | 'marked'
+export type ClustersResponse = {
+  images: number
+  covered: number
+  to_mark: number
+  marked: number
+  offset: number
+  clusters: Cluster[]
+}
+// Mirrors POST /api/labels/import.
+export type ImportResult = { read: number; applied: number; waiting: number }
 export type PictureItem = { id: number; path: string; content_hash: string; score: number; label: ClusterLabel | null }
 
 // Mirrors GET /api/delete/runs/{id}.
@@ -403,7 +421,17 @@ export type DeleteRun = {
   quarantine_days?: number
   items: DeleteItem[]
 }
-export type DeleteBody = { source: 'cleanup'; ids: number[] } | { source: 'analysis'; sets: string[] }
+export type DeleteBody =
+  | { source: 'cleanup'; ids: number[] }
+  | { source: 'analysis'; sets: string[] }
+  | {
+      source: 'browse'
+      ids: number[]
+      folders: string[]
+      filters?: { q: string; kind: string; older_days: number; min_bytes: number; status: string }
+    }
+/** What happens to the backup copy of a file deleted from Browse. */
+export type Disposition = 'archive' | 'quarantine'
 
 // Mirrors GET /api/quarantine and GET /api/cleanup/ready.
 export type QuarantineEntry = {
@@ -415,3 +443,47 @@ export type QuarantineEntry = {
   purge_after: number
 }
 export type ReadySet = { set_name: string; files: number; bytes: number; confirmed_at: number }
+
+// Mirrors GET /api/browse and /api/browse/lists.
+export type BrowseStatus = 'mac_ssd' | 'mac_only' | 'ssd_only' | 'not_backed_up' | 'changed'
+export type BrowseFolder = {
+  name: string
+  path: string
+  size: number
+  files: number
+  mtime: number
+  status: Partial<Record<BrowseStatus, number>>
+}
+export type BrowseFile = {
+  id: number
+  name: string
+  path: string
+  size: number
+  mtime: number
+  kind: string
+  origin: string
+  status: BrowseStatus
+}
+export type BrowsePage = {
+  path: string
+  crumbs: string[]
+  folders: BrowseFolder[]
+  files: BrowseFile[]
+  total_files: number
+  total_size: number
+}
+export type SmartList = { key: string; title: string; files: number; bytes: number }
+export type SmartListPage = { key: string; title: string; total_files: number; files: BrowseFile[] }
+
+// Mirrors GET /api/archive and /api/archive/destinations.
+export type ArchiveDestination = { id: number; kind: 'mac' | 'ssd'; root: string }
+export type ArchiveFolder = { name: string; rel_path: string; size: number; files: number }
+export type ArchiveFile = {
+  rel_path: string
+  name: string
+  size: number
+  content_hash: string
+  phone_path: string | null
+  on_phone: boolean
+}
+export type ArchiveListing = { dest: number; path: string; folders: ArchiveFolder[]; files: ArchiveFile[] }

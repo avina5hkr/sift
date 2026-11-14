@@ -161,3 +161,10 @@ test('when pre-checking is not allowed, a line links to Calibration', async () =
   await userEvent.click(screen.getByRole('link', { name: 'Calibration' }))
   expect(await screen.findByText('The calibration screen')).toBeInTheDocument()
 })
+
+test('each file shows its folder and name, shortened, with the full path as a tooltip', async () => {
+  renderJunk()
+  const first = (await screen.findAllByTestId('junk-item'))[0] as HTMLElement
+  const caption = within(first).getByText(/^WhatsApp\/Media\/IMG-\d+\.jpg$/)
+  expect(caption).toHaveAttribute('title', expect.stringMatching(/^\/sdcard\/WhatsApp\/Media\/IMG-\d+\.jpg$/))
+})

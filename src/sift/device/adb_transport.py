@@ -907,6 +907,15 @@ class AdbTransport:
         if written is None or written.size != size:
             raise RemoteError(f"The phone did not keep all of {remote}.", remote)
 
+    def remove_dir(self, path: str) -> None:
+        """`rmdir --` one folder: the phone refuses a folder that is not empty."""
+        _encode_path(path)
+        out = self._exec(f"rmdir -- {shlex.quote(path)} 2>&1; echo rc=$?", self.limits.stat_s)
+        text = out.decode("utf-8", "replace").strip()
+        if not text.endswith("rc=0"):
+            message = text.rsplit("rc=", 1)[0].strip() or "the phone refused"
+            raise RemoteError(f"Could not remove {path}: {message}", path)
+
     def media_rescan(self, paths: list[str]) -> bool:
         """Ask the media scanner to look at `paths` again (best effort; F4)."""
         if not paths:

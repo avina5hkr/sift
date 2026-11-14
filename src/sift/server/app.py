@@ -5,6 +5,7 @@ from sift.core.context import AppContext
 from sift.server.errors import install_error_handlers
 from sift.server.routes import (
     backup,
+    browse,
     cleanup,
     delete,
     devices,
@@ -38,6 +39,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.include_router(teach.router, prefix="/api")
     app.include_router(junk.router, prefix="/api")
     app.include_router(delete.router, prefix="/api")
+    app.include_router(browse.router, prefix="/api")
     if testhooks.flag("SIFT_TEST_PHONE_CONTROL"):
         app.include_router(testphone.router, prefix="/api")  # the browser tests only
     mount_web(app, ctx.web_dist)

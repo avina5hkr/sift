@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { ReasonButton } from '../components/backup/ReasonButton'
 import { apiFetch } from '../lib/api'
 import { baseName, formatBytes, formatCount, formatDay, formatWhen } from '../lib/format'
@@ -40,7 +41,11 @@ export default function QuarantinePage() {
     <div className="flex max-w-4xl flex-col gap-4 p-6">
       <h1 className="text-xl font-semibold">Quarantine</h1>
       <p className="text-sm text-neutral-600 dark:text-neutral-400">
-        Files you deleted from a review wait here for a while. Restore them if you change your mind. After the date shown they are removed for good.
+        Files you deleted from a review wait here for a while. Restore them if you change your mind. After the date shown they are removed for good. Files you chose to keep are in the{' '}
+        <Link to="/archive" className="underline">
+          Archive
+        </Link>
+        .
       </p>
       {list.error && <p role="alert" className="text-sm">{plain(list.error)}</p>}
       {message && (

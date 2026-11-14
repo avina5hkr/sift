@@ -166,9 +166,13 @@ def test_teach_the_app_and_search_over_the_api(rig) -> None:
             ).json()["labelled"]
             >= 4
         )
-        assert (
-            client.get("/api/cleanup/clusters", headers=H).json()["clusters"][0]["label"] == "junk"
-        )
+        # the group moves from "to mark" to "marked"
+        marked = client.get("/api/cleanup/clusters?section=marked", headers=H).json()
+        assert marked["marked"] >= 1 and marked["clusters"][0]["label"] == "junk"
+        assert card["id"] not in {
+            c["id"] for c in client.get("/api/cleanup/clusters", headers=H).json()["clusters"]
+        }
+        assert card["suggestion"] is not None  # a built-in guess, before any teaching
         # a picture labelled on its own keeps its label when its group is labelled
         own = members[-1]["content_hash"]
         client.post("/api/labels", headers=H, json={"hashes": [own], "label": "keep"})
