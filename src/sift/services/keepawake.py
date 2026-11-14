@@ -22,7 +22,8 @@ log = logging.getLogger("sift.services")
 
 STAY_ON = "stay_on_while_plugged_in"
 STAY_ON_ALL = "3"  # AC and USB
-SETTING_KEY = "phone_stay_on_previous"
+SETTING_KEY = "phone_stay_on_previous"  # one row per phone: phone_stay_on_previous:<uuid>
+_phone_lock = threading.Lock()  # saving, setting and restoring the phone's value never interleave
 
 Spawn = Callable[[list[str]], Any]  # returns an object with terminate()
 
@@ -69,24 +70,33 @@ class KeepAwake:
         if mac is not None:
             with contextlib.suppress(Exception):
                 mac.terminate()
+                mac.wait(timeout=5)
+        with self._lock:
+            if self._count:  # a new job started meanwhile: it keeps the phone awake
+                return
         restore_leftover(self._ctx)
 
     def _phone_on(self) -> None:
         session = _session(self._ctx)
         if session is None:
             return
-        try:
-            previous = session.transport.global_setting(STAY_ON, None)
-            if previous is None:
-                return
-            with self._ctx.db.tx() as conn:  # saved first, so a crash can be repaired
-                conn.execute(
-                    "INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)",
-                    (SETTING_KEY, f"{session.device_uuid}|{previous}"),
-                )
-            session.transport.global_setting(STAY_ON, STAY_ON_ALL)
-        except Exception as e:
-            log.info("Could not keep the phone awake: %s", e)
+        key = f"{SETTING_KEY}:{session.device_uuid}"
+        with _phone_lock:
+            try:
+                with self._ctx.db.read() as conn:
+                    saved = conn.execute("SELECT 1 FROM setting WHERE key = ?", (key,)).fetchone()
+                if saved is None:  # an earlier value still saved is the phone's real one
+                    previous = session.transport.global_setting(STAY_ON, None)
+                    if previous is None:
+                        return
+                    with self._ctx.db.tx() as conn:  # saved first, so a crash can be repaired
+                        conn.execute(
+                            "INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)",
+                            (key, previous),
+                        )
+                session.transport.global_setting(STAY_ON, STAY_ON_ALL)
+            except Exception as e:
+                log.info("Could not keep the phone awake: %s", e)
 
 
 def _session(ctx: AppContext) -> Any:
@@ -94,24 +104,29 @@ def _session(ctx: AppContext) -> Any:
 
 
 def restore_leftover(ctx: AppContext) -> bool:
-    """Put the phone's stay-awake setting back if Sift changed it (after a job, or after a
-    crash once the same phone is connected). True when nothing is left to restore."""
-    with ctx.db.read() as conn:
-        row = conn.execute("SELECT value FROM setting WHERE key = ?", (SETTING_KEY,)).fetchone()
-    if row is None:
-        return True
-    uuid, _, previous = str(row[0]).partition("|")
+    """Put the connected phone's stay-awake setting back if Sift changed it (after a job, or
+    after a crash). True when no phone has a value left to restore."""
     session = _session(ctx)
-    if session is None or session.device_uuid != uuid:
+    with _phone_lock:
+        with ctx.db.read() as conn:
+            rows = conn.execute(
+                "SELECT key, value FROM setting WHERE key LIKE ?", (f"{SETTING_KEY}:%",)
+            ).fetchall()
+        if not rows:
+            return True
+        mine = f"{SETTING_KEY}:{session.device_uuid}" if session is not None else None
+        for key, previous in rows:
+            if key != mine:
+                continue  # another phone's value waits until that phone is connected
+            try:
+                session.transport.global_setting(STAY_ON, str(previous))
+            except Exception as e:
+                log.info("Could not restore the phone's stay-awake setting: %s", e)
+                return False
+            with ctx.db.tx() as conn:
+                conn.execute("DELETE FROM setting WHERE key = ?", (key,))
+            return len(rows) == 1
         return False
-    try:
-        session.transport.global_setting(STAY_ON, previous)
-    except Exception as e:
-        log.info("Could not restore the phone's stay-awake setting: %s", e)
-        return False
-    with ctx.db.tx() as conn:
-        conn.execute("DELETE FROM setting WHERE key = ?", (SETTING_KEY,))
-    return True
 
 
 def restore_at_launch(ctx: AppContext, *, wait_s: float = 600.0, step_s: float = 5.0) -> None:

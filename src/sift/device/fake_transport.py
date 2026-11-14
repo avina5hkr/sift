@@ -198,6 +198,7 @@ class FakeTransport:
         self.clock = clock
         self.sleep = sleep
         self.stall_timeout_s = stall_timeout_s
+        self.serial = phone.serial or "FAKE"  # like adb's serial: USB unless set to host:port
         self.journal: list[JournalEntry] = []
         self.listed: list[str] = []  # every folder a walk listed (or tried to), in order
         self.bytes_served = 0

@@ -39,16 +39,18 @@ class Service:
 def check_address(address: str) -> str:
     """`host:port` with an IP address (IPv4 or [IPv6]) and a port, or WifiError."""
     text = address.strip()
-    m = re.fullmatch(r"\[?([0-9A-Fa-f:.]+)\]?:(\d{1,5})", text)
+    # IPv6 needs brackets ([fe80::1]:5555), otherwise its last group would read as the port
+    m = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\]:(\d{1,5})|([0-9.]+):(\d{1,5})", text)
     if m is None:
         raise WifiError(
             "Enter the IP address and port shown on the phone, like 192.168.1.20:37099."
         )
+    host, port_text = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
     try:
-        ip = ipaddress.ip_address(m.group(1))
+        ip = ipaddress.ip_address(host)
     except ValueError as e:
         raise WifiError("That is not an IP address.") from e
-    port = int(m.group(2))
+    port = int(port_text)
     if not 1 <= port <= 65535:
         raise WifiError("The port must be between 1 and 65535.")
     return f"[{ip}]:{port}" if ip.version == 6 else f"{ip}:{port}"

@@ -111,11 +111,17 @@ def put_settings(ctx: Ctx, body: SettingsPut) -> dict[str, Any]:
     for ch in body.changes:
         if (ch.section, ch.key) not in EDITABLE:
             raise ApiError(422, "not_editable", f"{ch.section}.{ch.key} is not changed here.")
+    from sift.server.routes.setup import _config_lock
+
+    with _config_lock:  # one writer of config.toml at a time (setup, speed test, sets)
+        return _apply(ctx, body)
+
+
+def _apply(ctx: Ctx, body: SettingsPut) -> dict[str, Any]:
     data = ctx.config.model_dump()
     for ch in body.changes:
         value = ch.value
         if (ch.section, ch.key) == ("cleanup", "never_delete") and isinstance(value, list):
-            # the built-in floor always applies; keep it in the list the owner sees
             value = [*NEVER_DELETE_FLOOR, *[v for v in value if v not in NEVER_DELETE_FLOOR]]
         data[ch.section][ch.key] = value
     try:

@@ -10,7 +10,8 @@ from tests.cleanup.test_browse import client
 def test_addresses_are_checked() -> None:
     assert wifi.check_address(" 192.168.1.20:37099 ") == "192.168.1.20:37099"
     assert wifi.check_address("[fe80::1]:5555") == "[fe80::1]:5555"
-    for bad in ("phone.local:5555", "192.168.1.20", "1.2.3.4:70000", "1.2.3.4:22; rm -rf /"):
+    for bad in ("phone.local:5555", "192.168.1.20", "1.2.3.4:70000", "1.2.3.4:22; rm -rf /",
+                "fe80::1:5555"):  # fmt: skip
         with pytest.raises(wifi.WifiError):
             wifi.check_address(bad)
 
@@ -138,6 +139,9 @@ class FakeCaffeinate:
     def terminate(self) -> None:
         self.running = False
 
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
 
 def test_keep_awake_holds_the_mac_and_restores_the_phone(rig: Rig) -> None:
     from sift.services.keepawake import STAY_ON, KeepAwake, restore_leftover
@@ -181,3 +185,18 @@ def test_the_junk_model_trains_once_per_fingerprint(
         junk.bump_labels(conn)  # a label changed: retrain
     junk.score_all(rig.ctx.db, 1, rig.ctx.config, 2, None)
     assert len(calls) == 2
+
+
+def test_a_leftover_of_one_phone_never_blocks_or_restores_another(rig: Rig) -> None:
+    from sift.services.keepawake import SETTING_KEY, STAY_ON, KeepAwake, restore_leftover
+
+    with rig.ctx.db.tx() as conn:  # phone A crashed while kept awake (it had 1)
+        conn.execute("INSERT INTO setting (key, value) VALUES (?, '1')", (f"{SETTING_KEY}:other",))
+    phone = rig.transport.phone
+    phone.settings[STAY_ON] = "0"
+    rig.ctx.config.phone.keep_awake = True
+    awake = KeepAwake(rig.ctx, lambda cmd: FakeCaffeinate(cmd))
+    with awake.hold():
+        assert phone.settings[STAY_ON] == "3"
+    assert phone.settings[STAY_ON] == "0"  # this phone gets its own value back, not A's
+    assert not restore_leftover(rig.ctx)  # A's value still waits for phone A

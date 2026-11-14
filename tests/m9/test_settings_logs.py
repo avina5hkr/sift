@@ -102,10 +102,25 @@ def test_diagnostics_zip_hides_paths_unless_asked(
         text = z.read("logs/sift.log").decode()
         about = json.loads(z.read("about.json"))
     assert "about.json" in names and about["schema_version"] >= 13
-    assert (
-        "IMG_1" not in text and root not in text and "<phone path>" in text and "<backup>" in text
-    )
+    assert "IMG_1" not in text and root not in text and "<phone path>" in text
     full = c.post("/api/diagnostics", headers=h, json={"include_paths": True}).json()
     with zipfile.ZipFile(full["path"]) as z:
         assert "IMG_1.jpg" in z.read("logs/sift.log").decode()
     assert full["path"] != out["path"]
+
+
+def test_redaction_hides_names_with_spaces_serials_and_drives(rig: Rig) -> None:
+    from sift.server.routes.logs import redact
+
+    with rig.ctx.db.tx() as conn:
+        conn.execute("UPDATE device SET model = 'Galaxy Test 9', label = 'Avi phone'")
+    rig.ctx.config.backup.ssd_volume_uuid = "1234-ABCD-UUID"
+    line = (
+        '{"message": "copied /sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/'
+        "IMG-2024 family.jpg from FAKE-0001 (Galaxy Test 9) adb-R5CT12-abc to "
+        '/Volumes/My SSD/Sift/x.jpg, uuid 1234-ABCD-UUID"}'
+    )
+    out = redact(line, rig.ctx)
+    for secret in ("family", "IMG-2024", "FAKE-0001", "Galaxy Test 9", "R5CT12", "My SSD",
+                   "1234-ABCD-UUID"):  # fmt: skip
+        assert secret not in out, (secret, out)

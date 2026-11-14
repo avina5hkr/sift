@@ -6,17 +6,17 @@ import { apiFetch } from '../lib/api'
 import { useEventStore } from '../lib/events'
 import { plain, post } from './Wizard/request'
 
-type Entry = { ts: string | null; level: string; area: string; message: string }
+type Entry = { ts: number | string | null; level: string; area: string; message: string }
 
 const LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR']
 const RANK = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
 const MAX_ROWS = 1000
 const tone = (level: string) => (level === 'ERROR' || level === 'CRITICAL' ? 'bad' : level === 'WARNING' ? 'warn' : 'neutral')
 
-function when(ts: string | null): string {
-  if (!ts) return ''
-  const d = new Date(ts)
-  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString()
+function when(ts: number | string | null): string {
+  if (ts === null || ts === '') return ''
+  const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts) // the log file has seconds
+  return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString()
 }
 
 export default function LogsPage() {

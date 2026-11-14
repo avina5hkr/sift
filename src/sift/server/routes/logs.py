@@ -20,7 +20,6 @@ from sift.server.errors import ApiError
 router = APIRouter()
 
 LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-_PHONE_PATH = re.compile(r"/(?:sdcard|storage/emulated/\d+|storage/[0-9A-F-]{9})/[^\s\"',;)]*")
 
 
 def _log_files(ctx: Ctx) -> list[Path]:
@@ -75,16 +74,39 @@ def get_logs(
     return {"entries": rows}
 
 
-def redact(text: str, ctx: Ctx) -> str:
-    """File paths out: the backup folders, the home folder and phone paths get placeholders."""
-    from sift.backup.run import usable_dests
+_REST = r"[^\"\n]*"  # the rest of a path: up to the end of the quoted text or line
 
-    roots = [ctx.config.backup.mac_root, str(Path.home())]
-    with contextlib.suppress(Exception):
-        roots += [str(d.root) for d in usable_dests(ctx)]
-    for root in sorted({str(Path(r).expanduser()) for r in roots if r}, key=len, reverse=True):
-        text = text.replace(root, "<backup>" if root != str(Path.home()) else "~")
-    return _PHONE_PATH.sub("<phone path>", text)
+
+def _known(ctx: Ctx) -> tuple[list[str], list[str]]:
+    """(folders, names) to hide: backup roots (current, past, unplugged), the home folder; the
+    phone serials, models and labels, the SSD's folder and UUID, the device label."""
+    folders = [ctx.config.backup.mac_root, str(Path.home())]
+    names = [ctx.config.backup.ssd_volume_uuid, ctx.config.backup.ssd_folder,
+             ctx.config.backup.device_label]  # fmt: skip
+    with contextlib.suppress(Exception), ctx.db.read() as conn:
+        folders += [str(r[0]) for r in conn.execute("SELECT root_path FROM destination")]
+        for row in conn.execute("SELECT serial, label, model FROM device"):
+            names += [str(v) for v in row if v]
+    folders = sorted({str(Path(f).expanduser()) for f in folders if f and len(f) > 1}, key=len)
+    return folders[::-1], sorted({n for n in names if n and len(n) >= 3}, key=len, reverse=True)
+
+
+def redact(text: str, ctx: Ctx) -> str:
+    """File paths and identifiers out. A path is hidden from its folder to the end of the
+    quoted text or line (names with spaces included); phone serials, mDNS names, models, the
+    SSD's name and UUID and the device label become placeholders. Over-redacting is fine."""
+    folders, names = _known(ctx)
+    home = str(Path.home())
+    for folder in folders:
+        mark = "<home path>" if folder == home else "<backup path>"
+        text = re.sub(re.escape(folder) + _REST, mark, text)
+    text = re.sub(r"~/" + _REST, "<home path>", text)
+    text = re.sub(r"/(?:sdcard|storage)/" + _REST, "<phone path>", text)
+    text = re.sub(r"/Volumes/" + _REST, "<drive path>", text)
+    text = re.sub(r"adb-[A-Za-z0-9]+-[A-Za-z0-9]+", "<phone>", text)
+    for name in names:
+        text = text.replace(name, "<hidden>")
+    return text
 
 
 def _schema_version(ctx: Ctx) -> int | None:

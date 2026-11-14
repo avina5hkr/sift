@@ -431,8 +431,8 @@ _cache: dict[tuple[str, int], Model] = {}
 
 
 def _trained(items: Sequence[Item], feats: np.ndarray, cfg: Config, version: int, fp: str) -> Model:
-    """The model for this fingerprint (labels, threshold, embeddings, scoring settings): trained
-    once and reused until any of those change, so the Junk tab does not retrain each rebuild."""
+    """The model for these inputs (this phone's files and features, labels, threshold,
+    embeddings, word lists, settings): trained once and reused until any of them change."""
     key = (fp, version)
     with _cache_lock:
         hit = _cache.get(key)
@@ -460,7 +460,9 @@ def score_all(
         with db.tx() as conn:
             put_setting(conn, MODEL_VERSION, str(version))
             put_setting(conn, TRAINED_REV, str(st["labels_rev"]))
-    model = _trained(every, feats, cfg, version, st["fingerprint"])
+    with db.read() as conn:  # this phone, its features, the word lists and the model inputs
+        key = _inputs_fingerprint(conn, device_id, cfg, embed_version, lexicons)
+    model = _trained(every, feats, cfg, version, key)
     found = verdicts(every, feats, model, cfg, t_suggest=st["t_suggest"], greet=greet, doc=doc)
     keep = [n for n, i in enumerate(every) if i.listed]
     return [every[n] for n in keep], [found[n] for n in keep], model, st

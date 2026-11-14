@@ -48,3 +48,24 @@ small backup over it.
   replacing the home folder and the backup roots with placeholders.
 - L5. Settings edits only fields that have no dedicated screen; backup folders, SSD and backup
   sets keep their own choosers.
+
+## Outcome
+
+Built: Wi-Fi pairing, connect and mDNS reconnect through the adb server; Wi-Fi heartbeat and
+reader count; phone deletes, app removal and cache trimming need USB unless allowed; keep the
+Mac (caffeinate) and optionally the phone awake during work, restored per phone after a crash;
+Settings (7 pages from the config schema, whitelisted, all-or-nothing, one config writer) and
+the Logs screen with diagnostics export (paths, serials, models and drive names hidden unless
+asked); the fault sweep over every fake fault and `make bench`; polish (Junk tab keyboard,
+Browse size total, health task kept, checklist tick/date race, junk model cached by its inputs).
+Review: 0 Critical, 5 Important (keep-awake value of one phone blocking another and a
+restore/start race, Settings bypassing the config lock, redaction leaking names with spaces
+and identifiers, model cache shared across phones and lexicon edits, log times in 1970) and
+the minor trim-caches gate, fake serial, caffeinate wait and IPv6 brackets fixed. Carried
+(Minor, M10): settings knobs nothing reads yet, config warnings not refreshed after a save,
+the speed test from Settings, launch reconnect timing, Wi-Fi page polling, adb port changes
+needing a restart, live log rows mixed with filtered ones, unsaved edits lost when switching
+Settings pages. Benchmarks: 2,259 files (21 GB) backed up in 56 s on the fake, an unchanged
+second run 0.1 s, a 20,000-file listing in 0.01 s.
+Final run: 1749 Python, 277 web, 14 e2e passed; lint clean. Owner: pair over Wi-Fi once and
+run a small backup over it.
