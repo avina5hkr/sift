@@ -64,6 +64,19 @@ def derived_android_id(serial: str | None) -> str:
     return hashlib.sha1(f"fake:{serial}".encode()).hexdigest()[:16]
 
 
+@dataclass
+class FakeApp:
+    """An installed app on the fake phone (spec 10C probes and actions)."""
+
+    installer: str | None = "com.android.vending"
+    app_bytes: int = 50_000_000
+    data_bytes: int = 10_000_000
+    cache_bytes: int = 5_000_000
+    last_used: int = 0  # Unix seconds; 0 = never
+    version: str = "1.0"
+    apk_paths: tuple[str, ...] = ()
+
+
 class FakePhone:
     """The files and identity of a pretend phone. FakeTransport serves it over the Transport API."""
 
@@ -80,6 +93,7 @@ class FakePhone:
         screen_sizes: tuple[tuple[int, int], ...] = ((1080, 2400),),
     ) -> None:
         self.serial = serial
+        self.apps: dict[str, FakeApp] = {}
         self.model = model
         self.android_version = android_version
         # Unless given, the Android ID follows the serial, so two phones with different serials

@@ -13,7 +13,7 @@ test('lists the areas in order', () => {
     within(screen.getByRole('navigation', { name: 'Main' }))
       .getAllByRole('link')
       .map((l) => l.textContent),
-  ).toEqual(['Backup', 'Cleanup', 'Browse', 'Clean slate', 'Archive', 'Quarantine', 'Logs', 'Settings'])
+  ).toEqual(['Backup', 'Cleanup', 'Browse', 'Clean slate', 'Apps', 'Archive', 'Quarantine', 'Logs', 'Settings'])
 })
 
 test('marks the current area with aria-current', () => {
