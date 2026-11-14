@@ -206,6 +206,20 @@ def ssd_connected(ctx: AppContext) -> None:
     """The backup SSD was plugged in: copy across what one destination has and the other lacks."""
     ssd = ctx.ssd
     replicate_now(ctx, should_stop=lambda: ssd is not None and ssd.stopping)
+    purge_quarantine(ctx)
+
+
+def purge_quarantine(ctx: AppContext) -> None:
+    """Remove quarantined files past their date on the mounted destinations (spec 10)."""
+    from sift.cleanup.quarantine import purge_due
+
+    try:
+        purged = purge_due(ctx)
+    except Exception:
+        _log.exception("Purging the quarantine failed")
+        return
+    if purged:
+        _log.info("Purged %d quarantined files", purged)
 
 
 def tracker_mode(*, fake_phone: bool, no_window: bool, env: Mapping[str, str]) -> str:
@@ -494,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
         recover_at_startup(ctx)  # before any job can start
+        threading.Thread(target=purge_quarantine, args=(ctx,), daemon=True).start()
         # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
         jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())
         ctx.jobs = jobs

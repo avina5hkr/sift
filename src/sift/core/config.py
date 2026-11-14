@@ -410,6 +410,11 @@ class CleanupConfig(_Section):
             "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video",
             "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Animated Gifs",
             "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Stickers",
+            # the pre-Android 11 location of the same folders (plan assumption F6)
+            "/sdcard/WhatsApp/Media/WhatsApp Images",
+            "/sdcard/WhatsApp/Media/WhatsApp Video",
+            "/sdcard/WhatsApp/Media/WhatsApp Animated Gifs",
+            "/sdcard/WhatsApp/Media/WhatsApp Stickers",
         ]
     )
     never_delete: list[str] = Field(

@@ -42,11 +42,13 @@ import copy
 import io
 import logging
 import re
+import shlex
 import socket
 import stat as stat_mode
 import struct
 import threading
 import time
+import urllib.parse
 from collections.abc import Buffer, Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -78,7 +80,6 @@ from sift.device.transport import (
 
 log = logging.getLogger(__name__)
 
-_NOT_IN_M1 = "Deleting and restoring arrive in M8."
 _ENOENT = 2
 _ENOTDIR = 20
 _ERRNO_TEXT = {2: "no such file or folder", 13: "permission denied", 20: "not a folder"}
@@ -878,10 +879,47 @@ class AdbTransport:
     # -- Transport: writes (not in M1) ----------------------------------------------------
 
     def delete(self, path: str) -> None:
-        raise NotImplementedError(_NOT_IN_M1)
+        """Remove one regular file (`rm --`, never recursive). Only the deleter calls this, for a
+        file that passed the preflight in this run; it stats the path afterwards."""
+        _encode_path(path)
+        out = self._exec(f"rm -- {shlex.quote(path)} 2>&1; echo rc=$?", self.limits.stat_s)
+        text = out.decode("utf-8", "replace").strip()
+        if not text.endswith("rc=0"):
+            message = text.rsplit("rc=", 1)[0].strip() or "the phone refused"
+            raise RemoteError(f"Could not delete {path}: {message}", path)
 
     def push(self, local: Path, remote: str, mtime: int) -> None:
-        raise NotImplementedError(_NOT_IN_M1)
+        """Write `local` to the phone as a new file at `remote` with `mtime`. Never replaces a
+        file: an existing path is an error (quarantine restore picks a free name first)."""
+        raw = _encode_path(remote)
+        if self.stat(remote) is not None:
+            raise RemoteError(f"{remote} already exists on the phone.", remote)
+
+        def chunks() -> Iterator[bytes]:
+            with open(local, "rb") as fh:
+                while chunk := fh.read(1 << 20):
+                    yield chunk
+
+        size = local.stat().st_size
+        with self._sync(self.limits.stat_s + size / 5_000_000) as sync:
+            sync.send(raw, chunks(), mtime=mtime)
+        written = self.stat(remote)
+        if written is None or written.size != size:
+            raise RemoteError(f"The phone did not keep all of {remote}.", remote)
 
     def media_rescan(self, paths: list[str]) -> bool:
-        raise NotImplementedError(_NOT_IN_M1)
+        """Ask the media scanner to look at `paths` again (best effort; F4)."""
+        if not paths:
+            return True
+        commands = [
+            "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "
+            + shlex.quote("file://" + urllib.parse.quote(p))
+            + " >/dev/null 2>&1"
+            for p in paths
+        ]
+        try:
+            for start in range(0, len(commands), 50):
+                self._exec("; ".join(commands[start : start + 50]), self.limits.stat_s * 4)
+        except TransportError:
+            return False
+        return True

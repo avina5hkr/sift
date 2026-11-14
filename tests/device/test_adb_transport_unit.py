@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from sift.device import adb_transport, adbwire
+from sift.device import adb_transport
 from sift.device.adb_transport import (
     AdbTransport,
     Limits,
@@ -64,6 +64,8 @@ class Phone:
     def __init__(self, server: FakeAdbServer) -> None:
         self.server = server
         server.exec_handler = self.run
+        server.on_send = self.add_file
+        self.rescanned: list[str] = []
         self.add_dir(b"/sdcard")
         # What each probe of INFO_SCRIPT prints; a test changes one to change what info() sees.
         self.probes: dict[str, bytes] = {
@@ -99,6 +101,13 @@ class Phone:
         self._link(path, FakeStat(size=len(data), mtime=mtime))
         self.server.files[path] = data
 
+    def remove(self, path: bytes) -> None:
+        self.server.files.pop(path, None)
+        self.server.stats.pop(path, None)
+        parent, _, name = path.rpartition(b"/")
+        listing = self.server.dirs.get(parent, [])
+        listing[:] = [(n, s) for n, s in listing if n != name]
+
     def add_symlink(self, path: bytes) -> None:
         self._link(path, FakeStat(mode=S_IFLNK | 0o777, size=21, mtime=5))
 
@@ -116,6 +125,15 @@ class Phone:
             return [data[int(words[2].lstrip("+")) - 1 :]]
         if words and words[0] == "sha256sum":
             return [self._hashes(words)]
+        if words[:2] == ["rm", "--"] and words[3:] == ["2>&1;", "echo", "rc=$?"]:
+            raw = words[2].encode("utf-8", "surrogateescape")
+            if raw not in self.server.files:
+                return [b"rm: no such file\nrc=1\n"]
+            self.remove(raw)
+            return [b"rc=0\n"]
+        if words[:2] == ["am", "broadcast"]:
+            self.rescanned.append(text)
+            return [b""]
         raise AssertionError(f"unexpected command: {text!r}")
 
     def _hashes(self, words: list[str]) -> bytes:
@@ -1040,25 +1058,31 @@ def test_unknown_serial_raises_disconnected(server: FakeAdbServer) -> None:
         transport.stat("/sdcard")
 
 
-def test_adb_transport_cannot_write_in_m1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    def unreachable(*args: object, **kwargs: object) -> None:
-        raise AssertionError("a write reached adb")
+def test_delete_removes_one_file_and_reports_a_refusal(
+    transport: AdbTransport, phone: Phone
+) -> None:
+    phone.add_file(b"/sdcard/a b.jpg", b"x")
+    transport.delete("/sdcard/a b.jpg")
+    assert transport.stat("/sdcard/a b.jpg") is None
+    with pytest.raises(RemoteError, match="no such file"):
+        transport.delete("/sdcard/a b.jpg")
 
-    monkeypatch.setattr(adbwire, "open_service", unreachable)
-    monkeypatch.setattr(adb_transport, "Sync2", unreachable)
-    monkeypatch.setattr(adb_transport, "device_features", unreachable)
-    monkeypatch.setattr(socket, "create_connection", unreachable)
-    transport = AdbTransport("FAKESERIAL", _dead_port())
+
+def test_push_writes_a_new_file_and_never_replaces_one(
+    transport: AdbTransport, phone: Phone, tmp_path: Path
+) -> None:
     local = tmp_path / "a.jpg"
-    local.write_bytes(b"x")
-    calls = [
-        lambda: transport.delete("/sdcard/a.jpg"),
-        lambda: transport.push(local, "/sdcard/a.jpg", 0),
-        lambda: transport.media_rescan(["/sdcard/a.jpg"]),
-    ]
-    for call in calls:
-        with pytest.raises(NotImplementedError, match="Deleting and restoring arrive in M8"):
-            call()
+    local.write_bytes(b"restored bytes" * 10_000)
+    transport.push(local, "/sdcard/DCIM/a.jpg", 1_700_000_500)
+    got = transport.stat("/sdcard/DCIM/a.jpg")
+    assert got is not None and got.size == local.stat().st_size and got.mtime == 1_700_000_500
+    with pytest.raises(RemoteError, match="already exists"):
+        transport.push(local, "/sdcard/DCIM/a.jpg", 1)
+
+
+def test_media_rescan_asks_for_each_path(transport: AdbTransport, phone: Phone) -> None:
+    assert transport.media_rescan(["/sdcard/DCIM/a b.jpg", "/sdcard/x.jpg"])
+    assert len(phone.rescanned) == 1 and "file:///sdcard/DCIM/a%20b.jpg" in phone.rescanned[0]
 
 
 def test_a_remote_error_mid_stream_keeps_its_path_on_every_read() -> None:
