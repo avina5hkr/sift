@@ -9,6 +9,7 @@ import { Toasts } from './components/Toasts'
 import { ApiError, apiFetch } from './lib/api'
 import type { SetupState } from './lib/types'
 import { useStatus } from './lib/useStatus'
+import AppsPage from './pages/AppsPage'
 import ArchivePage from './pages/ArchivePage'
 import BackupPage from './pages/BackupPage'
 import BrowsePage from './pages/BrowsePage'
@@ -88,6 +89,7 @@ export default function App() {
             <Route path="/cleanup/search" element={<SearchPage />} />
             <Route path="/browse" element={<BrowsePage />} />
             <Route path="/slate" element={<SlatePage />} />
+            <Route path="/apps" element={<AppsPage />} />
             <Route path="/archive" element={<ArchivePage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />

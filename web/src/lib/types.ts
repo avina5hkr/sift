@@ -527,3 +527,26 @@ export type ArchiveFile = {
   on_phone: boolean
 }
 export type ArchiveListing = { dest: number; path: string; folders: ArchiveFolder[]; files: ArchiveFile[] }
+
+// Mirrors GET /api/apps and the /api/apps actions.
+export type AppRow = {
+  package: string
+  name: string
+  installer: string | null
+  from_play_store: boolean
+  version: string | null
+  app_bytes: number | null
+  data_bytes: number | null
+  cache_bytes: number | null
+  last_used: number | null
+  protected: boolean
+  unprotected: boolean
+  unused: boolean
+}
+export type AppsProbes = { packages: boolean; diskstats: boolean; usagestats: boolean; versions: boolean }
+export type AppsList = { apps: AppRow[]; suggested: string[]; probes: AppsProbes }
+export type AppAction = 'uninstall' | 'clear_data'
+export type AppUnlock = Record<string, { backup_done: boolean; typed_name: string }>
+export type AppsPreflight = { allowed: string[]; refused: Record<string, string> }
+export type AppsResult = { done: string[]; failed: Record<string, string>; app_list: string[] }
+export type AppsExport = { app_list: string[]; apks?: { saved: number; failed: number } }

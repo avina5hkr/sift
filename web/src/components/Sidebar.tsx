@@ -5,6 +5,7 @@ const AREAS = [
   { to: '/cleanup', label: 'Cleanup' },
   { to: '/browse', label: 'Browse' },
   { to: '/slate', label: 'Clean slate' },
+  { to: '/apps', label: 'Apps' },
   { to: '/archive', label: 'Archive' },
   { to: '/quarantine', label: 'Quarantine' },
   { to: '/logs', label: 'Logs' },
