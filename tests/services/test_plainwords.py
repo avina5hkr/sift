@@ -49,6 +49,7 @@ from sift.device.transport import (
     RemoteError,
     TransportError,
 )
+from sift.device.wifi import WifiError
 from sift.health.bugreport import BugReportStopped
 from sift.server.errors import ApiError
 from sift.services import plainwords
@@ -80,6 +81,7 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "RestoreRefused": RestoreRefused,
     "BugReportStopped": BugReportStopped,
     "ChatBackupKept": ChatBackupKept,
+    "WifiError": WifiError,
     "NothingToRepairFrom": NothingToRepairFrom,
     "TaskBusy": TaskBusy,
     "ScanNotPending": ScanNotPending,
