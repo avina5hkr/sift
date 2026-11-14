@@ -11,7 +11,7 @@ origin, +500 camera EXIF, then pixels, then file size, then the earlier mtime.
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from sift.analysis.phash import distance, to_unsigned
@@ -22,7 +22,6 @@ from sift.core.origin import classify_origin
 
 ALGO_VERSION = 1
 BANDS = 9
-BUCKET_MAX = 500
 
 
 @dataclass
@@ -83,50 +82,72 @@ def _aspect_ok(a: Item, b: Item, tol: float) -> bool:
     return abs(a.aspect - b.aspect) <= tol * max(a.aspect, b.aspect)
 
 
-def image_pairs(items: Sequence[Item], cfg: AnalysisConfig) -> set[tuple[str, str]]:
-    dhash_max = cfg.neardup_dhash_max  # stricter until embeddings exist (plan C3)
-    phash_max = cfg.neardup_phash_max
+def _image_match(a: Item, b: Item, cfg: AnalysisConfig) -> bool:
+    if a.hash == b.hash or a.kind != b.kind or not _aspect_ok(a, b, cfg.neardup_aspect_tol):
+        return False
+    if a.phash is None or b.phash is None or distance(a.phash, b.phash) > cfg.neardup_phash_max:
+        return False
+    return distance(a.dhash, b.dhash) <= cfg.neardup_dhash_max
+
+
+def _video_match(a: Item, b: Item, cfg: AnalysisConfig) -> bool:
+    return similar(
+        (a.duration_ms, a.width, a.height, a.frames),
+        (b.duration_ms, b.width, b.height, b.frames),
+        frame_max=cfg.video_frame_hash_max,
+        frames_min=cfg.video_frame_match_min,
+        aspect_tol=cfg.neardup_aspect_tol,
+    )
+
+
+def _connect_images(
+    items: Sequence[Item], cfg: AnalysisConfig, uf: UnionFind, should_stop: Callable[[], bool]
+) -> None:
+    """Join every matching pair of images that share a hash band (pigeonhole: a dHash within
+    the limit shares at least one band). Two images already joined are not compared again: it
+    cannot change the groups, and it keeps repetitive libraries (many near-identical memes) from
+    storing or re-testing millions of pairs (external review, P3.13)."""
     buckets: dict[tuple[int, int], list[Item]] = {}
     for item in items:
+        uf.find(item.hash)
         for band in bands(item.dhash):
             buckets.setdefault(band, []).append(item)
-    pairs: set[tuple[str, str]] = set()
     for members in buckets.values():
-        if len(members) < 2:
-            continue
-        # Every pair in a bucket is compared; in a big bucket the cheap pHash test runs first.
-        for group in [members]:
-            for i, a in enumerate(group):
-                for b in group[i + 1 :]:
-                    if a.hash == b.hash or a.kind != b.kind:
-                        continue
-                    key = (a.hash, b.hash) if a.hash < b.hash else (b.hash, a.hash)
-                    if key in pairs or not _aspect_ok(a, b, cfg.neardup_aspect_tol):
-                        continue
-                    if a.phash is None or b.phash is None or distance(a.phash, b.phash) > phash_max:
-                        continue
-                    if distance(a.dhash, b.dhash) > dhash_max:
-                        continue
-                    pairs.add(key)
-    return pairs
+        if should_stop():
+            raise NearStopped
+        for i, a in enumerate(members):
+            for b in members[i + 1 :]:
+                if uf.find(a.hash) != uf.find(b.hash) and _image_match(a, b, cfg):
+                    uf.union(a.hash, b.hash)
 
 
-def video_pairs(items: Sequence[Item], cfg: AnalysisConfig) -> set[tuple[str, str]]:
+def _connect_videos(
+    items: Sequence[Item], cfg: AnalysisConfig, uf: UnionFind, should_stop: Callable[[], bool]
+) -> None:
     ordered = sorted(items, key=lambda v: v.duration_ms)
-    pairs: set[tuple[str, str]] = set()
     for i, a in enumerate(ordered):
+        uf.find(a.hash)
+        if i % 500 == 0 and should_stop():
+            raise NearStopped
         for b in ordered[i + 1 :]:
             if b.duration_ms - a.duration_ms > max(1000, 0.02 * b.duration_ms):
                 break  # sorted by duration: nothing later can be close enough
-            if similar(
-                (a.duration_ms, a.width, a.height, a.frames),
-                (b.duration_ms, b.width, b.height, b.frames),
-                frame_max=cfg.video_frame_hash_max,
-                frames_min=cfg.video_frame_match_min,
-                aspect_tol=cfg.neardup_aspect_tol,
-            ):
-                pairs.add((a.hash, b.hash) if a.hash < b.hash else (b.hash, a.hash))
-    return pairs
+            if uf.find(a.hash) != uf.find(b.hash) and _video_match(a, b, cfg):
+                uf.union(a.hash, b.hash)
+
+
+def image_pairs(items: Sequence[Item], cfg: AnalysisConfig) -> set[tuple[str, str]]:
+    """Every matching image pair (for tests and small sets; grouping does not build this)."""
+    out = set()
+    for i, a in enumerate(items):
+        for b in items[i + 1 :]:
+            if _image_match(a, b, cfg):
+                out.add(_pair(a.hash, b.hash))
+    return out
+
+
+class NearStopped(Exception):
+    """The owner pressed Stop while near-duplicates were being found."""
 
 
 def group_type(members: Sequence[Item]) -> str:
@@ -199,25 +220,31 @@ class NearGroup:
     copies: tuple[str, ...]
 
 
-def find_groups(items: Sequence[Item], cfg: AnalysisConfig) -> list[NearGroup]:
+def find_groups(
+    items: Sequence[Item], cfg: AnalysisConfig, should_stop: Callable[[], bool] = lambda: False
+) -> list[NearGroup]:
     by_hash = {i.hash: i for i in items}
     images = [i for i in items if i.kind == "image"]
     videos = [i for i in items if i.kind == "video" and i.frames]
-    pairs = image_pairs(images, cfg) | video_pairs(videos, cfg)
     uf = UnionFind()
-    for a, b in pairs:
-        uf.union(a, b)
+    _connect_images(images, cfg, uf, should_stop)
+    _connect_videos(videos, cfg, uf, should_stop)
     clusters: dict[str, list[Item]] = {}
     for digest in list(uf.parent):
         clusters.setdefault(uf.find(digest), []).append(by_hash[digest])
     groups = []
     for members in clusters.values():
+        if len(members) < 2:
+            continue
         # A star around each keeper: a member joins only when it matches the keeper itself, so
         # a chain A~B~C never puts two unlike pictures (A and C) in one group.
+        match = _video_match if members[0].kind == "video" else _image_match
         left = sorted(members, key=lambda m: (keeper_score(m), m.hash), reverse=True)
         while len(left) >= 2:
+            if should_stop():
+                raise NearStopped
             keeper, rest = left[0], left[1:]
-            close = [m for m in rest if _pair(keeper.hash, m.hash) in pairs]
+            close = [m for m in rest if m.kind == keeper.kind and match(keeper, m, cfg)]
             if close:
                 group = [keeper, *close]
                 groups.append(

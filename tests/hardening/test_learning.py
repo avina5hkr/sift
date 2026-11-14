@@ -228,3 +228,66 @@ def test_a_build_bundles_no_teaching_unless_asked() -> None:
 
     script = (Path(__file__).resolve().parents[2] / "packaging" / "build_dmg.sh").read_text()
     assert 'TEACHING="${SIFT_TEACHING:-}"' in script and "local/teaching.json" not in script
+
+
+def _old_groups(items, cfg):
+    """The earlier method: every matching pair stored, then a star around each keeper."""
+    from sift.analysis.near import UnionFind, _pair, group_type, image_pairs, keeper_score
+
+    pairs = image_pairs(items, cfg)
+    uf = UnionFind()
+    for a, b in pairs:
+        uf.union(a, b)
+    by = {i.hash: i for i in items}
+    clusters: dict[str, list] = {}
+    for d in list(uf.parent):
+        clusters.setdefault(uf.find(d), []).append(by[d])
+    out = set()
+    for members in clusters.values():
+        left = sorted(members, key=lambda m: (keeper_score(m), m.hash), reverse=True)
+        while len(left) >= 2:
+            keeper, rest = left[0], left[1:]
+            close = [m for m in rest if _pair(keeper.hash, m.hash) in pairs]
+            if close:
+                out.add((keeper.hash, tuple(sorted(m.hash for m in close)),
+                         group_type([keeper, *close])))  # fmt: skip
+            taken = {keeper.hash, *(m.hash for m in close)}
+            left = [m for m in rest if m.hash not in taken]
+    return out
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_grouping_without_a_pair_list_finds_exactly_the_same_groups(seed: int) -> None:
+    """Review P3.13: the memory-bounded grouping drops no match: same groups as before."""
+    import random
+
+    from sift.analysis.near import Item, find_groups
+    from sift.core.config import AnalysisConfig
+
+    rng, cfg = random.Random(seed), AnalysisConfig()
+    bases = [rng.getrandbits(64) for _ in range(5)]
+    items = []
+    for i in range(300):
+        base = rng.choice(bases)
+        flips = [1 << rng.randrange(64) for _ in range(rng.randrange(0, 9))]
+        dh = base
+        for f in flips:
+            dh ^= f
+        ph = base ^ (1 << rng.randrange(64)) if rng.random() < 0.8 else rng.getrandbits(64)
+        origin = {rng.choice(["whatsapp_received", "camera"])}
+        width = 1000 + rng.randrange(3) * 20
+        items.append(
+            Item(f"{i:064x}", "image", width, 1500, 1, dh, ph, rng.random() < 0.3, origins=origin)
+        )
+    new = {(g.keeper, tuple(sorted(g.copies)), g.group_type) for g in find_groups(items, cfg)}
+    assert new == _old_groups(items, cfg)
+    assert new  # the library does have groups
+
+
+def test_near_duplicate_search_can_be_stopped() -> None:
+    from sift.analysis.near import Item, NearStopped, find_groups
+    from sift.core.config import AnalysisConfig
+
+    items = [Item(f"{i:064x}", "image", 1, 1, 1, i, i, False) for i in range(50)]
+    with pytest.raises(NearStopped):
+        find_groups(items, AnalysisConfig(), lambda: True)

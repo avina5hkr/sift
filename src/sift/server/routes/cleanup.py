@@ -11,7 +11,7 @@ from sift.analysis.cluster import run_clusters
 from sift.analysis.embed import run_embed
 from sift.analysis.index import run_index
 from sift.analysis.models import CLIP
-from sift.analysis.near import find_groups, load_items, store_groups
+from sift.analysis.near import NearStopped, find_groups, load_items, store_groups
 from sift.analysis.ocr import run_ocr
 from sift.backup.phonepaths import shown
 from sift.backup.run import usable_dests
@@ -90,9 +90,13 @@ def analyze(ctx: Ctx) -> TaskOut:
             on_file=control.progress,
         )
         groups = rebuild_exact(ctx.db, device_id)
-        near = store_groups(ctx.db, find_groups(load_items(ctx.db, device_id), ctx.config.analysis))
-        dests = {d.id for d in usable_dests(ctx)}
         stop = lambda: control.should_stop  # noqa: E731
+        try:
+            found = find_groups(load_items(ctx.db, device_id), ctx.config.analysis, stop)
+            near = store_groups(ctx.db, found)
+        except NearStopped:  # stopped: the last complete groups stay
+            near = []
+        dests = {d.id for d in usable_dests(ctx)}
         read = run_ocr(
             ctx.db,
             langs=ctx.config.analysis.ocr_languages,
