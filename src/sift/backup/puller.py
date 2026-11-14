@@ -723,7 +723,8 @@ class Puller:
     def _has_copy(self, digest: str) -> bool:
         with self._db.read() as conn:
             row = conn.execute(
-                "SELECT 1 FROM replica WHERE content_hash = ? AND dest_id = ?",
+                "SELECT 1 FROM replica WHERE content_hash = ? AND dest_id = ? "
+                "AND rel_path NOT LIKE '.quarantine/%'",
                 (digest, self._target.dest_id),
             ).fetchone()
         return row is not None

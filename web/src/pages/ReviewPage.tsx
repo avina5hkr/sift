@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
-import { ReasonButton } from '../components/backup/ReasonButton'
 import { GroupRow } from '../components/cleanup/GroupRow'
 import { JunkReview } from '../components/cleanup/JunkReview'
 import { Lightbox } from '../components/cleanup/Lightbox'
@@ -12,6 +11,9 @@ import {
   rowHeight,
 } from '../components/cleanup/layout'
 import { type ReviewTab, useReview } from '../components/cleanup/useReview'
+import { DeleteFlow } from '../components/delete/DeleteFlow'
+import { DeleteSelectedButton } from '../components/delete/DeleteSelectedButton'
+import { useDeleteRun } from '../components/delete/useDeleteRun'
 import { formatBytes, formatCount } from '../lib/format'
 import type { ReviewGroup, ReviewItem, ReviewSort } from '../lib/types'
 import { buildOffsets, visibleRange } from '../lib/windowing'
@@ -55,6 +57,12 @@ function Review({
 }) {
   const review = useReview(sort, tab)
   const { groups, flat, copies, isChecked, setChecked, setAll, loadMore } = review
+  const flow = useDeleteRun({ onFinished: () => void review.reload() })
+  const flowActive = flow.active
+  const startDelete = async () => {
+    const ids = await review.loadAllTicked()
+    await flow.start({ source: 'cleanup', ids })
+  }
 
   // -- the window: which rows are drawn
   const scroller = useRef<HTMLDivElement>(null)
@@ -179,7 +187,7 @@ function Review({
   }
   const keyHandler = useRef<(e: KeyboardEvent) => void>(() => undefined)
   const onKeyDown = (e: KeyboardEvent) => {
-    if (openId != null) return // the lightbox has the keys
+    if (openId != null || flowActive) return // the lightbox or the delete dialogs have the keys
     const t = e.target as HTMLElement
     if (t.closest('input, textarea, select')) return
     if (e.metaKey || e.ctrlKey) {
@@ -317,10 +325,9 @@ function Review({
         >
           Select none
         </button>
-        <ReasonButton primary placement="above" reason="Deleting arrives in a later version" onClick={() => undefined}>
-          Delete selected
-        </ReasonButton>
+        <DeleteSelectedButton count={count} bytes={bytes} busy={flow.phase !== 'idle'} onClick={() => void startDelete()} />
       </footer>
+      <DeleteFlow flow={flow} />
 
       {openIndex >= 0 && (
         <Lightbox

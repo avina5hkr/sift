@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 import uvicorn
 
@@ -205,6 +206,29 @@ def ssd_connected(ctx: AppContext) -> None:
     """The backup SSD was plugged in: copy across what one destination has and the other lacks."""
     ssd = ctx.ssd
     replicate_now(ctx, should_stop=lambda: ssd is not None and ssd.stopping)
+    purge_quarantine(ctx)
+
+
+def purge_quarantine(ctx: AppContext) -> None:
+    """Remove quarantined files past their date on the mounted destinations (spec 10)."""
+    from sift.cleanup.quarantine import purge_due
+
+    try:
+        with ctx.db.read() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM quarantine WHERE purged_at IS NULL "
+                    "AND restored_at IS NULL LIMIT 1"
+                ).fetchone()
+                is None
+            ):
+                return  # nothing in quarantine
+        purged = purge_due(ctx)
+    except Exception as e:  # e.g. Sift closing meanwhile; the next start or plug-in tries again
+        _log.warning("Purging the quarantine did not finish: %s", e)
+        return
+    if purged:
+        _log.info("Purged %d quarantined files", purged)
 
 
 def tracker_mode(*, fake_phone: bool, no_window: bool, env: Mapping[str, str]) -> str:
@@ -271,6 +295,17 @@ def recover_at_startup(ctx: AppContext) -> None:
         recover(ctx.db)
     except Exception:
         _log.exception("Recovery at startup failed")
+    try:
+        with ctx.db.tx() as conn:  # a delete run a crash interrupted ends as stopped
+            conn.execute(
+                "UPDATE delete_run SET state = 'stopped', finished_at = strftime('%s', 'now') "
+                "WHERE state IN ('preflight', 'running')"
+            )
+        from sift.cleanup.quarantine import reconcile
+
+        reconcile(ctx)
+    except Exception:
+        _log.exception("Delete-run recovery at startup failed")
 
 
 def build_jobs(ctx: AppContext, notifier: Notifier | None = None) -> JobManager:
@@ -376,7 +411,19 @@ def _quiet_pywebview_logger() -> None:
     logging.getLogger("pywebview").setLevel(logging.INFO)
 
 
-def _run_window(url: str, shutdown: Shutdown) -> None:
+def _choose_folder(window: Any, start: str | None) -> str | None:
+    """The macOS folder dialog over the window; None when the owner cancels."""
+    import webview
+
+    kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None)
+    if kind is None:
+        kind = webview.FOLDER_DIALOG
+    folder = os.path.expanduser(start) if start else ""
+    picked = window.create_file_dialog(kind, directory=folder if os.path.isdir(folder) else "")
+    return str(picked[0]) if picked else None
+
+
+def _run_window(url: str, shutdown: Shutdown, ctx: AppContext | None = None) -> None:
     """Show the window until the app quits. Every quit route runs `shutdown` (see WindowQuit).
 
     Cmd-Q, the close button and SIGINT/SIGTERM all end in `applicationShouldTerminate:`, which
@@ -391,6 +438,8 @@ def _run_window(url: str, shutdown: Shutdown) -> None:
     window = webview.create_window("Sift", url, width=1280, height=800, min_size=(1000, 680))
     if window is None:  # only when an `initialized` handler cancels it; Sift adds none
         return
+    if ctx is not None:
+        ctx.pick_folder = lambda start: _choose_folder(window, start)
     quit = WindowQuit(
         shutdown,
         ask_app_to_terminate=cocoa_quit.ask_app_to_terminate,
@@ -479,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         for warning in ctx.config_warnings:
             _log.warning("%s", warning)
         recover_at_startup(ctx)  # before any job can start
+        threading.Thread(target=purge_quarantine, args=(ctx,), daemon=True).start()
         # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
         jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())
         ctx.jobs = jobs
@@ -508,7 +558,7 @@ def main(argv: list[str] | None = None) -> int:
                 shutdown.wait_requested()
                 shutdown.run()
         else:
-            _run_window(url, shutdown)
+            _run_window(url, shutdown, ctx)
         return 0
     finally:
         shutdown.run()

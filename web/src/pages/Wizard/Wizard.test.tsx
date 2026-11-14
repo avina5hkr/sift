@@ -443,6 +443,8 @@ test('the server refusing a switch is shown in plain words', async () => {
     'GET /api/setup/state': () => ({ ...STATE, complete: true }),
     'GET /api/setup/devices': () => PHONES,
     'POST /api/setup/switch-phone': () => fail(409, 'job_conflict', 'A backup is running. Stop it before switching phones.'),
+    'GET /api/setup/volumes': () => ({ volumes: [], selected_uuid: '' }),
+    'GET /api/setup/folder': () => ({ ok: true, path: '/x', problem: null, free_bytes: 1 }),
   })
   renderWizard('/settings')
   await click('Switch phone…')
@@ -450,4 +452,36 @@ test('the server refusing a switch is shown in plain words', async () => {
   await userEvent.type(screen.getByLabelText('Type SWITCH to confirm'), 'SWITCH')
   await click('Switch to this phone')
   expect(await screen.findByRole('alert')).toHaveTextContent('A backup is running. Stop it before switching phones.')
+})
+
+test('Settings lets the owner choose the Mac and SSD backup folders with the folder dialog', async () => {
+  const saved: unknown[] = []
+  mockApi({
+    'GET /api/setup/state': () => ({ ...STATE, complete: true }),
+    'GET /api/setup/devices': () => PHONES,
+    'GET /api/setup/folder': () => ({ ok: true, path: '/Users/me/Backups', problem: null, free_bytes: 5e11 }),
+    'GET /api/setup/volumes': () => ({ volumes: [{ name: 'T7', file_system: 'ExFAT', uuid: 'u1', free_bytes: 1e12, total_bytes: 2e12, suitable: true, warning: null }], selected_uuid: 'u1', folder: '' }),
+    'POST /api/setup/pick-folder': (body: unknown) =>
+      (body as { start: string | null }).start === '/Volumes' ? { path: '/Volumes/T7/Backups' } : { path: '/Users/me/Backups' },
+    'POST /api/setup/mac-folder': (body: unknown) => {
+      saved.push(body)
+      return { mac_root: '/Users/me/Backups', device_label: 'Phone', free_bytes: 1 }
+    },
+    'POST /api/setup/ssd-folder': (body: unknown) => {
+      saved.push(body)
+      return { volume_uuid: 'u1', volume_name: 'T7', folder: 'Backups', root: '/Volumes/T7/Backups', free_bytes: 1 }
+    },
+  })
+  renderWizard('/settings')
+  await click('Choose…')
+  expect(await screen.findByDisplayValue('/Users/me/Backups')).toBeInTheDocument()
+  expect(await screen.findByText(/free here/)).toBeInTheDocument() // the folder was checked
+  await click('Save')
+  expect(await screen.findByText('Saved.')).toBeInTheDocument()
+  await click('Choose a folder on the drive…')
+  expect(await screen.findByText('Backups on T7')).toBeInTheDocument()
+  expect(saved).toEqual([
+    expect.objectContaining({ path: '/Users/me/Backups' }),
+    { path: '/Volumes/T7/Backups' },
+  ])
 })

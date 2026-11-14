@@ -113,6 +113,9 @@ def analyze(ctx: Ctx) -> TaskOut:
                 changed=embedded > 0,
                 should_stop=stop,
             )
+        partial = {"indexed": stats.indexed, "ocr": read, "embedded": embedded}
+        if control.should_stop:  # stopped: the later steps run next time; not marked analysed
+            return partial
         junk = rebuild_junk(
             ctx.db,
             device_id,

@@ -108,7 +108,7 @@ def build_report(
         for digest, dest_id in conn.execute(
             "SELECT r.content_hash, r.dest_id FROM replica r JOIN phone_file p "
             "ON p.content_hash = r.content_hash WHERE p.device_id = ? AND p.set_name = ? "
-            "AND p.present = 1",
+            "AND p.present = 1 AND r.rel_path NOT LIKE '.quarantine/%'",
             (device_id, set_name),
         ):
             if int(dest_id) in kinds:  # only the current Mac folder and SSD count

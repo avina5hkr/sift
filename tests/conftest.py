@@ -112,3 +112,15 @@ def ctx(paths: AppPaths) -> AppContext:
 @pytest.fixture
 def client(ctx: AppContext) -> TestClient:
     return helpers.client_for(ctx)
+
+
+@pytest.fixture(autouse=True)
+def _temp_folders_are_separate_drives(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Tests keep the "Mac" and "SSD" folders in one temp folder; model them as two drives.
+    A test marked `real_drives` sees the real same-drive rule."""
+    if request.node.get_closest_marker("real_drives") is None:
+        from sift.backup import places
+
+        monkeypatch.setattr(places, "same_drive", lambda a, b: False)

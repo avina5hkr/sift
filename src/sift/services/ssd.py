@@ -40,13 +40,26 @@ class SsdState:
         return asdict(self)
 
 
-def ssd_root(mount: str, mac_root: str) -> Path:
-    """Assumption A1: the SSD's backup folder has the same name as the Mac backup folder."""
+def ssd_root(mount: str, mac_root: str, folder: str = "") -> Path:
+    """The SSD's backup folder: the one the owner chose on the drive, else (assumption A1) a
+    folder at the top of the drive with the same name as the Mac backup folder."""
+    if folder.strip("/"):
+        return Path(mount) / folder.strip("/")
     name = Path(mac_root).expanduser().name or "PhoneBackup"
     return Path(mount) / name
 
 
-def ensure_destination(ctx: AppContext, uuid: str, root: Path, label: str) -> int:
+def drive_folder(root_path: str) -> str:
+    """The folder part of an SSD root, without its mount (/Volumes/<name>/)."""
+    parts = Path(root_path).parts
+    return (
+        str(Path(*parts[3:])) if len(parts) > 3 and parts[1] == "Volumes" else Path(root_path).name
+    )
+
+
+def ensure_destination(
+    ctx: AppContext, uuid: str, root: Path, label: str, mount: str | None = None
+) -> int:
     """The `destination` row for this SSD, created on first sight; its root follows the mount."""
     with ctx.db.tx() as conn:
         row = conn.execute(
@@ -60,6 +73,12 @@ def ensure_destination(ctx: AppContext, uuid: str, root: Path, label: str) -> in
             )
             return int(cur.lastrowid or 0)
         if row[1] != str(root):
+            held = conn.execute(
+                "SELECT 1 FROM replica WHERE dest_id = ? LIMIT 1", (row[0],)
+            ).fetchone()
+            if held is not None and mount is not None:
+                # it holds backups: follow a renamed mount, but keep its folder on the drive
+                root = Path(mount) / drive_folder(str(row[1]))
             conn.execute("UPDATE destination SET root_path = ? WHERE id = ?", (str(root), row[0]))
         return int(row[0])
 
@@ -115,8 +134,15 @@ class SsdWatcher:
                 continue
             if not self._ismount(volume.mount_point):
                 break  # listed but not really mounted: never write into a plain folder
-            root = ssd_root(volume.mount_point, self._ctx.config.backup.mac_root)
-            dest_id = ensure_destination(self._ctx, uuid, root, volume.name)
+            backup = self._ctx.config.backup
+            root = ssd_root(volume.mount_point, backup.mac_root, backup.ssd_folder)
+            dest_id = ensure_destination(self._ctx, uuid, root, volume.name, volume.mount_point)
+            with self._ctx.db.read() as conn:
+                root = Path(
+                    conn.execute(
+                        "SELECT root_path FROM destination WHERE id = ?", (dest_id,)
+                    ).fetchone()[0]
+                )
             return SsdState(True, True, volume.name, volume.mount_point, str(root), None, dest_id)
         return SsdState(configured=True, connected=False)
 

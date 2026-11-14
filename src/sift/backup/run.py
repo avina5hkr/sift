@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.backup.destination import sanitize_label
+from sift.backup.places import one_place
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
 from sift.backup.replicator import REPLICATION_LOCK, Dest, Replicator, load_dest
 from sift.backup.scanner import ScanResult, scan, space_check
@@ -162,6 +163,12 @@ def replicate_to_ssd(
     target = mac_target(ctx.db, ctx.config)
     mac = Dest(target.dest_id, "mac", target.root)
     ssd = ssd_dest(ctx)
+    if ssd is not None and one_place(mac.root, ssd.root):
+        progress.warnings.append(
+            "The SSD folder is on the same drive as the Mac folder, so it is not a second copy. "
+            "Choose a folder on the SSD in Settings."
+        )
+        return
     if ssd is None or not REPLICATION_LOCK.acquire(blocking=False):
         pending_now = ssd_pending(ctx, mac)
         if pending_now:
@@ -193,6 +200,9 @@ def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
     target = mac_target(ctx.db, ctx.config)
     mac = Dest(target.dest_id, "mac", target.root)
     ssd = ssd_dest(ctx)
+    if ssd is not None and one_place(mac.root, ssd.root):
+        log.warning("The SSD folder is on the Mac folder's drive; no copy is made")
+        return
     if ssd is None or not REPLICATION_LOCK.acquire(blocking=False):
         return  # a backup run is replicating already
     try:

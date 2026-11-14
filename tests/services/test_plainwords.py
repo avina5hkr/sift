@@ -17,6 +17,7 @@ from sift.backup.scanner import ScanNotPending
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.backup.verifier import NothingToRepairFrom
 from sift.cleanup.calibration import NothingToCalibrate
+from sift.cleanup.errors import ExecuteRefused, ManifestBlocked, RestoreRefused, RunBlocked
 from sift.core.db import (
     DatabaseBusyError,
     DatabaseCorruptError,
@@ -66,6 +67,10 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "DownloadStopped": DownloadStopped,
     "ClusteringStopped": ClusteringStopped,
     "NothingToCalibrate": NothingToCalibrate,
+    "ExecuteRefused": lambda m: ExecuteRefused("refused", m),
+    "ManifestBlocked": ManifestBlocked,
+    "RunBlocked": RunBlocked,
+    "RestoreRefused": RestoreRefused,
     "NothingToRepairFrom": NothingToRepairFrom,
     "TaskBusy": TaskBusy,
     "ScanNotPending": ScanNotPending,

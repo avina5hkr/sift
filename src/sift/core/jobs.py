@@ -604,6 +604,14 @@ class JobManager:
                 j.state not in TERMINAL for j in self._jobs.values() if j.type == "backup"
             ):
                 raise JobConflict("A backup is already running.")
+            tasks = getattr(self._ctx, "tasks", None)
+            busy = tasks.current() if tasks is not None else None
+            if (
+                busy is not None
+                and busy.kind in ("preflight", "delete")
+                and busy.state == "running"
+            ):
+                raise JobConflict("Sift is deleting files. Let it finish first.")
             self._starting = True  # held across the insert below, which must not hold `_lock`
         now = self._clock.now()
         params = json.dumps({"sets": list(names), "dry_run": dry_run})

@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, StrictStr
 
 from sift.backup.destination import DEFAULT_LABEL, check_mac_root, sanitize_label
 from sift.backup.phonepaths import shown
+from sift.backup.places import one_place
 from sift.backup.readers import ReaderTestCancelled, run_reader_test
 from sift.backup.run import mac_target
 from sift.core.config import BackupSet, save_config
@@ -39,6 +40,7 @@ from sift.server.errors import ApiError
 from sift.server.routes.backup import _job_error, _run_lock, _sets_lock, _unknown_set
 from sift.server.routes.devices import AdbManagerDep
 from sift.services.plainwords import describe
+from sift.services.ssd import drive_folder, ssd_root
 from sift.services.volumes import Volume, list_external_volumes
 
 router = APIRouter(prefix="/setup")
@@ -469,6 +471,7 @@ class VolumeOut(BaseModel):
 class VolumesOut(BaseModel):
     volumes: list[VolumeOut]
     selected_uuid: str
+    folder: str = ""  # the chosen folder on the SSD, relative to the drive ("" = default)
 
 
 @router.get("/volumes")
@@ -477,11 +480,13 @@ def list_volumes(ctx: Ctx, lister: VolumeLister) -> VolumesOut:
     return VolumesOut(
         volumes=[VolumeOut(**v.__dict__) for v in lister()],
         selected_uuid=ctx.config.backup.ssd_volume_uuid,
+        folder=ctx.config.backup.ssd_folder,
     )
 
 
 class SsdRequest(BaseModel):
     volume_uuid: StrictStr | None = None  # null skips the SSD
+    confirm_retire: bool = False  # stop using a drive that holds backups
 
 
 @router.post("/ssd")
@@ -494,13 +499,35 @@ def save_ssd(ctx: Ctx, body: SsdRequest, lister: VolumeLister) -> VolumesOut:
             "unknown_volume",
             "That drive is not connected any more. Plug it in and choose again.",
         )
+    with ctx.db.read() as conn:
+
+        def held(uuid: str) -> str | None:
+            row = conn.execute(
+                "SELECT d.root_path FROM destination d WHERE d.kind = 'ssd' AND d.volume_uuid = ? "
+                "AND EXISTS (SELECT 1 FROM replica r WHERE r.dest_id = d.id)",
+                (uuid,),
+            ).fetchone()
+            return None if row is None else str(row[0])
+
+        current = ctx.config.backup.ssd_volume_uuid
+        leaving = held(current) if current and wanted != current else None
+        coming = held(wanted) if wanted else None
+    if leaving is not None and not body.confirm_retire:
+        raise ApiError(
+            409,
+            "ssd_has_backups",
+            "The current SSD holds backups. Deletes then count only the other copies. "
+            "Confirm to stop using it.",
+        )
     with _config_lock:
-        previous = ctx.config.backup.ssd_volume_uuid
+        previous = ctx.config.backup.ssd_volume_uuid, ctx.config.backup.ssd_folder
+        if wanted != previous[0]:  # another drive: its own folder, if it held backups before
+            ctx.config.backup.ssd_folder = drive_folder(coming) if coming else ""
         ctx.config.backup.ssd_volume_uuid = wanted
         try:
             save_config(ctx.config, ctx.paths.config)
         except OSError as e:
-            ctx.config.backup.ssd_volume_uuid = previous
+            ctx.config.backup.ssd_volume_uuid, ctx.config.backup.ssd_folder = previous
             _log.exception("Could not save the SSD choice")
             raise ApiError(
                 500, "save_failed", "Sift could not save the settings. Nothing was changed."
@@ -508,6 +535,109 @@ def save_ssd(ctx: Ctx, body: SsdRequest, lister: VolumeLister) -> VolumesOut:
     if ctx.ssd is not None:  # look now: the chosen drive is usually plugged in already
         ctx.ssd.poll_once(force=True)
     return list_volumes(ctx, lister)
+
+
+class FolderPickRequest(BaseModel):
+    start: StrictStr | None = None  # the folder the dialog opens in
+
+
+class PickOut(BaseModel):
+    path: str | None  # None: the owner cancelled
+
+
+@router.post("/pick-folder")
+def pick_folder(ctx: Ctx, body: FolderPickRequest) -> PickOut:
+    """Show the macOS folder dialog and return the chosen folder. Only looks; saves nothing."""
+    if ctx.pick_folder is None:
+        raise ApiError(
+            409, "no_window", "Type the folder path; the folder dialog needs the app window."
+        )
+    return PickOut(path=ctx.pick_folder(body.start))
+
+
+class SsdFolderRequest(BaseModel):
+    path: StrictStr  # a folder on a connected external drive, e.g. /Volumes/T7/Backups/Phone
+
+
+class SsdFolderOut(BaseModel):
+    volume_uuid: str
+    volume_name: str
+    folder: str  # relative to the drive
+    root: str
+    free_bytes: int | None
+
+
+@router.post("/ssd-folder")
+def save_ssd_folder(ctx: Ctx, body: SsdFolderRequest, lister: VolumeLister) -> SsdFolderOut:
+    """Use a folder on a connected drive as the SSD backup folder. The drive is found from the
+    path; the folder must be inside it, not the drive itself. Once files are backed up there,
+    the folder can no longer move (their recorded places would be wrong)."""
+    wanted = Path(os.path.realpath(os.path.expanduser(body.path.strip())))
+    match = None
+    for v in lister():
+        mount = Path(os.path.realpath(v.mount_point)) if v.mount_point else None
+        if mount is not None and (wanted == mount or mount in wanted.parents):
+            match = (v, mount)
+    if match is None:
+        raise ApiError(422, "not_on_a_drive", "Choose a folder on the connected SSD.")
+    volume, mount = match
+    if not volume.suitable:
+        raise ApiError(
+            422, "unsuitable_drive", volume.warning or "This drive cannot hold the backup."
+        )
+    folder = wanted.relative_to(mount).as_posix()
+    if folder in ("", "."):
+        raise ApiError(
+            422, "drive_root", "Choose or make a folder on the drive, not the drive itself."
+        )
+    root = ssd_root(str(mount), ctx.config.backup.mac_root, folder)
+    if one_place(root, Path(ctx.config.backup.mac_root)):
+        raise ApiError(
+            422,
+            "same_drive",
+            "That folder is on the same drive as the Mac backup folder, so it would not be a "
+            "second copy. Choose a folder on the SSD.",
+        )
+    with ctx.db.read() as conn:
+        dest = conn.execute(
+            "SELECT d.root_path, EXISTS (SELECT 1 FROM replica r WHERE r.dest_id = d.id) "
+            "FROM destination d WHERE d.kind = 'ssd' AND d.volume_uuid = ?",
+            (volume.uuid,),
+        ).fetchone()
+    if dest is not None and dest[1] and Path(str(dest[0])) != root:
+        raise ApiError(
+            409,
+            "backups_exist",
+            "Sift has already backed up files to this drive, so its folder can no longer change "
+            "here. Move the existing backup first.",
+        )
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ApiError(
+            422, "invalid_folder", "Sift could not use that folder. Choose another one."
+        ) from e
+    with _config_lock:
+        backup = ctx.config.backup
+        previous = (backup.ssd_volume_uuid, backup.ssd_folder)
+        backup.ssd_volume_uuid, backup.ssd_folder = volume.uuid, folder
+        try:
+            save_config(ctx.config, ctx.paths.config)
+        except OSError as e:
+            backup.ssd_volume_uuid, backup.ssd_folder = previous
+            _log.exception("Could not save the SSD folder")
+            raise ApiError(
+                500, "save_failed", "Sift could not save the settings. Nothing was changed."
+            ) from e
+    if ctx.ssd is not None:
+        ctx.ssd.poll_once(force=True)
+    return SsdFolderOut(
+        volume_uuid=volume.uuid,
+        volume_name=volume.name,
+        folder=folder,
+        root=str(root),
+        free_bytes=volume.free_bytes,
+    )
 
 
 # -- what to back up -----------------------------------------------------------------------------

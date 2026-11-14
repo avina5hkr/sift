@@ -210,7 +210,7 @@ export type ReaderTestResult = {
 }
 
 // The `task` event and TaskOut: one long job (verify, adopt, rebuild, confirm, analyse) at a time.
-export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model'
+export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model' | 'preflight' | 'delete'
 export type TaskEvent = {
   kind: TaskKind
   state: 'running' | 'done' | 'stopped' | 'failed'
@@ -371,3 +371,47 @@ export type Cluster = {
 }
 export type ClustersResponse = { images: number; covered: number; clusters: Cluster[] }
 export type PictureItem = { id: number; path: string; content_hash: string; score: number; label: ClusterLabel | null }
+
+// Mirrors GET /api/delete/runs/{id}.
+export type DeleteRunState = 'preflight' | 'ready' | 'blocked' | 'running' | 'done' | 'stopped' | 'failed'
+export type DeleteItem = {
+  id: number
+  path: string
+  size: number
+  /** "ok" or a reason code. */
+  check: string
+  /** The reason in plain words (null for "ok"). */
+  reason: string | null
+  state: string
+  error: string | null
+}
+export type DeleteRun = {
+  id: number
+  source: string
+  state: DeleteRunState
+  blocked_reason: string | null
+  disposition: 'quarantine' | 'archive'
+  typed_required: boolean
+  passed: number
+  passed_bytes: number
+  deleted: number
+  failed: number
+  bytes_freed: number
+  manifests: string[]
+  backups: string[]
+  backed_up_on?: string
+  quarantine_days?: number
+  items: DeleteItem[]
+}
+export type DeleteBody = { source: 'cleanup'; ids: number[] } | { source: 'analysis'; sets: string[] }
+
+// Mirrors GET /api/quarantine and GET /api/cleanup/ready.
+export type QuarantineEntry = {
+  id: number
+  content_hash: string
+  phone_path: string | null
+  size: number
+  moved_at: number
+  purge_after: number
+}
+export type ReadySet = { set_name: string; files: number; bytes: number; confirmed_at: number }

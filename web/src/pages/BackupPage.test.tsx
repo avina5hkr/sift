@@ -733,7 +733,7 @@ test('Confirm needs the phone', async () => {
   expect(button).toHaveAccessibleDescription('Connect your phone to confirm.')
 })
 
-test('a finished analysis shows four groups per set and the time estimate, with no delete', async () => {
+test('a finished analysis shows four groups per set, the time estimate and Delete only', async () => {
   const g = (files: number, bytes: number) => ({ files, bytes })
   world.analysis = {
     id: 3,
@@ -759,5 +759,7 @@ test('a finished analysis shows four groups per set and the time estimate, with 
   expect(card).toHaveTextContent('90 files, 9.0 MB')
   expect(card).toHaveTextContent('1 file, 2.0 KB')
   expect(card).toHaveTextContent('would take about 10 min')
+  expect(within(card).getByRole('button', { name: 'Delete the backed-up files (9.0 MB)' })).toBeInTheDocument()
+  await userEvent.click(within(card).getByRole('button', { name: 'Not now' }))
   expect(within(card).queryByRole('button')).not.toBeInTheDocument()
 })

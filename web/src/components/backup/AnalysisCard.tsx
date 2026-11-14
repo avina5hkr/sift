@@ -1,5 +1,8 @@
+import { useState } from 'react'
 import { formatBytes, formatCount, formatEta } from '../../lib/format'
 import type { Analysis, AnalyseGroup } from '../../lib/types'
+import { DeleteFlow } from '../delete/DeleteFlow'
+import { useDeleteRun } from '../delete/useDeleteRun'
 
 const GROUPS = [
   ['verified', 'Backed up and verified'],
@@ -13,6 +16,9 @@ const count = (g: AnalyseGroup) => `${formatCount(g.files)} ${g.files === 1 ? 'f
 /** What Analyse phone found, per set. Read-only: nothing here changes the phone or the backup. */
 export function AnalysisCard({ analysis }: { analysis: Analysis }) {
   const result = analysis.result
+  const flow = useDeleteRun()
+  const [later, setLater] = useState(false)
+  const verifiedBytes = result ? Object.values(result.sets).reduce((n, set) => n + set.verified.bytes, 0) : 0
   return (
     <section aria-labelledby="analysis-title" className="rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
       <h2 id="analysis-title" className="text-lg font-semibold">
@@ -45,6 +51,26 @@ export function AnalysisCard({ analysis }: { analysis: Analysis }) {
             : 'Nothing is left to check on the phone.'}
         </p>
       )}
+      {result && verifiedBytes > 0 && !later && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={flow.phase !== 'idle'}
+            onClick={() => void flow.start({ source: 'analysis', sets: analysis.sets })}
+            className="rounded-md border border-neutral-900 bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-700 disabled:opacity-50 dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
+          >
+            Delete the backed-up files ({formatBytes(verifiedBytes)})
+          </button>
+          <button
+            type="button"
+            onClick={() => setLater(true)}
+            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+          >
+            Not now
+          </button>
+        </div>
+      )}
+      <DeleteFlow flow={flow} />
       {result && result.warnings.length > 0 && (
         <ul className="mt-2 list-disc pl-5 text-sm">
           {result.warnings.map((w) => (

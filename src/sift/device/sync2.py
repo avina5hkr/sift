@@ -24,7 +24,7 @@ never sent. Both are gated by the `stat_v2` feature.
 
 import socket
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import closing
 from dataclasses import dataclass
 from types import TracebackType
@@ -38,6 +38,7 @@ _REQUEST = struct.Struct("<4sI")
 _REQUIRED_FEATURES = frozenset({"stat_v2", "ls_v2"})
 _MAX_PATH_BYTES = 1024  # adb's path limit; also the cap for a name in a LIS2 listing
 _MAX_FAIL_BYTES = 64 * 1024  # adbd's SYNC_DATA_MAX: the cap for a sync FAIL message
+_MAX_DATA = 64 * 1024  # the largest DATA chunk adbd accepts
 _TOO_OLD = "This phone's adb is too old for Sift (needs Android 11 or later)."
 
 
@@ -157,6 +158,28 @@ class Sync2:
             if ident != b"LST2":
                 raise TransportError(f"Unexpected sync reply: {ident!r}")
             return _parse_stat(adbwire.recv_exact(sock, _STAT.size))
+        except BaseException:
+            self.close()
+            raise
+
+    def send(self, path: bytes, data: Iterable[bytes], *, mtime: int, mode: int = 0o644) -> None:
+        """`SEND`: write a new regular file (sync v1: `path,mode`, DATA chunks, `DONE` + mtime).
+        Writes to the phone; only quarantine restore calls it, after checking the path is free."""
+        spec = path + b"," + str(0o100000 | mode).encode()
+        sock = self._check(spec)
+        try:
+            adbwire.send_all(sock, _REQUEST.pack(b"SEND", len(spec)) + spec)
+            for chunk in data:
+                for start in range(0, len(chunk), _MAX_DATA):
+                    part = chunk[start : start + _MAX_DATA]
+                    adbwire.send_all(sock, b"DATA" + _U32.pack(len(part)) + part)
+            adbwire.send_all(sock, b"DONE" + _U32.pack(mtime & 0xFFFFFFFF))
+            ident = adbwire.recv_exact(sock, 4)
+            if ident == b"FAIL":
+                raise self._fail(sock, path)
+            if ident != b"OKAY":
+                raise TransportError(f"Unexpected sync reply: {ident!r}")
+            adbwire.recv_exact(sock, _U32.size)
         except BaseException:
             self.close()
             raise

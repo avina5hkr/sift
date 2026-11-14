@@ -70,6 +70,8 @@ class FakeAdbServer:
     recv_cut_after: int | None = None
     # `exec:<command>`: the command bytes in, stdout chunks out. None refuses exec.
     exec_handler: Callable[[bytes], Iterable[bytes]] | None = None
+    # SEND: called with (path, data, mtime) once the file is complete.
+    on_send: Callable[[bytes, bytes, int], None] | None = None
 
     def __post_init__(self) -> None:
         self._stop = threading.Event()
@@ -222,6 +224,17 @@ class FakeAdbServer:
                 if not self._send_file(conn, path):
                     return
                 continue
+            elif ident == b"SEND":
+                target = path.rsplit(b",", 1)[0]
+                data = b""
+                while True:
+                    kind, size = _REQUEST.unpack(self._recv(conn, _REQUEST.size))
+                    if kind == b"DONE":
+                        if self.on_send is not None:
+                            self.on_send(target, data, size)
+                        reply = b"OKAY" + struct.pack("<I", 0)
+                        break
+                    data += self._recv(conn, size)
             else:
                 # Anything else, including v1 LIST/STAT, is refused.
                 body = b"unsupported sync command"
