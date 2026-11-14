@@ -34,6 +34,14 @@ def _no_backup_running(ctx: Ctx) -> None:
         raise ApiError(409, "job_conflict", "A backup is running. Let it finish first.")
 
 
+def _usb_for_delete(ctx: Ctx) -> None:
+    """Deleting from the phone needs USB unless the owner allowed Wi-Fi (spec 6)."""
+    from sift.device.wifi import delete_blocked
+
+    if why := delete_blocked(ctx.config.phone.allow_delete_over_wifi, _session(ctx)):
+        raise ApiError(409, "wifi", why)
+
+
 class PreflightRequest(BaseModel):
     source: Literal["cleanup", "analysis", "browse"]
     ids: list[int] = Field(default_factory=list, max_length=50_000)  # cleanup/browse: files
@@ -52,6 +60,7 @@ class PreflightStarted(BaseModel):
 def start_preflight(ctx: Ctx, body: PreflightRequest) -> PreflightStarted:
     device_id = _device(ctx)
     _no_backup_running(ctx)
+    _usb_for_delete(ctx)
     skipped: list[str] = []
     if body.source == "analysis":
         ids = ids_for_sets(ctx, device_id, body.sets)

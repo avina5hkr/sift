@@ -595,8 +595,15 @@ class DeviceTracker:
             return
         link = None if is_wifi_serial(serial) else self._link_speed(serial)
         session = DeviceSession(transport, stored.identity, stored.uuid)
-        self._set_connection(_Connection(serial, session, link, now + REFRESH_S))
+        self._set_connection(_Connection(serial, session, link, now + self._every(serial)))
         self._set(self._connected(serial, info, link, stored.uuid))
+
+    def _every(self, serial: str) -> float:
+        """How often to re-read the connected phone: a Wi-Fi link is checked every
+        `phone.heartbeat_seconds` (Wi-Fi adb can drop without an error), USB every minute."""
+        if is_wifi_serial(serial):
+            return float(self._ctx.config.phone.heartbeat_seconds)
+        return REFRESH_S
 
     def _refresh(self, connection: _Connection, now: float) -> None:
         """Re-read battery, storage and identity of the connected phone (no link speed).
@@ -604,7 +611,7 @@ class DeviceTracker:
         One failed refresh keeps the connected state (the phone may just be busy); only
         `REFRESH_FAILURES_OFFLINE` in a row show it as offline.
         """
-        connection.refresh_at = now + REFRESH_S
+        connection.refresh_at = now + self._every(connection.serial)
         try:
             info = self._info(connection.session.transport)
         except TransportError as e:

@@ -162,6 +162,11 @@ class Transport(Protocol):
         when the phone cannot answer it."""
         ...
 
+    def global_setting(self, name: str, value: str | None) -> str | None:
+        """`settings get global NAME` when `value` is None, else `settings put global NAME
+        VALUE` (digits only); returns the value read or written, None when unreadable."""
+        ...
+
     def health_probe(self, kind: str) -> str | None:
         """Text of one read-only health probe (`device.health.PROBES`), or None when the phone
         cannot answer it."""

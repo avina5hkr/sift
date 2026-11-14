@@ -94,6 +94,7 @@ class FakePhone:
     ) -> None:
         self.serial = serial
         self.apps: dict[str, FakeApp] = {}
+        self.settings: dict[str, str] = {}  # global settings (stay_on_while_plugged_in)
         self.health: dict[str, str | None] = {}  # probe kind -> text (None = cannot answer)
         self.contacts: int | None = 0  # the contacts provider's count (None = cannot answer)
         self.bugreport: bytes | None = b"PK\x03\x04 fake bug report"  # None: FAIL

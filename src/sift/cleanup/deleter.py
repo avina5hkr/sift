@@ -38,6 +38,10 @@ def check_execute(
     now: Callable[[], float] = time.time,
 ) -> None:
     """Raise ExecuteRefused unless this run may delete now."""
+    from sift.device.wifi import delete_blocked
+
+    if why := delete_blocked(ctx.config.phone.allow_delete_over_wifi, session):
+        raise ExecuteRefused("wifi", why)
     with ctx.db.read() as conn:
         row = conn.execute(
             "SELECT state, preflight_done_at, typed_required, passed, source, selection_hash, "

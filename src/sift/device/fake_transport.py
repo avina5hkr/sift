@@ -472,6 +472,13 @@ class FakeTransport:
                 )
             raise ValueError(kind)
 
+    def global_setting(self, name: str, value: str | None) -> str | None:
+        self._begin("global_setting", name, mutating=value is not None)
+        if value is None:
+            return self.phone.settings.get(name, "0")
+        self.phone.settings[name] = value
+        return value
+
     def health_probe(self, kind: str) -> str | None:
         from sift.device.fake_health import canned
         from sift.device.health import PROBES
