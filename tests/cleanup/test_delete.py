@@ -183,10 +183,14 @@ def test_provisional_entry_never_satisfies_a_preflight_gate(rig: Rig) -> None:
 def test_unbacked_files_never_offered(rig: Rig) -> None:
     camera(rig)
     rig.transport.phone.add_file("/sdcard/DCIM/Camera/new.jpg", b"new photo", mtime=1_600_000_000)
-    jobs_scan = ids_for_sets(rig.ctx, device_id(rig), ["Camera"])
+    jobs = rig.jobs()
+    from tests.backup.test_run import finished
+
+    finished(jobs, jobs.start_backup(["Camera"], dry_run=True))  # seen by a scan, not copied
     with rig.ctx.db.read() as conn:
         new = conn.execute("SELECT id FROM phone_file WHERE remote_path LIKE '%new.jpg'").fetchone()
-    assert new is None or int(new[0]) not in jobs_scan
+    assert new is not None
+    assert int(new[0]) not in ids_for_sets(rig.ctx, device_id(rig), ["Camera"])
 
 
 def test_delete_waits_for_missing_ssd(rig: Rig) -> None:
@@ -258,36 +262,148 @@ def test_nothing_deletes_without_execute(rig: Rig) -> None:
     assert not [e for e in rig.transport.journal if e.mutating and e.op != "media_rescan"]
 
 
-def test_p4_every_deleted_file_was_verified_hashed_and_confirmed(rig: Rig) -> None:
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_p4_every_deleted_file_was_verified_hashed_and_confirmed(rig: Rig, seed: int) -> None:
     """P4 over random faults: whatever is mutated, before or after the preflight, a deleted file
-    always had a verified backup of the right size, an unchanged phone copy and was planned."""
+    always had a verified backup of the right size, an unchanged phone copy, and was planned."""
     ids = camera(rig)
-    rng = random.Random(4)
+    rng = random.Random(seed)
     phone = rig.transport.phone
-    before = rng.sample(ids, 4)
-    after = rng.sample([i for i in ids if i not in before], 3)
-    faults = ["edit", "corrupt", "remove_replica", "outside_roots"]
+    picked = rng.sample(ids, 8)
+    before, after = picked[:5], picked[5:]
+    faults = ["edit", "corrupt", "remove_replica", "never_list", "hash_only"]
+    rng.shuffle(faults)
     for pid, fault in zip(before, faults, strict=True):
+        path = path_of(rig, pid)
         if fault == "edit":
-            phone.modify(path_of(rig, pid), b"x", int(time.time()) - 40 * 86400)
+            phone.modify(path, b"x", int(time.time()) - 40 * 86400)
         elif fault == "corrupt":
             local_of(rig, pid).write_bytes(b"")
         elif fault == "remove_replica":
             local_of(rig, pid).unlink()
-        else:
-            rig.ctx.config.cleanup.delete_roots = [
-                r for r in rig.ctx.config.cleanup.delete_roots if r != "/sdcard/DCIM"
-            ] + ["/sdcard/DCIM/Screenshots"]
+        elif fault == "never_list":
+            rig.ctx.config.cleanup.never_delete.append(path)
+        else:  # same size and mtime, different bytes: only the phone's hash can tell
+            rig.transport.faults.wrong_sha256.add(path)
     run_id, _ = preflight(rig, ids)
-    rig.ctx.config.cleanup.delete_roots.append("/sdcard/DCIM")
-    for pid in after:  # changed between preflight and execute
+    got = results(rig, run_id)
+    assert all(got[p] != "ok" for p in before), got
+    for pid in after:  # changed between the preflight and the execute
         phone.modify(path_of(rig, pid), b"late", int(time.time()) - 40 * 86400)
-    if results(rig, run_id) and any(v == "ok" for v in results(rig, run_id).values()):
-        run(rig, run_id)
-    planned_ok = {path_of(rig, p) for p, r in results(rig, run_id).items() if r == "ok"}
-    bad = {path_of(rig, p) for p in before + after}
-    for path in deletes(rig):
-        assert path in planned_ok and path not in bad
+    run(rig, run_id)
+    gone = deletes(rig)
+    planned_ok = {path_of(rig, p) for p, r in got.items() if r == "ok"}
+    bad = {path_of(rig, p) for p in picked}
+    assert gone, "the run deleted nothing, so the property was not exercised"
+    assert set(gone) <= planned_ok and not set(gone) & bad
+    for pid in ids:
+        if path_of(rig, pid) in gone:
+            assert local_of(rig, pid).is_file()  # its backup is still there
+
+
+def test_the_manifest_is_on_disk_before_the_first_delete(rig: Rig) -> None:
+    ids = camera(rig)[:3]
+    run_id, _ = preflight(rig, ids)
+    seen: list[bool] = []
+    real = rig.transport.delete
+
+    def checked(path: str) -> None:
+        with rig.ctx.db.read() as conn:
+            listed = conn.execute(
+                "SELECT manifests FROM delete_run WHERE id = ?", (run_id,)
+            ).fetchone()[0]
+        seen.append(bool(listed) and all(Path(m).is_file() for m in json.loads(listed)))
+        real(path)
+
+    rig.transport.delete = checked  # type: ignore[method-assign]
+    run(rig, run_id)
+    assert seen and all(seen)
+
+
+def test_a_quarantined_copy_is_never_a_backup_and_comes_back_when_the_phone_has_it(
+    rig: Rig,
+) -> None:
+    ids = whatsapp(rig, 1)
+    with rig.ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO label (content_hash, label, source, created_at) "
+            "SELECT content_hash, 'junk', 'manual', 1 FROM phone_file WHERE id = ?",
+            (ids[0],),
+        )
+        digest = conn.execute(
+            "SELECT content_hash FROM phone_file WHERE id = ?", (ids[0],)
+        ).fetchone()[0]
+    path = path_of(rig, ids[0])
+    data = rig.transport.phone.entry(path)
+    assert data is not None
+    run_id, _ = preflight(rig, ids, source="cleanup", disposition="quarantine")
+    assert run(rig, run_id)["quarantined"] == 1
+    # the same picture arrives on the phone again and the backup only links it
+    with rig.ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO phone_file (device_id, remote_path, origin, size, mtime, content_hash, "
+            "state, present) SELECT device_id, remote_path || '.again', origin, size, mtime, "
+            "content_hash, 'done', 1 FROM phone_file WHERE id = ?",
+            (ids[0],),
+        )
+        again = conn.execute(
+            "SELECT id FROM phone_file WHERE content_hash = ? AND present = 1", (digest,)
+        ).fetchone()[0]
+    with rig.ctx.db.read() as conn:  # while quarantined it is not offered by Delete only
+        rows = conn.execute(
+            "SELECT rel_path FROM replica WHERE content_hash = ?", (digest,)
+        ).fetchall()
+    assert all(r[0].startswith(".quarantine/") for r in rows)
+    assert again not in ids_for_sets(rig.ctx, device_id(rig), ["WhatsApp media"])
+    # purge never removes it while a phone has it; it moves back into the tree instead
+    assert purge_due(rig.ctx, now=time.time() + 40 * 86400) == 0
+    with rig.ctx.db.read() as conn:
+        rows = conn.execute(
+            "SELECT rel_path FROM replica WHERE content_hash = ?", (digest,)
+        ).fetchall()
+    assert rows and not any(r[0].startswith(".quarantine/") for r in rows)
+    assert entries(rig.ctx) == []
+
+
+def test_a_near_copy_needs_its_keeper_on_the_phone(rig: Rig) -> None:
+    ids = whatsapp(rig, 2)
+    with rig.ctx.db.tx() as conn:
+        a, b = (
+            conn.execute("SELECT content_hash FROM phone_file WHERE id = ?", (i,)).fetchone()[0]
+            for i in ids
+        )
+        conn.execute(
+            "INSERT INTO near_group (id, kind, group_type, algo_version) "
+            "VALUES (1, 'image', 'wa_forward', 1)"
+        )
+        conn.execute(
+            "INSERT INTO near_member (group_id, content_hash, role) VALUES (1, ?, 'keeper')", (a,)
+        )
+        conn.execute(
+            "INSERT INTO near_member (group_id, content_hash, role) VALUES (1, ?, 'copy')", (b,)
+        )
+    run_id, _ = preflight(rig, [ids[1]], source="cleanup", disposition="quarantine")
+    assert results(rig, run_id)[ids[1]] == "ok"  # its keeper stays on the phone
+    both, _ = preflight(rig, ids, source="cleanup", disposition="quarantine")
+    got = results(rig, both)
+    assert got[ids[0]] == "keeper" and got[ids[1]] == "keeper_missing"
+    with rig.ctx.db.tx() as conn:  # the keeper left the phone
+        conn.execute("UPDATE phone_file SET present = 0 WHERE id = ?", (ids[0],))
+    alone, _ = preflight(rig, [ids[1]], source="cleanup", disposition="quarantine")
+    assert results(rig, alone)[ids[1]] == "keeper_missing"
+
+
+def test_a_backup_cannot_start_while_files_are_being_deleted(rig: Rig) -> None:
+    from sift.core.jobs import JobConflict
+    from sift.services.tasks import TaskStatus
+
+    class Busy:
+        def current(self) -> TaskStatus:
+            return TaskStatus(kind="delete", state="running")
+
+    rig.ctx.tasks = Busy()  # type: ignore[assignment]
+    with pytest.raises(JobConflict):
+        rig.jobs().start_backup(["Camera"])
 
 
 def test_quarantine_moves_junk_copies_and_can_restore_or_purge(rig: Rig) -> None:
@@ -349,3 +465,21 @@ def test_delete_only_over_the_api(rig: Rig) -> None:
         "/api/delete/preflight", headers=H, json={"source": "cleanup", "ids": [1, 2]}
     )
     assert empty.status_code == 409  # nothing ticked
+
+
+def test_a_backup_lost_after_the_checks_stops_that_delete(rig: Rig) -> None:
+    ids = camera(rig)[:3]
+    run_id, _ = preflight(rig, ids)
+    local_of(rig, ids[0]).unlink()
+    done = run(rig, run_id)
+    assert path_of(rig, ids[0]) not in deletes(rig) and done["deleted"] == 2
+
+
+def test_paths_that_could_climb_out_of_a_root_are_refused(rig: Rig) -> None:
+    from sift.cleanup.preflight import in_delete_roots
+
+    cfg = rig.ctx.config
+    assert in_delete_roots(cfg, "/sdcard/DCIM/Camera/a.jpg")
+    for bad in ("/sdcard/DCIM/../Android/data/x", "/sdcard/DCIM//a.jpg", "/sdcard/DCIM/./a.jpg"):
+        assert not in_delete_roots(cfg, bad), bad
+    assert not in_delete_roots(cfg, "/sdcard/Android/media/com.whatsapp/WhatsApp/Databases/x")

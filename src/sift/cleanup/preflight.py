@@ -49,6 +49,7 @@ REASONS = {
     "too_new": "Too new",
     "hash_mismatch": "The phone's copy does not match the backup",
     "unreadable": "The phone could not read it",
+    "over_limit": "More than one run may delete; run it again for the rest",
 }
 
 
@@ -98,7 +99,7 @@ def ids_for_sets(ctx: AppContext, device_id: int, sets: Sequence[str]) -> list[i
             "SELECT p.id, p.remote_path FROM phone_file p WHERE p.device_id = ? AND p.present = 1 "
             "AND p.state = 'done' AND p.content_hash IS NOT NULL AND "
             "(SELECT count(DISTINCT r.dest_id) FROM replica r "
-            "WHERE r.content_hash = p.content_hash "
+            "WHERE r.content_hash = p.content_hash AND r.rel_path NOT LIKE '.quarantine/%' "
             f"AND r.verified_at IS NOT NULL AND r.dest_id IN ({marks})) = ?",
             (device_id, *need, len(need)),
         ).fetchall()
@@ -122,6 +123,9 @@ def _under(key: str, roots: Sequence[str]) -> bool:
 
 def in_delete_roots(cfg: Config, path: str) -> bool:
     key = phone_path_key(path)
+    parts = key.split("/")[1:]
+    if any(part in ("", ".", "..") for part in parts) or "\n" in key:
+        return False  # never trust a path that could climb out of a root
     never = [phone_path_key(p) for p in (*NEVER_DELETE_FLOOR, *cfg.cleanup.never_delete)]
     roots = [phone_path_key(p) for p in cfg.cleanup.delete_roots]
     return key.startswith("/sdcard/") and _under(key, roots) and not _under(key, never)
@@ -161,7 +165,8 @@ def _protected(
                 )
     for f in files:
         row = info.get(str(f.digest))
-        if row is None:
+        if row is None:  # nothing known about it: fail closed
+            out.add(f.pid)
             continue
         item = Item(
             str(row[0]), str(row[1]), int(row[2]), row[3], row[4], row[5], bool(row[6]),
@@ -209,16 +214,25 @@ def _keepers(
                 "SELECT id FROM phone_file WHERE device_id = ? AND present = 1", (device_id,)
             )
         }
-        near_keeper_paths: dict[str, set[int]] = {}
-        for digest, kpid in conn.execute(
-            "SELECT m.content_hash, kp.id FROM near_member m "
-            "JOIN near_member k ON k.group_id = m.group_id AND k.role = 'keeper' "
-            "JOIN phone_file kp ON kp.content_hash = k.content_hash AND kp.device_id = ? "
-            "AND kp.present = 1 WHERE m.role = 'copy'",
+        copy_groups: dict[str, set[int]] = {}  # content -> near groups it is a copy in
+        keeper_groups: dict[str, set[int]] = {}  # content -> near groups it keeps
+        for gid, digest, role in conn.execute(
+            "SELECT group_id, content_hash, role FROM near_member"
+        ):
+            target = keeper_groups if role == "keeper" else copy_groups
+            target.setdefault(str(digest), set()).add(int(gid))
+        keeper_paths: dict[int, set[int]] = {}  # near group -> its keeper's present paths
+        for gid, kpid in conn.execute(
+            "SELECT k.group_id, kp.id FROM near_member k JOIN phone_file kp "
+            "ON kp.content_hash = k.content_hash AND kp.device_id = ? AND kp.present = 1 "
+            "WHERE k.role = 'keeper'",
             (device_id,),
         ):
-            near_keeper_paths.setdefault(str(digest), set()).add(int(kpid))
+            keeper_paths.setdefault(int(gid), set()).add(int(kpid))
     del ids
+    selected_copy_groups = {
+        g for f in files if f.pid in selected for g in copy_groups.get(str(f.digest), set())
+    }
     for f in files:
         role = exact.get(f.pid)
         if role is not None and role[1] == "keeper":
@@ -229,9 +243,12 @@ def _keepers(
             if keeper is None or keeper not in present or keeper in selected:
                 out[f.pid] = "keeper_missing"
             continue
-        kept = near_keeper_paths.get(str(f.digest))
-        if kept is not None and not (kept - selected):
-            out[f.pid] = "keeper_missing"
+        if keeper_groups.get(str(f.digest), set()) & selected_copy_groups:
+            out[f.pid] = "keeper"  # its copies are being removed because it stays
+            continue
+        groups = copy_groups.get(str(f.digest), set())
+        if any(not (keeper_paths.get(g, set()) - selected) for g in groups):
+            out[f.pid] = "keeper_missing"  # a near copy needs its keeper still on the phone
     return out
 
 
@@ -250,7 +267,7 @@ def _replicas_ok(ctx: AppContext, files: list[_File]) -> dict[int, str]:
             for kind, dest_id in need:
                 row = conn.execute(
                     "SELECT rel_path, size FROM replica WHERE content_hash = ? AND dest_id = ? "
-                    "AND verified_at IS NOT NULL",
+                    "AND verified_at IS NOT NULL AND rel_path NOT LIKE '.quarantine/%'",
                     (f.digest, dest_id),
                 ).fetchone()
                 if row is None:
@@ -298,6 +315,9 @@ def run_preflight(
     files = [
         _File(int(r[0]), from_db(str(r[1])), str(r[1]), r[2], int(r[3]), int(r[4])) for r in rows
     ]
+    from sift.cleanup.quarantine import revive
+
+    revive(ctx)  # content back on a phone leaves quarantine first
     try:
         if session is None:
             raise RunBlocked("Connect the phone over USB first.")
@@ -390,6 +410,10 @@ def _finish(
     blocked: str | None = None,
     stopped: bool = False,
 ) -> None:
+    if blocked is None and not stopped:  # one run deletes at most max_delete_per_run files
+        cap = ctx.config.cleanup.max_delete_per_run
+        for f in [f for f in files if f.result == "ok"][cap:]:
+            f.result = "over_limit"
     passed = [f for f in files if f.result == "ok"] if blocked is None and not stopped else []
     state = "stopped" if stopped else "blocked" if blocked or not passed else "ready"
     reason = blocked if blocked else (None if passed or stopped else "No file passed the checks.")

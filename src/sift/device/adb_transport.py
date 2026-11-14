@@ -913,7 +913,7 @@ class AdbTransport:
             return True
         commands = [
             "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "
-            + shlex.quote("file://" + urllib.parse.quote(p))
+            + shlex.quote("file://" + urllib.parse.quote(p.encode("utf-8", "surrogateescape")))
             + " >/dev/null 2>&1"
             for p in paths
         ]

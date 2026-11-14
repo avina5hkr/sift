@@ -286,6 +286,17 @@ def recover_at_startup(ctx: AppContext) -> None:
         recover(ctx.db)
     except Exception:
         _log.exception("Recovery at startup failed")
+    try:
+        with ctx.db.tx() as conn:  # a delete run a crash interrupted ends as stopped
+            conn.execute(
+                "UPDATE delete_run SET state = 'stopped', finished_at = strftime('%s', 'now') "
+                "WHERE state IN ('preflight', 'running')"
+            )
+        from sift.cleanup.quarantine import reconcile
+
+        reconcile(ctx)
+    except Exception:
+        _log.exception("Delete-run recovery at startup failed")
 
 
 def build_jobs(ctx: AppContext, notifier: Notifier | None = None) -> JobManager:

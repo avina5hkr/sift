@@ -1080,6 +1080,12 @@ def test_push_writes_a_new_file_and_never_replaces_one(
         transport.push(local, "/sdcard/DCIM/a.jpg", 1)
 
 
+def test_media_rescan_takes_names_that_are_not_utf8(transport: AdbTransport, phone: Phone) -> None:
+    odd = b"/sdcard/DCIM/caf\xe9.jpg".decode("utf-8", "surrogateescape")
+    assert transport.media_rescan([odd])
+    assert "caf%E9.jpg" in phone.rescanned[0]
+
+
 def test_media_rescan_asks_for_each_path(transport: AdbTransport, phone: Phone) -> None:
     assert transport.media_rescan(["/sdcard/DCIM/a b.jpg", "/sdcard/x.jpg"])
     assert len(phone.rescanned) == 1 and "file:///sdcard/DCIM/a%20b.jpg" in phone.rescanned[0]

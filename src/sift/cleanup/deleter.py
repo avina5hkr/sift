@@ -82,6 +82,35 @@ def check_execute(
         raise ExecuteRefused("wrong_phone", f"Sift could not confirm the phone: {e}") from e
 
 
+def backups_still_there(ctx: AppContext, digest: str | None, size: int) -> bool:
+    """I3a again, just before the delete: each required copy is still there, right size."""
+    from pathlib import Path
+
+    from sift.backup.confirm import current_dest_ids, required_kinds
+    from sift.backup.run import usable_dests
+
+    if digest is None:
+        return False
+    dests = current_dest_ids(ctx.db, ctx.config)
+    usable = {d.id: d for d in usable_dests(ctx)}
+    with ctx.db.read() as conn:
+        for kind in required_kinds(ctx.config):
+            dest = usable.get(dests[kind])
+            row = conn.execute(
+                "SELECT rel_path FROM replica WHERE content_hash = ? AND dest_id = ? "
+                "AND verified_at IS NOT NULL AND rel_path NOT LIKE '.quarantine/%'",
+                (digest, dests[kind]),
+            ).fetchone()
+            if dest is None or row is None:
+                return False
+            try:
+                if (Path(dest.root) / str(row[0])).stat().st_size != size:
+                    return False
+            except OSError:
+                return False
+    return True
+
+
 def execute(
     ctx: AppContext,
     run_id: int,
@@ -122,6 +151,8 @@ def execute(
                 state = "gone"
             elif entry.size != size or entry.mtime != mtime:
                 state = "changed"  # edited after the preflight: left alone
+            elif not backups_still_there(ctx, digest, int(size)):
+                state, error = "failed", "The backup copy is missing now."
             else:
                 transport.delete(path)
                 if transport.stat(path) is not None:
@@ -144,6 +175,12 @@ def execute(
                     "UPDATE phone_file SET state = 'deleted', present = 0 WHERE id = ?", (pid,)
                 )
                 conn.execute("DELETE FROM selection WHERE phone_file_id = ?", (pid,))
+            conn.execute(
+                "UPDATE delete_run SET deleted = deleted + ?, failed = failed + ?, "
+                "bytes_freed = bytes_freed + ? WHERE id = ?",
+                (int(state == "deleted"), int(state == "failed"),
+                 int(size) if state == "deleted" else 0, run_id),
+            )  # fmt: skip
             if state in ("deleted", "failed"):
                 conn.execute(
                     "INSERT INTO deletion_log (phone_file_id, remote_path, content_hash, size, "
@@ -159,17 +196,34 @@ def execute(
             failed += 1
         if on_progress is not None:
             on_progress(n, len(rows))
-    if gone_paths and not transport.media_rescan(gone_paths):
-        log.info("The phone did not take the media rescan request")
+    moved = 0
+    try:
+        try:
+            if gone_paths and not transport.media_rescan(gone_paths):
+                log.info("The phone did not take the media rescan request")
+        except Exception as e:  # best effort only (F4)
+            log.info("Media rescan failed: %s", e)
+        with ctx.db.read() as conn:
+            disposition = conn.execute(
+                "SELECT disposition FROM delete_run WHERE id = ?", (run_id,)
+            ).fetchone()[0]
+        moved = quarantine_run(ctx, run_id) if disposition == "quarantine" else 0
+    finally:
+        with ctx.db.tx() as conn:
+            conn.execute(
+                "UPDATE delete_run SET state = ?, finished_at = ? WHERE id = ?",
+                (final, int(time.time()), run_id),
+            )
     with ctx.db.read() as conn:
-        disposition = conn.execute(
-            "SELECT disposition FROM delete_run WHERE id = ?", (run_id,)
+        not_done = conn.execute(
+            "SELECT count(*) FROM delete_item WHERE run_id = ? AND check_result = 'ok' "
+            "AND state = 'planned'",
+            (run_id,),
         ).fetchone()[0]
-    moved = quarantine_run(ctx, run_id) if disposition == "quarantine" else 0
-    with ctx.db.tx() as conn:
-        conn.execute(
-            "UPDATE delete_run SET state = ?, finished_at = ?, deleted = deleted + ?, "
-            "failed = failed + ?, bytes_freed = bytes_freed + ? WHERE id = ?",
-            (final, int(time.time()), deleted, failed, freed, run_id),
-        )
-    return {"deleted": deleted, "failed": failed, "bytes_freed": freed, "quarantined": moved}
+    return {
+        "deleted": deleted,
+        "failed": failed,
+        "bytes_freed": freed,
+        "quarantined": moved,
+        "not_done": int(not_done),  # stopped, or beyond max_delete_per_run
+    }
