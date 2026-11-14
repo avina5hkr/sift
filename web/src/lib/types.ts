@@ -421,7 +421,12 @@ export type DeleteRun = {
   quarantine_days?: number
   items: DeleteItem[]
 }
-export type DeleteBody = { source: 'cleanup'; ids: number[] } | { source: 'analysis'; sets: string[] }
+export type DeleteBody =
+  | { source: 'cleanup'; ids: number[] }
+  | { source: 'analysis'; sets: string[] }
+  | { source: 'browse'; ids: number[]; folders: string[] }
+/** What happens to the backup copy of a file deleted from Browse. */
+export type Disposition = 'archive' | 'quarantine'
 
 // Mirrors GET /api/quarantine and GET /api/cleanup/ready.
 export type QuarantineEntry = {
@@ -433,3 +438,47 @@ export type QuarantineEntry = {
   purge_after: number
 }
 export type ReadySet = { set_name: string; files: number; bytes: number; confirmed_at: number }
+
+// Mirrors GET /api/browse and /api/browse/lists.
+export type BrowseStatus = 'mac_ssd' | 'mac_only' | 'ssd_only' | 'not_backed_up' | 'changed'
+export type BrowseFolder = {
+  name: string
+  path: string
+  size: number
+  files: number
+  mtime: number
+  status: Partial<Record<BrowseStatus, number>>
+}
+export type BrowseFile = {
+  id: number
+  name: string
+  path: string
+  size: number
+  mtime: number
+  kind: string
+  origin: string
+  status: BrowseStatus
+}
+export type BrowsePage = {
+  path: string
+  crumbs: string[]
+  folders: BrowseFolder[]
+  files: BrowseFile[]
+  total_files: number
+  total_size: number
+}
+export type SmartList = { key: string; title: string; files: number; bytes: number }
+export type SmartListPage = { key: string; title: string; total_files: number; files: BrowseFile[] }
+
+// Mirrors GET /api/archive and /api/archive/destinations.
+export type ArchiveDestination = { id: number; kind: 'mac' | 'ssd'; root: string }
+export type ArchiveFolder = { name: string; rel_path: string; size: number; files: number }
+export type ArchiveFile = {
+  rel_path: string
+  name: string
+  size: number
+  content_hash: string
+  phone_path: string | null
+  on_phone: boolean
+}
+export type ArchiveListing = { dest: number; path: string; folders: ArchiveFolder[]; files: ArchiveFile[] }

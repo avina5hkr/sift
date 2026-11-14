@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { formatBytes, formatCount, formatEta } from '../../lib/format'
+import { Link } from 'react-router'
+import { useStatus } from '../../lib/useStatus'
 import type { Analysis, AnalyseGroup } from '../../lib/types'
 import { DeleteFlow } from '../delete/DeleteFlow'
 import { useDeleteRun } from '../delete/useDeleteRun'
@@ -17,6 +19,7 @@ const count = (g: AnalyseGroup) => `${formatCount(g.files)} ${g.files === 1 ? 'f
 export function AnalysisCard({ analysis }: { analysis: Analysis }) {
   const result = analysis.result
   const flow = useDeleteRun()
+  const hasSsd = useStatus().data?.ssd != null
   const [later, setLater] = useState(false)
   const verifiedBytes = result ? Object.values(result.sets).reduce((n, set) => n + set.verified.bytes, 0) : 0
   return (
@@ -68,6 +71,12 @@ export function AnalysisCard({ analysis }: { analysis: Analysis }) {
           >
             Not now
           </button>
+          <Link
+            to={`/browse?status=${hasSsd ? 'mac_ssd' : 'mac_only'}`}
+            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+          >
+            Choose files
+          </Link>
         </div>
       )}
       <DeleteFlow flow={flow} />

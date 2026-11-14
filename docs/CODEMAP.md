@@ -228,6 +228,8 @@ Migrations: 0001_init.sql, 0002_backup.sql, 0003_run_summary.sql, 0004_run_summa
 - `web/src/components/backup/ReasonButton.tsx`: ReasonButton
 - `web/src/components/backup/SummaryCard.tsx`: SummaryCard
 - `web/src/components/backup/TaskLine.tsx`: TaskLine
+- `web/src/components/browse/StatusBadge.tsx`: StatusBadge, FolderStatus
+- `web/src/components/browse/Thumb.tsx`: Thumb
 - `web/src/components/cleanup/GroupRow.tsx`: GroupRow
 - `web/src/components/cleanup/JunkCard.tsx`: JunkCard
 - `web/src/components/cleanup/JunkReview.tsx`: JunkReview
@@ -248,14 +250,17 @@ Migrations: 0001_init.sql, 0002_backup.sql, 0003_run_summary.sql, 0004_run_summa
 - `web/src/components/delete/useDeleteRun.ts`: DeletePhase, useDeleteRun, DeleteRunApi
 - `web/src/lib/api.ts`: ApiError, apiFetch, withToken
 - `web/src/lib/backupState.ts`: ScreenState, MIN_MAC_FREE_BYTES, isConnected, isRunning, screenState, disabledReason
+- `web/src/lib/browse.ts`: STATUS_LABEL, isUnbacked, folderCounts
 - `web/src/lib/events.ts`: Toast, useEventStore, dismissToast, startEventStream
 - `web/src/lib/format.ts`: formatBytes, formatSpeed, formatEta, formatCount, formatWhen, formatDuration, formatAgo, baseName, formatDay, shortPath
 - `web/src/lib/token.ts`: initToken, getToken
-- `web/src/lib/types.ts`: ConnectionState, DeviceStatus, SsdStatus, StatusResponse, ApiErrorBody, JobStateName, CurrentFile, JobEvent, ToastLevel, ToastEvent, BackupSummary, FailedFile, FailuresResponse, ScanInfo, SetStatus, RecentFile, BackupOverview, SetupPhone, SetupState, AdbState, AttachedPhone, FolderCheck, FolderSaved, SsdVolume, SetNode, SetsTree, ReaderTestResult, TaskKind, TaskEvent, ReplicationEvent, Problem, Confirmation, AnalyseGroup, AnalyseSet, Analysis, StorageCategory, CleanupCard, CleanupSummary, ReviewItem, ReviewGroup, CandidatesPage, ReviewSort, JunkReason, CalibrationRecord, JunkStatus, CalibrationItem, CalibrationState, CalibrationMark, ModelStatus, ClusterLabel, ClusterTag, Suggestion, Cluster, ClusterSection, ClustersResponse, ImportResult, PictureItem, DeleteRunState, DeleteItem, DeleteRun, DeleteBody, QuarantineEntry, ReadySet
+- `web/src/lib/types.ts`: ConnectionState, DeviceStatus, SsdStatus, StatusResponse, ApiErrorBody, JobStateName, CurrentFile, JobEvent, ToastLevel, ToastEvent, BackupSummary, FailedFile, FailuresResponse, ScanInfo, SetStatus, RecentFile, BackupOverview, SetupPhone, SetupState, AdbState, AttachedPhone, FolderCheck, FolderSaved, SsdVolume, SetNode, SetsTree, ReaderTestResult, TaskKind, TaskEvent, ReplicationEvent, Problem, Confirmation, AnalyseGroup, AnalyseSet, Analysis, StorageCategory, CleanupCard, CleanupSummary, ReviewItem, ReviewGroup, CandidatesPage, ReviewSort, JunkReason, CalibrationRecord, JunkStatus, CalibrationItem, CalibrationState, CalibrationMark, ModelStatus, ClusterLabel, ClusterTag, Suggestion, Cluster, ClusterSection, ClustersResponse, ImportResult, PictureItem, DeleteRunState, DeleteItem, DeleteRun, DeleteBody, Disposition, QuarantineEntry, ReadySet, BrowseStatus, BrowseFolder, BrowseFile, BrowsePage, SmartList, SmartListPage, ArchiveDestination, ArchiveFolder, ArchiveFile, ArchiveListing
 - `web/src/lib/useStatus.ts`: useStatus
 - `web/src/lib/windowing.ts`: buildOffsets, rowAt, visibleRange
 - `web/src/main.tsx`
+- `web/src/pages/ArchivePage.tsx`: ArchivePage
 - `web/src/pages/BackupPage.tsx`: BackupPage
+- `web/src/pages/BrowsePage.tsx`: BrowsePage
 - `web/src/pages/CalibrationPage.tsx`: CalibrationPage
 - `web/src/pages/CleanupPage.tsx`: CleanupPage
 - `web/src/pages/LogsPage.tsx`: LogsPage

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { formatBytes, formatCount } from '../../lib/format'
-import type { DeleteRun } from '../../lib/types'
+import type { DeleteRun, Disposition } from '../../lib/types'
 import { Modal } from './Modal'
 
 const NOTE_KEY = 'sift.whatsappDeleteNoteSeen'
@@ -27,7 +27,9 @@ type Props = {
   error: string | null
   /** An error that means the checks are out of date (the dialog then offers to run them again). */
   outdated: boolean
-  onConfirm: (typed?: number) => void
+  /** Browse: ask what happens to the backup copy; the choice is passed to onConfirm. */
+  chooseDisposition?: boolean
+  onConfirm: (typed?: number, disposition?: Disposition) => void
   onCancel: () => void
   onRecheck: () => void
 }
@@ -39,9 +41,10 @@ const PRIMARY =
   'rounded-md border border-neutral-900 bg-neutral-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300'
 
 /** The last question before anything is deleted from the phone. */
-export function ConfirmDeleteDialog({ run, busy, error, outdated, onConfirm, onCancel, onRecheck }: Props) {
+export function ConfirmDeleteDialog({ run, busy, error, outdated, chooseDisposition = false, onConfirm, onCancel, onRecheck }: Props) {
   const [reviewed, setReviewed] = useState(false)
   const [typed, setTyped] = useState('')
+  const [disposition, setDisposition] = useState<Disposition>('quarantine')
   const [note] = useState(() => !noteSeen() && run.items.some((i) => i.check === 'ok' && /whatsapp/i.test(i.path)))
   const n = run.passed
   const typedOk = !run.typed_required || typed.replace(/[\s,.]/g, '') === String(n)
@@ -54,12 +57,27 @@ export function ConfirmDeleteDialog({ run, busy, error, outdated, onConfirm, onC
       <p className="text-sm">
         About {formatBytes(run.passed_bytes)}. Every file is backed up on {run.backed_up_on ?? 'your Mac'} and
         was checked against the phone just now.{' '}
-        {run.disposition === 'quarantine'
-          ? `Deleted files stay in Quarantine for ${run.quarantine_days ?? 30} days.`
-          : 'The backup keeps every file.'}{' '}
+        {chooseDisposition
+          ? ''
+          : run.disposition === 'quarantine'
+            ? `Deleted files stay in Quarantine for ${run.quarantine_days ?? 30} days.`
+            : 'The backup keeps every file.'}{' '}
         <strong>This cannot be undone on the phone.</strong>
       </p>
       {run.backups.length > 0 && <p className="text-xs text-neutral-600 dark:text-neutral-400">Backups: {run.backups.join(', ')}</p>}
+      {chooseDisposition && (
+        <fieldset className="flex flex-col gap-1 text-sm">
+          <legend className="mb-1 font-medium">What happens to the backup copy?</legend>
+          <label className="flex items-center gap-2">
+            <input type="radio" name="disposition" checked={disposition === 'archive'} onChange={() => setDisposition('archive')} />
+            Keep the backup copy (archive)
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="radio" name="disposition" checked={disposition === 'quarantine'} onChange={() => setDisposition('quarantine')} />
+            Move the backup copy to Quarantine for {run.quarantine_days ?? 30} days
+          </label>
+        </fieldset>
+      )}
       {note && <p className="rounded-md bg-neutral-100 px-3 py-2 text-sm dark:bg-neutral-800">{NOTE}</p>}
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={reviewed} onChange={(e) => setReviewed(e.target.checked)} />
@@ -96,7 +114,7 @@ export function ConfirmDeleteDialog({ run, busy, error, outdated, onConfirm, onC
           disabled={!ready}
           onClick={() => {
             if (note) markNoteSeen()
-            onConfirm(run.typed_required ? n : undefined)
+            onConfirm(run.typed_required ? n : undefined, chooseDisposition ? disposition : undefined)
           }}
           className={DANGER}
         >
