@@ -13,6 +13,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from typing import Any
 
 from sift.cleanup.errors import ExecuteRefused
 from sift.cleanup.manifest import write_manifests
@@ -116,6 +117,44 @@ def backups_still_there(ctx: AppContext, digest: str | None, size: int) -> bool:
     return True
 
 
+STANDARD_FOLDERS = frozenset(
+    f"/sdcard/{name}".casefold()
+    for name in ("DCIM", "Pictures", "Movies", "Download", "Documents", "Music", "Android")
+) | {"/sdcard"}
+
+
+def conn_source(ctx: AppContext, run_id: int) -> str:
+    with ctx.db.read() as conn:
+        return str(
+            conn.execute("SELECT source FROM delete_run WHERE id = ?", (run_id,)).fetchone()[0]
+        )
+
+
+def remove_empty_folders(transport: Any, deleted: list[str]) -> int:
+    """Remove folders the run left empty, deepest first, never a standard top-level folder and
+    never one that still lists anything (plan G3); `rmdir` refuses a non-empty folder anyway."""
+    from posixpath import dirname
+
+    folders: set[str] = set()
+    for path in deleted:
+        parent = dirname(path)
+        while (
+            parent.casefold().startswith("/sdcard/") and parent.casefold() not in STANDARD_FOLDERS
+        ):
+            folders.add(parent)
+            parent = dirname(parent)
+    removed = 0
+    for folder in sorted(folders, key=lambda p: -p.count("/")):
+        try:
+            if transport.list_dir(folder):
+                continue
+            transport.remove_dir(folder)
+            removed += 1
+        except (RemoteError, TransportError) as e:
+            log.info("Left folder %s: %s", folder, e)
+    return removed
+
+
 def execute(
     ctx: AppContext,
     run_id: int,
@@ -213,6 +252,9 @@ def execute(
                 "SELECT disposition FROM delete_run WHERE id = ?", (run_id,)
             ).fetchone()[0]
         moved = quarantine_run(ctx, run_id) if disposition == "quarantine" else 0
+        source = conn_source(ctx, run_id)
+        if source == "browse" and gone_paths:
+            remove_empty_folders(transport, gone_paths)
     except BaseException:
         final = "failed"  # an unexpected error still ends the run with its counts
         raise

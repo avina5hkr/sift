@@ -157,6 +157,10 @@ class Transport(Protocol):
 
     def push(self, local: Path, remote: str, mtime: int) -> None: ...
 
+    def remove_dir(self, path: str) -> None:
+        """Remove an empty folder (`rmdir`, never recursive); RemoteError if it is not empty."""
+        ...
+
     def media_rescan(self, paths: list[str]) -> bool:
         """Ask the phone to rescan `paths`; True if the phone accepted the request."""
         ...
