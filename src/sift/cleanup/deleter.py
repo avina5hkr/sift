@@ -166,6 +166,8 @@ def execute(
     """Delete the run's passed files. `check_execute` must have passed just before."""
     write_manifests(ctx, run_id)  # I9: before the first delete; raises when it cannot
     limit = ctx.config.cleanup.max_delete_per_run
+    if conn_source(ctx, run_id) == "slate":
+        limit = 1_000_000  # Clean slate runs the whole plan, in chunks (spec 10A)
     with ctx.db.tx() as conn:
         conn.execute(
             "UPDATE delete_run SET state = 'running', started_at = ? WHERE id = ?",
@@ -253,7 +255,10 @@ def execute(
             ).fetchone()[0]
         moved = quarantine_run(ctx, run_id) if disposition == "quarantine" else 0
         source = conn_source(ctx, run_id)
-        if source == "browse" and gone_paths:
+        empty_too = source == "browse" or (
+            source == "slate" and ctx.config.slate.remove_empty_folders
+        )
+        if empty_too and gone_paths:
             remove_empty_folders(transport, gone_paths)
     except BaseException:
         final = "failed"  # an unexpected error still ends the run with its counts
