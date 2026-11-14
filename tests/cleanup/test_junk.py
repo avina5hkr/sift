@@ -41,8 +41,8 @@ def seed(db: Any, rows: list[dict[str, Any]]) -> None:
             conn.execute(
                 "INSERT INTO content (hash, size, kind, width, height, duration_ms, "
                 "has_camera_exif, is_screenshot, ocr_text, embedding, embed_version, ocr_version, "
-                "analysis_version, created_at) "
-                "VALUES (?, ?, ?, 800, 800, ?, ?, ?, ?, ?, ?, ?, 2, 1)",
+                "analysis_version, created_at, ocr_lang) "
+                "VALUES (?, ?, ?, 800, 800, ?, ?, ?, ?, ?, ?, ?, 2, 1, 'hi-IN+en-US')",
                 (
                     r["hash"], r.get("size", 60_000), r.get("kind", "image"), r.get("duration"),
                     int(r.get("exif", 0)), int(r.get("shot", 0)), r.get("text"),
@@ -191,6 +191,15 @@ def test_calibration_passes_then_a_wrong_item_raises_the_threshold(rig, monkeypa
         result = calibration.mark(db, cfg, h, True, CLIP.version)
     assert result is not None and result.passed and result.errors == 0
     assert state(db, cfg, CLIP.version)["precheck_allowed"]
+    rebuild_junk(db, 1, cfg, CLIP.version)
+    with db.read() as conn:  # off by default: a passed calibration alone ticks nothing
+        assert (
+            conn.execute(
+                "SELECT max(default_checked) FROM candidate WHERE tab = 'junk'"
+            ).fetchone()[0]
+            == 0
+        )
+    monkeypatch.setattr(cfg.cleanup, "precheck_suggestions", True)  # the owner opts in
     rebuild_junk(db, 1, cfg, CLIP.version)
     with db.read() as conn:
         assert (

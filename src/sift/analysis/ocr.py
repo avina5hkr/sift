@@ -32,6 +32,18 @@ class OcrResult:
     density: float
 
 
+def lang_key(langs: Sequence[str]) -> str:
+    """How a reading records the languages it was asked for: the configured list, in order.
+    A reading made for another list is stale (external review follow-up): it counts as not
+    checked and is read again."""
+    return "+".join(langs)
+
+
+def reading_current(version: int | None, lang: str | None, langs: Sequence[str]) -> bool:
+    """This image's stored reading is from this reader version and these languages."""
+    return int(version or 0) >= VERSION and lang == lang_key(langs)
+
+
 def normalise(text: str) -> str:
     return unicodedata.normalize("NFKC", text).casefold().strip()
 
@@ -91,17 +103,20 @@ def recognize(path: Path, langs: Sequence[str] | None = None) -> OcrResult | Non
     return OcrResult(text, conf, min(1.0, area))
 
 
-def pending(db: Database, dest_ids: set[int] | None) -> list[tuple[str, str, str, int]]:
-    """(hash, root, rel_path, dest id) of readable non-camera images not OCR'd at VERSION."""
+def pending(
+    db: Database, dest_ids: set[int] | None, langs: Sequence[str] = WANTED
+) -> list[tuple[str, str, str, int]]:
+    """(hash, root, rel_path, dest id) of readable non-camera images without a current reading
+    (not read at VERSION, or read for other languages)."""
     with db.read() as conn:
         rows = conn.execute(
             "SELECT c.hash, d.root_path, r.rel_path, d.id FROM content c "
             "JOIN replica r ON r.content_hash = c.hash JOIN destination d ON d.id = r.dest_id "
             "WHERE c.kind = 'image' AND c.unreadable = 0 AND c.has_camera_exif = 0 "
-            "AND c.analysis_version >= 1 AND c.ocr_version < ? "
+            "AND c.analysis_version >= 1 AND (c.ocr_version < ? OR c.ocr_lang IS NOT ?) "
             "AND MIN(IFNULL(c.width, 0), IFNULL(c.height, 0)) >= ? "
             "ORDER BY c.hash, CASE d.kind WHEN 'mac' THEN 0 ELSE 1 END",
-            (VERSION, MIN_SHORT_SIDE),
+            (VERSION, lang_key(langs), MIN_SHORT_SIDE),
         ).fetchall()
     return [
         (str(h), str(root), str(rel), int(d))
@@ -121,14 +136,14 @@ def run_ocr(
     on_file: Callable[[int, int], None] | None = None,
 ) -> int:
     """OCR every pending image once; returns how many were read."""
-    rows = pending(db, dest_ids)
+    rows = pending(db, dest_ids, langs)
     copies: dict[str, list[Path]] = {}
     for digest, root, rel, _d in rows:
         copies.setdefault(digest, []).append(Path(root).expanduser() / rel)
     found_langs = languages(tuple(langs)) if reader is recognize else ("test",)
-    lang = "+".join(found_langs)
-    if not lang:  # Vision could not be asked: try again on the next Analyze
+    if not found_langs:  # Vision could not be asked: try again on the next Analyze
         return 0
+    lang = lang_key(langs)  # what was asked for: a change of the setting makes it stale
     todo = [(d, next((p for p in ps if p.is_file()), None)) for d, ps in copies.items()]
     todo = [(d, p) for d, p in todo if p is not None]
     done = n = 0

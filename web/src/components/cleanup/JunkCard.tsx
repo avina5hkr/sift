@@ -21,7 +21,7 @@ export function JunkCard() {
     : s.suggested === 0
       ? 'Nothing looks like junk right now.'
       : `${formatCount(s.suggested)} file${s.suggested === 1 ? '' : 's'} Sift suggests deleting${
-          s.precheck_allowed ? '.' : '. Check a sample before they are ticked for you.'
+          s.precheck_on && !s.precheck_allowed ? '. Check a sample before they are ticked for you.' : '.'
         }`
   return (
     <section aria-label="Junk" className="flex flex-wrap items-center gap-4 rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">

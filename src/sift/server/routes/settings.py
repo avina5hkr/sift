@@ -14,7 +14,7 @@ from sift.server.errors import ApiError
 router = APIRouter()
 
 PAGES: dict[str, list[tuple[str, str]]] = {
-    "general": [("cleanup", "never_precheck"), ("phone", "keep_awake")],
+    "general": [("cleanup", "precheck_suggestions"), ("phone", "keep_awake")],
     "phone": [
         ("phone", "keep_awake"),
         ("phone", "allow_delete_over_wifi"),

@@ -16,7 +16,7 @@ const STATUS: JunkStatus = {
   model_version: 1,
   t_suggest: 0.9,
   precheck_allowed: true,
-  never_precheck: false,
+  precheck_on: true,
   suggested: 2,
   maybe: 1,
   last_calibration: null,

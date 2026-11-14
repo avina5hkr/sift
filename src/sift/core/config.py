@@ -381,6 +381,7 @@ class AnalysisConfig(_Section):
 # Settings that older versions wrote but that never changed anything (fixed by the model or the
 # code). An old config.toml that still holds them loads without a warning.
 RETIRED = {
+    "cleanup": frozenset({"never_precheck"}),  # replaced by precheck_suggestions (opt-in)
     "analysis": frozenset(
         {"thumb_px", "neardup_cosine_min", "video_frames", "ocr_provider", "embedding_model",
          "embedding_batch"}
@@ -422,7 +423,9 @@ NEVER_DELETE_FLOOR: tuple[str, ...] = (
 class CleanupConfig(_Section):
     min_age_days: Days = 7
     quarantine_days: Annotated[int, Field(ge=1)] = 30
-    never_precheck: bool = False
+    # Model suggestions are ticked for you only when this is on and a calibration passed on
+    # the current pipeline. Off by default while the thresholds are provisional (beta).
+    precheck_suggestions: bool = False
     max_delete_per_run: Positive = 5000
     preflight_hash_batch: Positive = 40
     delete_roots: list[str] = Field(

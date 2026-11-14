@@ -95,7 +95,7 @@ class JunkStatus(BaseModel):
     model_version: int
     t_suggest: float
     precheck_allowed: bool
-    never_precheck: bool
+    precheck_on: bool  # the owner turned on ticking model suggestions
     suggested: int
     maybe: int
     last_calibration: dict[str, Any] | None
@@ -132,7 +132,7 @@ def junk_status(ctx: Ctx) -> JunkStatus:
         model_version=st["model_version"],
         t_suggest=st["t_suggest"],
         precheck_allowed=st["precheck_allowed"],
-        never_precheck=ctx.config.cleanup.never_precheck,
+        precheck_on=ctx.config.cleanup.precheck_suggestions,
         suggested=int(tabs.get("junk", 0)),
         maybe=int(tabs.get("maybe", 0)),
         last_calibration=calibration.last(ctx.db),

@@ -52,7 +52,10 @@ def test_an_image_whose_words_could_not_be_read_is_never_listed_as_junk(rig: Rig
 
     hashes = readable_images(rig, 2)
     run_ocr(rig.ctx.db, reader=lambda p: None)
-    items = {i.hash: i for i in _items(rig.ctx.db, 1, 2, never_scored(rig.ctx.config))}
+    items = {
+        i.hash: i
+        for i in _items(rig.ctx.db, 1, 2, never_scored(rig.ctx.config), ["hi-IN", "en-US"])
+    }
     assert all(not items[h].ocr_done for h in hashes if h in items)
     assert any(h in items for h in hashes)
 

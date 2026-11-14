@@ -151,8 +151,9 @@ class Planned:
 
 def _infos(ctx: AppContext, hashes: Sequence[str]) -> dict[str, Info]:
     from sift.analysis.embed import from_blob
-    from sift.analysis.ocr import MIN_SHORT_SIDE
+    from sift.analysis.ocr import MIN_SHORT_SIDE, reading_current
 
+    langs = ctx.config.analysis.ocr_languages
     out: dict[str, Info] = {}
     vectors: dict[str, Any] = {}
     with ctx.db.read() as conn:
@@ -170,12 +171,14 @@ def _infos(ctx: AppContext, hashes: Sequence[str]) -> dict[str, Info]:
                 hgt,
                 exif,
                 ocr_v,
+                ocr_lang,
                 idx_v,
                 emb,
             ) in conn.execute(
                 "SELECT c.hash, l.label, c.ocr_text, c.is_screenshot, c.unreadable, c.kind, "
-                "c.width, c.height, c.has_camera_exif, c.ocr_version, c.analysis_version, "
-                "c.embedding FROM content c LEFT JOIN label l ON l.content_hash = c.hash "
+                "c.width, c.height, c.has_camera_exif, c.ocr_version, c.ocr_lang, "
+                "c.analysis_version, c.embedding FROM content c "
+                "LEFT JOIN label l ON l.content_hash = c.hash "
                 f"WHERE c.hash IN ({marks})",
                 part,
             ):
@@ -183,7 +186,8 @@ def _infos(ctx: AppContext, hashes: Sequence[str]) -> dict[str, Info]:
                     kind == "image" and not exif and min(w or 0, hgt or 0) >= MIN_SHORT_SIDE
                 )
                 analysed = kind != "image" or (
-                    int(idx_v or 0) >= 1 and (not needs_words or int(ocr_v or 0) >= 1)
+                    int(idx_v or 0) >= 1
+                    and (not needs_words or reading_current(ocr_v, ocr_lang, langs))
                 )
                 out[str(h)] = Info(label, text, bool(shot), bool(unreadable), analysed)
                 if emb is not None:

@@ -9,7 +9,7 @@ import SettingsPage from './SettingsPage'
 const field = (section: string, key: string, value: unknown, schema: object, def: unknown = value) => ({ section, key, value, schema, default: def })
 const SETTINGS = {
   pages: {
-    general: [field('cleanup', 'never_precheck', false, { type: 'boolean' }), field('phone', 'keep_awake', false, { type: 'boolean' })],
+    general: [field('cleanup', 'precheck_suggestions', false, { type: 'boolean' }), field('phone', 'keep_awake', false, { type: 'boolean' })],
     phone: [
       field('phone', 'allow_delete_over_wifi', false, { type: 'boolean' }),
       field('phone', 'parallel_reads_usb', 3, { type: 'integer', minimum: 1, maximum: 6 }),

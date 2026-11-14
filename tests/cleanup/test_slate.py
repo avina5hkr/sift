@@ -96,7 +96,9 @@ def everything(rig: Rig) -> None:
     names = [s.name for s in rig.ctx.config.backup.sets if s.enabled]
     backed_up(rig, names)
     with rig.ctx.db.tx() as conn:  # as after an Analyze: indexed and read
-        conn.execute("UPDATE content SET analysis_version = 2, ocr_version = 1")
+        conn.execute(
+            "UPDATE content SET analysis_version = 2, ocr_version = 1, ocr_lang = 'hi-IN+en-US'"
+        )
 
 
 def test_clean_slate_plans_waits_for_gaps_and_removes_only_the_plan(rig: Rig) -> None:

@@ -2,9 +2,9 @@
 export type FieldText = { label: string; help: string }
 
 export const LABELS: Record<string, FieldText> = {
-  'cleanup.never_precheck': {
-    label: 'Never pre-check files for deletion',
-    help: 'On: Sift never ticks files for you, so every deletion starts from an empty selection.',
+  'cleanup.precheck_suggestions': {
+    label: 'Tick junk suggestions for me (beta)',
+    help: 'On: after a calibration passes, suggested junk starts ticked. Off: you tick every suggestion yourself. Exact duplicate copies are ticked either way.',
   },
   'phone.keep_awake': {
     label: 'Keep the phone awake during jobs',

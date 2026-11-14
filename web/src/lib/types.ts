@@ -339,7 +339,7 @@ export type JunkStatus = {
   model_version: number
   t_suggest: number
   precheck_allowed: boolean
-  never_precheck: boolean
+  precheck_on: boolean
   suggested: number
   maybe: number
   last_calibration: CalibrationRecord | null

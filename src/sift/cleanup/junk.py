@@ -23,8 +23,8 @@ from typing import Any
 import numpy as np
 
 from sift.analysis.embed import from_blob
-from sift.analysis.ocr import MIN_SHORT_SIDE
-from sift.cleanup.classifier import LogReg, knn_vote
+from sift.analysis.ocr import MIN_SHORT_SIDE, lang_key, reading_current
+from sift.cleanup.classifier import GROUP_WEIGHT, LogReg, group_weights, knn_vote
 from sift.cleanup.lexicons import Lexicon, load, source_text
 from sift.cleanup.near_tabs import selectable_ids
 from sift.core.config import Config, phone_path_key
@@ -75,7 +75,8 @@ def model_fingerprint(
     conn: Any, cfg: Config, embed_version: int, lexicons: Path | None = None
 ) -> str:
     """Everything the trained model, its predictions and its threshold depend on: the labels,
-    the threshold, the embedding model and its version, the text reader's version, the feature
+    the threshold, the embedding model and its version, the text reader's version and
+    languages, the feature
     and classifier code versions, the word lists as they read now, and the scoring settings."""
     from sift.analysis.models import CLIP
     from sift.analysis.ocr import VERSION as OCR_VERSION
@@ -92,6 +93,7 @@ def model_fingerprint(
         CLIP.key,  # the embedding model and its pinned files
         tuple(f.sha256 for f in CLIP.files),
         OCR_VERSION,
+        lang_key(cfg.analysis.ocr_languages),  # the languages the text is read in
         FEATURES_VERSION,
         CLASSIFIER_VERSION,
         [source_text(n, lexicons) for n in ("greeting", "document")],
@@ -112,7 +114,9 @@ def _inputs_fingerprint(
     content = conn.execute(
         "SELECT count(*), IFNULL(sum(ocr_version), 0), IFNULL(sum(embed_version), 0), "
         "IFNULL(sum(unreadable), 0), IFNULL(sum(is_screenshot), 0), "
-        "IFNULL(sum(has_camera_exif), 0) FROM content WHERE kind IN ('image', 'video')"
+        "IFNULL(sum(has_camera_exif), 0), IFNULL(sum(ocr_lang IS ?), 0) "
+        "FROM content WHERE kind IN ('image', 'video')",
+        (lang_key(cfg.analysis.ocr_languages),),
     ).fetchone()
     groups = conn.execute(
         "SELECT (SELECT count(*) FROM near_member), (SELECT IFNULL(max(id), 0) FROM cluster)"
@@ -121,7 +125,7 @@ def _inputs_fingerprint(
         device_id,
         model_fingerprint(conn, cfg, embed_version, lexicons),
         get_setting(conn, PRECHECK),
-        cfg.cleanup.never_precheck,
+        cfg.cleanup.precheck_suggestions,
         never_scored(cfg),
         [source_text(n, lexicons) for n in ("greeting", "document")],
         tuple(files),
@@ -165,11 +169,13 @@ class Verdict:
 _CONTENT = (
     "c.hash, c.kind, c.size, c.width, c.height, c.duration_ms, c.has_camera_exif, "
     "c.is_screenshot, c.unreadable, c.ocr_text, c.text_density, "
-    "CASE WHEN c.embed_version = ? THEN c.embedding END, c.ocr_version"
+    "CASE WHEN c.embed_version = ? THEN c.embedding END, c.ocr_version, c.ocr_lang"
 )
 
 
-def _items(db: Database, device_id: int, version: int, never: Sequence[str]) -> list[Item]:
+def _items(
+    db: Database, device_id: int, version: int, never: Sequence[str], langs: Sequence[str]
+) -> list[Item]:
     """This phone's present images and videos, then every other labelled content."""
     with db.read() as conn:
         files = conn.execute(
@@ -232,7 +238,7 @@ def _items(db: Database, device_id: int, version: int, never: Sequence[str]) -> 
             )  # fmt: skip
             item.ocr_done = (
                 item.kind != "image"
-                or int(row[16] or 0) >= 1
+                or reading_current(row[16], row[17], langs)  # this version, these languages
                 or min(w or 0, h or 0) < MIN_SHORT_SIDE  # too small: OCR never reads it
             )
             item.label = labels.get(digest)
@@ -290,25 +296,13 @@ class Model:
     labelled: np.ndarray
     labels: np.ndarray
     hashes: list[str]
-
-
-# One label given to a whole group counts as at most this many independent decisions, however
-# many pictures the group holds (external review, P2.7).
-GROUP_WEIGHT = 5.0
+    groups: list[str | None] = field(default_factory=list)  # per labelled row, its group label
 
 
 def evidence(items: Sequence[Item]) -> tuple[list[str], np.ndarray]:
     """Per labelled item: its validation group (the label's group, else the picture itself)
     and its weight (1 for a picture's own label; a group label shares GROUP_WEIGHT)."""
-    groups = [i.label_group or i.hash for i in items]
-    size: dict[str, int] = {}
-    for g, i in zip(groups, items, strict=True):
-        if i.label_group:
-            size[g] = size.get(g, 0) + 1
-    weights = np.array(
-        [min(1.0, GROUP_WEIGHT / size[g]) if g in size else 1.0 for g in groups], dtype=float
-    )
-    return groups, weights
+    return [i.label_group or i.hash for i in items], group_weights([i.label_group for i in items])
 
 
 def effective_counts(items: Sequence[Item]) -> dict[str, float]:
@@ -332,7 +326,10 @@ def train(items: Sequence[Item], feats: np.ndarray, cfg: Config, version: int) -
     if junk >= cfg.scoring.min_labels_each and keep >= cfg.scoring.min_labels_each:
         x = np.hstack([emb, feats[idx]])
         lr = LogReg(x, (labels == 1).astype(np.float64), groups=groups, weights=weights)
-    return Model(version, lr, emb.astype(np.float32), labels, [items[n].hash for n in idx])
+    return Model(
+        version, lr, emb.astype(np.float32), labels, [items[n].hash for n in idx],
+        [items[n].label_group for n in idx],
+    )  # fmt: skip
 
 
 def _reasons(i: Item, greet_hit: str | None, support: int) -> tuple[dict[str, str], ...]:
@@ -392,7 +389,7 @@ def verdicts(
         self_idx = np.array([pos.get(items[n].hash, -1) for n in emb_rows])
         vote = knn_vote(
             q, model.labelled, model.labels, k=s.knn_k, min_cosine=s.knn_min_cosine,
-            exclude_self=self_idx,
+            exclude_self=self_idx, groups=model.groups, group_cap=int(GROUP_WEIGHT),
         )  # fmt: skip
     p_lr = np.zeros(len(items))
     if model.logreg is not None and emb_rows:
@@ -523,7 +520,7 @@ def score_all(
     Returns the listed items, their verdicts, the model and the state it was built from."""
     st = state(db, cfg, embed_version, lexicons)
     greet, doc = load("greeting", lexicons), load("document", lexicons)
-    every = _items(db, device_id, embed_version, never_scored(cfg))
+    every = _items(db, device_id, embed_version, never_scored(cfg), cfg.analysis.ocr_languages)
     feats = _features(every, greet, doc, time.time())
     version = st["model_version"]
     if st["trained_rev"] != st["labels_rev"]:
@@ -548,7 +545,7 @@ def rebuild_junk(
         with db.read() as conn:
             key = _inputs_fingerprint(conn, device_id, cfg, embed_version, lexicons)
         items, found, model, st = score_all(db, device_id, cfg, embed_version, lexicons)
-        precheck = st["precheck_allowed"] and not cfg.cleanup.never_precheck
+        precheck = st["precheck_allowed"] and cfg.cleanup.precheck_suggestions  # opt-in
         rows = []
         junk_ids: set[int] = set()
         counts = {"suggested": 0, "maybe": 0, "protected": 0, "keep": 0, "none": 0}

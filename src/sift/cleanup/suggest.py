@@ -8,12 +8,12 @@ labels grow (20 labels: half the say) and as they get closer. One blended score 
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from sift.analysis.embed import EmbeddingModel, from_blob
-from sift.cleanup.classifier import knn_vote
+from sift.cleanup.classifier import group_weights, knn_vote
 from sift.core.db import Database
 
 JUNK_PROMPTS = {
@@ -79,23 +79,35 @@ class Teaching:
     vectors: np.ndarray
     labels: np.ndarray  # 1 junk, 0 keep, -1 protected
     hashes: list[str]
+    groups: list[str | None] = field(default_factory=list)  # per row, its group label or None
+    weights: np.ndarray = field(default_factory=lambda: np.zeros(0))  # evidence per row
 
 
 def load_teaching(db: Database, version: int) -> Teaching | None:
+    """The owner's labels, each with its evidence weight (a group label counts as at most a
+    few decisions, as in training)."""
     with db.read() as conn:
         rows = conn.execute(
-            "SELECT l.content_hash, l.label, c.embedding FROM label l JOIN content c "
+            "SELECT l.content_hash, l.label, c.embedding, CASE WHEN l.source = 'cluster' AND "
+            "l.cluster_id IS NOT NULL THEN 'c' || l.cluster_id END FROM label l JOIN content c "
             "ON c.hash = l.content_hash WHERE c.embedding IS NOT NULL AND c.embed_version = ?",
             (version,),
         ).fetchall()
     code = {"junk": 1, "keep": 0, "protected": -1}
     labels = np.array([code[str(r[1])] for r in rows], dtype=np.int64)
-    if int((labels == 1).sum()) < MIN_LABELS or int((labels == 0).sum()) < MIN_LABELS:
+    groups = [None if r[3] is None else str(r[3]) for r in rows]
+    weights = group_weights(groups)
+    if (
+        float(weights[labels == 1].sum()) < MIN_LABELS
+        or float(weights[labels == 0].sum()) < MIN_LABELS
+    ):
         return None
     return Teaching(
         np.stack([from_blob(r[2]) for r in rows]).astype(np.float32),
         labels,
         [str(r[0]) for r in rows],
+        groups,
+        weights,
     )
 
 
@@ -108,14 +120,18 @@ def _teaching_score(
     keep = np.array([h not in inside for h in t.hashes])
     if not keep.any():
         return 0.5, 0.0, 0
-    vote = knn_vote(vec[None, :].astype(np.float32), t.vectors[keep], t.labels[keep], k=15)
+    groups = [g for g, k in zip(t.groups, keep, strict=True) if k] if t.groups else None
+    vote = knn_vote(
+        vec[None, :].astype(np.float32), t.vectors[keep], t.labels[keep], k=15, groups=groups
+    )
     jv, support = float(vote.junk_vote[0]), int(vote.support[0])
     nearest = max(float(vote.keep_sim[0]), float(vote.protect_sim[0]))
     if jv > 0 or support:
         nearest = max(nearest, 0.85)
     if jv == 0.0 and nearest < 0.80:
         return 0.5, 0.0, 0  # nothing taught is close to this group
-    amount = len(t.labels) / (len(t.labels) + 20.0)  # 20 labels: half the say
+    decisions = float(t.weights.sum()) if len(t.weights) else float(len(t.labels))
+    amount = decisions / (decisions + 20.0)  # 20 decisions: half the say
     closeness = min(max((nearest - 0.75) / 0.15, 0.0), 1.0)
     return jv, amount * closeness, support
 

@@ -179,7 +179,7 @@ function JunkList({ status, sort, showMaybe, onLabelled }: { status: JunkStatus;
       )}
       <div className="min-h-0 flex-1 overflow-auto" data-testid="review-scroller">
         {!junk.loaded && !junk.error && <p className={`p-6 ${MUTED}`}>Loading…</p>}
-        {!status.precheck_allowed && status.suggested > 0 && (
+        {status.precheck_on && !status.precheck_allowed && status.suggested > 0 && (
           <p className="border-b border-neutral-200 px-4 py-2 text-sm dark:border-neutral-800">
             Suggestions are not ticked until you check a sample (<Link to="/cleanup/calibration" className="underline">Calibration</Link>).
           </p>

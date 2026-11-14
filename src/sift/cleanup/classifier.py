@@ -2,10 +2,14 @@
 
 `knn_vote`: the 15 nearest labelled items at cosine ≥ 0.80, weighted by cos⁴; junk_vote is the
 junk share of the weight, support the junk neighbours at ≥ 0.85; protect_sim and keep_sim are
-the highest cosines to protected- and keep-labelled items.
+the highest cosines to protected- and keep-labelled items. The pictures of one group label take
+at most `group_cap` of the neighbour places (its closest members), so one group click counts as
+at most that many neighbours in the vote and in the support.
 `LogReg`: L2 logistic regression with balanced class weights, C chosen by 5-fold
 cross-validation on log loss, then calibrated on the out-of-fold scores (Platt sigmoid, or
-isotonic with 200+ labels). junk_score = min(p_lr, junk_vote): both models must agree.
+isotonic with 200+ independent decisions). Every step uses the evidence weights (a group label
+shares a few decisions among its pictures): the fit, the class balance, the choice of C, and
+the calibration. junk_score = min(p_lr, junk_vote): both models must agree.
 """
 
 from collections.abc import Sequence
@@ -13,6 +17,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# One label given to a whole group counts as at most this many independent decisions, however
+# many pictures the group holds (external review, P2.7): in training, calibration, the label
+# minimums and counts, and the neighbour votes.
+GROUP_WEIGHT = 5.0
 C_GRID = (0.01, 0.1, 1.0, 10.0)
 FOLDS = 5
 ISOTONIC_FROM = 200
@@ -36,6 +44,8 @@ def knn_vote(
     min_cosine: float = 0.80,
     support_cosine: float = 0.85,
     exclude_self: np.ndarray | None = None,  # per query, the labelled row that is itself, or -1
+    groups: Sequence[str | None] | None = None,  # per labelled row, its group label or None
+    group_cap: int = int(GROUP_WEIGHT),
 ) -> Vote:
     n = len(queries)
     vote, support = np.zeros(n), np.zeros(n, dtype=np.int64)
@@ -44,6 +54,7 @@ def knn_vote(
         return Vote(vote, support, protect, keep)
     is_junk, is_keep, is_prot = labels == 1, labels == 0, labels == -1
     kk = min(k, len(labelled))
+    big = _big_groups(groups, group_cap)
     for start in range(0, n, CHUNK):
         sims = queries[start : start + CHUNK] @ labelled.T
         if exclude_self is not None:
@@ -53,6 +64,13 @@ def knn_vote(
             protect[start : start + CHUNK] = sims[:, is_prot].max(axis=1)
         if is_keep.any():
             keep[start : start + CHUNK] = sims[:, is_keep].max(axis=1)
+        for members in big:  # a group takes at most group_cap places: its closest members
+            sub = sims[:, members]
+            closest = np.argpartition(-sub, group_cap - 1, axis=1)[:, :group_cap]
+            mask = np.ones(sub.shape, dtype=bool)
+            np.put_along_axis(mask, closest, False, axis=1)
+            sub[mask] = -1.0
+            sims[:, members] = sub
         top = np.argpartition(-sims, kk - 1, axis=1)[:, :kk]
         s = np.take_along_axis(sims, top, axis=1)
         use = s >= min_cosine
@@ -64,6 +82,29 @@ def knn_vote(
         )
         support[start : start + CHUNK] = (junk & (s >= support_cosine)).sum(axis=1)
     return Vote(vote, support, protect, keep)
+
+
+def group_weights(groups: Sequence[str | None]) -> np.ndarray:
+    """Per labelled row, its evidence weight: 1 for a picture's own label; the rows of one
+    group label share GROUP_WEIGHT (each at most 1)."""
+    size: dict[str, int] = {}
+    for g in groups:
+        if g is not None:
+            size[g] = size.get(g, 0) + 1
+    return np.array(
+        [1.0 if g is None else min(1.0, GROUP_WEIGHT / size[g]) for g in groups], dtype=float
+    )
+
+
+def _big_groups(groups: Sequence[str | None] | None, cap: int) -> list[np.ndarray]:
+    """Row indices of each group label with more than `cap` labelled pictures."""
+    if groups is None:
+        return []
+    members: dict[str, list[int]] = {}
+    for n, g in enumerate(groups):
+        if g is not None:
+            members.setdefault(g, []).append(n)
+    return [np.array(rows) for rows in members.values() if len(rows) > cap]
 
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
@@ -93,9 +134,18 @@ def _decision(x: np.ndarray, w: np.ndarray) -> np.ndarray:
     return out
 
 
-def _balanced(y: np.ndarray) -> np.ndarray:
-    pos, neg = max(int(y.sum()), 1), max(int(len(y) - y.sum()), 1)
-    return np.where(y == 1, len(y) / (2 * pos), len(y) / (2 * neg))
+def _balanced(y: np.ndarray, sw: np.ndarray) -> np.ndarray:
+    """Per-row class factor so that both classes carry the same total evidence weight."""
+    total = float(sw.sum())
+    pos = max(float(sw[y == 1].sum()), 1e-12)
+    neg = max(float(sw[y == 0].sum()), 1e-12)
+    return np.where(y == 1, total / (2 * pos), total / (2 * neg))
+
+
+def _platt(z: np.ndarray, y: np.ndarray, sw: np.ndarray) -> tuple[float, float]:
+    """a, b of sigmoid(a·z + b), fitted on scores `z` with evidence weights `sw`."""
+    ab = _fit(z[:, None], y.astype(float), 1e6, sw)
+    return float(ab[0]), float(ab[1])
 
 
 def _logloss(y: np.ndarray, p: np.ndarray, sw: np.ndarray | None = None) -> float:
@@ -127,18 +177,21 @@ def _folds(
     return fold
 
 
-def _isotonic(z: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Pool-adjacent-violators: (x, value) points of a non-decreasing fit; each block gives
-    its first and last score, and a score between points is interpolated linearly."""
-    order = np.argsort(z)
+def _isotonic(
+    z: np.ndarray, y: np.ndarray, sw: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Weighted pool-adjacent-violators: (x, value) points of a non-decreasing fit; each block
+    gives its first and last score, and a score between points is interpolated linearly."""
+    order = np.argsort(z, kind="stable")
     zs, ys = z[order], y[order].astype(float)
+    ws = np.ones(len(z)) if sw is None else np.asarray(sw, dtype=float)[order]
     vals: list[float] = []
     weights: list[float] = []
     starts: list[float] = []
     ends: list[float] = []
-    for zi, yi in zip(zs, ys, strict=True):
+    for zi, yi, wi in zip(zs, ys, ws, strict=True):
         vals.append(float(yi))
-        weights.append(1.0)
+        weights.append(float(wi))
         starts.append(float(zi))
         ends.append(float(zi))
         while len(vals) > 1 and vals[-2] >= vals[-1]:
@@ -174,7 +227,9 @@ class LogReg:
                 if not test.any() or len(np.unique(y[train])) < 2:
                     continue
                 mean, std = _scale(x[train])  # fitted on the training fold only
-                w = _fit((x[train] - mean) / std, y[train], c, _balanced(y[train]) * sw[train])
+                w = _fit(
+                    (x[train] - mean) / std, y[train], c, _balanced(y[train], sw[train]) * sw[train]
+                )
                 oof[test] = _decision((x[test] - mean) / std, w)
             loss = _logloss(y, _sigmoid(oof), sw)
             if best is None or loss < best[0]:
@@ -182,13 +237,14 @@ class LogReg:
         assert best is not None
         _loss, self.c, oof = best
         self.mean, self.std = _scale(x)
-        self.w = _fit((x - self.mean) / self.std, y, self.c, _balanced(y) * sw)
-        self.isotonic = len(y) >= ISOTONIC_FROM
+        self.w = _fit((x - self.mean) / self.std, y, self.c, _balanced(y, sw) * sw)
+        # Calibrated on the out-of-fold scores, each row with its evidence weight; isotonic
+        # only with enough independent decisions (not pictures: one group click is a few)
+        self.isotonic = float(sw.sum()) >= ISOTONIC_FROM
         if self.isotonic:
-            self.steps = _isotonic(oof, y)
-        else:  # Platt: a, b of sigmoid(a·z + b) fitted on the out-of-fold scores
-            ab = _fit(oof[:, None], y.astype(float), 1e6, np.ones(len(y)))
-            self.a, self.b = float(ab[0]), float(ab[1])
+            self.steps = _isotonic(oof, y, sw)
+        else:
+            self.a, self.b = _platt(oof, y, sw)
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         z = _decision((x - self.mean) / self.std, self.w)
