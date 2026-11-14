@@ -15,6 +15,8 @@ import BackupPage from './pages/BackupPage'
 import BrowsePage from './pages/BrowsePage'
 import CalibrationPage from './pages/CalibrationPage'
 import CleanupPage from './pages/CleanupPage'
+import ChecklistPage from './pages/ChecklistPage'
+import HealthPage from './pages/HealthPage'
 import LogsPage from './pages/LogsPage'
 import ReviewPage from './pages/ReviewPage'
 import SearchPage from './pages/SearchPage'
@@ -90,6 +92,8 @@ export default function App() {
             <Route path="/browse" element={<BrowsePage />} />
             <Route path="/slate" element={<SlatePage />} />
             <Route path="/apps" element={<AppsPage />} />
+            <Route path="/health" element={<HealthPage />} />
+            <Route path="/health/checklist" element={<ChecklistPage />} />
             <Route path="/archive" element={<ArchivePage />} />
             <Route path="/quarantine" element={<QuarantinePage />} />
             <Route path="/logs" element={<LogsPage />} />

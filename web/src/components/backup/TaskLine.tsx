@@ -12,6 +12,8 @@ const LABEL: Record<TaskKind, string> = {
   preflight: 'Checking the files',
   delete: 'Deleting from the phone',
   restore: 'Restoring to the phone',
+  health: 'Reading the phone\'s status',
+  bugreport: 'Capturing the bug report',
 }
 const ENDED = { done: 'finished', stopped: 'stopped', failed: 'could not finish' }
 

@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ReasonButton } from '../components/backup/ReasonButton'
 import { TaskLine } from '../components/backup/TaskLine'
+import { HealthCard } from '../components/cleanup/HealthCard'
 import { JunkCard } from '../components/cleanup/JunkCard'
 import { ReadyCards } from '../components/cleanup/ReadyCards'
 import { SlateCard } from '../components/cleanup/SlateCard'
@@ -109,6 +110,7 @@ export default function CleanupPage() {
 
       <ReadyCards />
       <SlateCard />
+      <HealthCard />
       <ModelCard />
       {data.has_backup && <TeachCard />}
       {data.has_backup && <JunkCard />}

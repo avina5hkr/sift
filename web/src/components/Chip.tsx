@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react'
 
-type Tone = 'neutral' | 'ok' | 'warn'
+type Tone = 'neutral' | 'ok' | 'warn' | 'bad'
 
 const TONES: Record<Tone, string> = {
   neutral: 'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300',
   ok: 'bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300',
   warn: 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300',
+  bad: 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300',
 }
 
 type Props = {

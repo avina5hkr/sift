@@ -210,7 +210,7 @@ export type ReaderTestResult = {
 }
 
 // The `task` event and TaskOut: one long job (verify, adopt, rebuild, confirm, analyse) at a time.
-export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model' | 'preflight' | 'delete' | 'restore'
+export type TaskKind = 'verify' | 'adopt' | 'rebuild' | 'confirm' | 'analyse' | 'analyze' | 'model' | 'preflight' | 'delete' | 'restore' | 'health' | 'bugreport'
 export type TaskEvent = {
   kind: TaskKind
   state: 'running' | 'done' | 'stopped' | 'failed'
@@ -550,3 +550,25 @@ export type AppUnlock = Record<string, { backup_done: boolean; typed_name: strin
 export type AppsPreflight = { allowed: string[]; refused: Record<string, string> }
 export type AppsResult = { done: string[]; failed: Record<string, string>; app_list: string[] }
 export type AppsExport = { app_list: string[]; apks?: { saved: number; failed: number } }
+
+export type HealthLevel = 'ok' | 'warn' | 'bad' | 'unavailable'
+export type HealthArea = { key: string; title: string; level: HealthLevel; verdicts: string[]; facts: Record<string, unknown> }
+export type HealthReport = { id: number; created_at: number; areas: HealthArea[]; unavailable: string[] }
+
+export type ChecklistItem = {
+  id: number
+  title: string
+  how: 'auto' | 'tick' | 'both'
+  help: string
+  auto_ok: boolean | null
+  auto_detail: string | null
+  ticked: boolean
+  done_on: string | null
+  note: string | null
+  green: boolean
+}
+export type Checklist = { items: ChecklistItem[]; phone: boolean }
+export type RestoreHelper = {
+  contacts: { phone_path: string; cards: number } | null
+  reinstall: { path: string | null; apps: { name: string; package: string; link: string }[] }
+}
