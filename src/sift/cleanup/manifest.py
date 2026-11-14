@@ -14,11 +14,8 @@ from pathlib import Path
 from sift.backup.confirm import current_dest_ids, required_kinds
 from sift.backup.phonepaths import from_db
 from sift.backup.run import usable_dests
+from sift.cleanup.errors import ManifestBlocked
 from sift.core.context import AppContext
-
-
-class ManifestBlocked(Exception):
-    """A required destination is missing, or the manifest could not be written."""
 
 
 def write_manifests(ctx: AppContext, run_id: int) -> list[str]:

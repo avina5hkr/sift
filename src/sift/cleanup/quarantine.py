@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from sift.backup.layout import rel_key
 from sift.backup.phonepaths import from_db, to_db
 from sift.backup.run import usable_dests
+from sift.cleanup.errors import RestoreRefused
 from sift.core.context import AppContext
 from sift.device.session import DeviceSession
 
@@ -27,10 +28,6 @@ log = logging.getLogger("sift.cleanup")
 
 DAY_S = 86_400
 ROOM_BYTES = 2 * 1024**3
-
-
-class RestoreRefused(Exception):
-    pass
 
 
 def _free_name(root: Path, rel: str, suffix: str = "_restored") -> str:

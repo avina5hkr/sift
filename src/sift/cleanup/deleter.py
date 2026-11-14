@@ -14,6 +14,7 @@ import logging
 import time
 from collections.abc import Callable
 
+from sift.cleanup.errors import ExecuteRefused
 from sift.cleanup.manifest import write_manifests
 from sift.cleanup.preflight import selection_hash
 from sift.cleanup.quarantine import quarantine_run
@@ -24,12 +25,6 @@ from sift.device.transport import DeviceDisconnected, DeviceTimeout, RemoteError
 log = logging.getLogger("sift.cleanup")
 
 FRESH_S = 10 * 60
-
-
-class ExecuteRefused(Exception):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 def check_execute(

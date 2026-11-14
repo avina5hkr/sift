@@ -23,6 +23,7 @@ from sift.backup.confirm import current_dest_ids, required_kinds
 from sift.backup.phonepaths import from_db
 from sift.backup.run import usable_dests
 from sift.backup.sets import resolve_roots, set_for_path
+from sift.cleanup.errors import RunBlocked
 from sift.cleanup.junk import Item, is_protected
 from sift.cleanup.lexicons import load
 from sift.core.config import NEVER_DELETE_FLOOR, Config, phone_path_key
@@ -49,10 +50,6 @@ REASONS = {
     "hash_mismatch": "The phone's copy does not match the backup",
     "unreadable": "The phone could not read it",
 }
-
-
-class RunBlocked(Exception):
-    """The whole run cannot go on (no phone, another phone, a missing destination)."""
 
 
 def selection_hash(ids: Sequence[int]) -> str:

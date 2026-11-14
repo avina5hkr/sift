@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 
 from sift.backup.confirm import latest
 from sift.cleanup import quarantine
-from sift.cleanup.deleter import ExecuteRefused, check_execute, execute
-from sift.cleanup.manifest import ManifestBlocked
+from sift.cleanup.deleter import check_execute, execute
+from sift.cleanup.errors import ExecuteRefused, ManifestBlocked, RestoreRefused
 from sift.cleanup.preflight import create_run, ids_for_sets, run_preflight, summary
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
@@ -160,7 +160,7 @@ def restore(ctx: Ctx, body: RestoreRequest) -> dict[str, int]:
     _no_backup_running(ctx)
     try:
         return quarantine.restore(ctx, body.ids, body.to, _session(ctx))
-    except quarantine.RestoreRefused as e:
+    except RestoreRefused as e:
         raise ApiError(409, "restore_refused", str(e)) from e
 
 

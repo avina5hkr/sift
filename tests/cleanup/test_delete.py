@@ -13,8 +13,8 @@ import pytest
 
 from sift.backup.confirm import current_dest_ids
 from sift.backup.phonepaths import from_db
-from sift.cleanup.deleter import ExecuteRefused, check_execute, execute
-from sift.cleanup.manifest import ManifestBlocked
+from sift.cleanup.deleter import check_execute, execute
+from sift.cleanup.errors import ExecuteRefused, ManifestBlocked
 from sift.cleanup.preflight import create_run, ids_for_sets, run_preflight
 from sift.cleanup.quarantine import entries, purge_due, restore
 from tests.backup.test_confirm import backed_up, device_id
