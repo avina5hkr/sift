@@ -7,8 +7,10 @@ images under 120 px on the short side, and unreadable images are skipped.
 """
 
 import logging
+import os
 import unicodedata
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -19,6 +21,7 @@ log = logging.getLogger("sift.analysis")
 
 VERSION = 1
 MIN_SHORT_SIDE = 120
+BATCH = 64
 WANTED = ("hi-IN", "en-US")  # Hindi first: Vision reads Devanagari only then; Latin still read
 
 
@@ -123,27 +126,39 @@ def run_ocr(
     lang = "+".join(languages()) if reader is recognize else "test"
     if not lang:  # Vision could not be asked: try again on the next Analyze
         return 0
-    done = 0
-    for n, (digest, paths) in enumerate(copies.items(), 1):
-        if should_stop():
-            break
-        path = next((p for p in paths if p.is_file()), None)
-        if path is None:
-            continue
-        found = reader(path)
-        with db.tx() as conn:
-            conn.execute(
-                "UPDATE content SET ocr_text = ?, ocr_lang = ?, text_density = ?, ocr_version = ? "
-                "WHERE hash = ?",
-                (
-                    found.text if found else None,
-                    lang if found else None,
-                    found.density if found else None,
-                    VERSION,
-                    digest,
-                ),
-            )
-        done += found is not None
-        if on_file is not None:
-            on_file(n, len(copies))
+    todo = [(d, next((p for p in ps if p.is_file()), None)) for d, ps in copies.items()]
+    todo = [(d, p) for d, p in todo if p is not None]
+    done = n = 0
+    # Vision requests are independent: several images are read at once, results are written
+    # here, one transaction per batch
+    with ThreadPoolExecutor(max_workers=workers()) as pool:
+        for start in range(0, len(todo), BATCH):
+            if should_stop():
+                break
+            part = todo[start : start + BATCH]
+            results = list(pool.map(lambda item: reader(item[1]), part))
+            with db.tx() as conn:
+                conn.executemany(
+                    "UPDATE content SET ocr_text = ?, ocr_lang = ?, text_density = ?, "
+                    "ocr_version = ? WHERE hash = ?",
+                    [
+                        (
+                            found.text if found else None,
+                            lang if found else None,
+                            found.density if found else None,
+                            VERSION,
+                            digest,
+                        )
+                        for (digest, _p), found in zip(part, results, strict=True)
+                    ],
+                )
+            done += sum(found is not None for found in results)
+            n += len(part)
+            if on_file is not None:
+                on_file(n, len(todo))
     return done
+
+
+def workers() -> int:
+    """Half the cores, at least 2 and at most 8: the app stays responsive."""
+    return max(2, min(8, (os.cpu_count() or 4) // 2))
