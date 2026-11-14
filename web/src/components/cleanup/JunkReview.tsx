@@ -5,7 +5,9 @@ import { apiFetch } from '../../lib/api'
 import { formatBytes, formatCount } from '../../lib/format'
 import type { JunkStatus, ReviewGroup, ReviewItem, ReviewSort } from '../../lib/types'
 import { plain, post } from '../../pages/Wizard/request'
-import { ReasonButton } from '../backup/ReasonButton'
+import { DeleteFlow } from '../delete/DeleteFlow'
+import { DeleteSelectedButton } from '../delete/DeleteSelectedButton'
+import { useDeleteRun } from '../delete/useDeleteRun'
 import { Chip } from '../Chip'
 import { Lightbox } from './Lightbox'
 import { Tile } from './Tile'
@@ -94,6 +96,18 @@ function JunkList({ status, sort, showMaybe, onLabelled }: { status: JunkStatus;
     }
   }
 
+  const flow = useDeleteRun({
+    onFinished: () => {
+      void junk.reload()
+      if (showMaybe) void maybe.reload()
+    },
+  })
+  const startDelete = async () => {
+    const ids = await junk.loadAllTicked()
+    if (showMaybe) ids.push(...(await maybe.loadAllTicked()))
+    await flow.start({ source: 'cleanup', ids })
+  }
+
   const shown = showMaybe ? [junk, maybe] : [junk]
   const count = shown.reduce((n, r) => n + r.totals.count, 0)
   const bytes = shown.reduce((n, r) => n + r.totals.bytes, 0)
@@ -164,10 +178,9 @@ function JunkList({ status, sort, showMaybe, onLabelled }: { status: JunkStatus;
         >
           Select none
         </button>
-        <ReasonButton primary placement="above" reason="Deleting arrives in a later version" onClick={() => undefined}>
-          Delete selected
-        </ReasonButton>
+        <DeleteSelectedButton count={count} bytes={bytes} busy={flow.phase !== 'idle'} onClick={() => void startDelete()} />
       </footer>
+      <DeleteFlow flow={flow} />
       {openItem && (
         <Lightbox
           items={items}

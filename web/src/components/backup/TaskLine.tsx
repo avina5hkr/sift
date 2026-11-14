@@ -9,6 +9,8 @@ const LABEL: Record<TaskKind, string> = {
   analyse: 'Analysing the phone',
   analyze: 'Looking for duplicates',
   model: 'Downloading the picture model',
+  preflight: 'Checking the files',
+  delete: 'Deleting from the phone',
 }
 const ENDED = { done: 'finished', stopped: 'stopped', failed: 'could not finish' }
 

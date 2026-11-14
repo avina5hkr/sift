@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { initToken } from '../lib/token'
@@ -81,6 +82,12 @@ beforeEach(() => {
         for (const id of ids) server.set(id, b.checked)
         return reply({ changed: ids.length })
       }
+      if (url === '/api/delete/preflight') {
+        return reply({ run_id: 5, task: { kind: 'preflight', state: 'running', done: 0, total: 2, message: '', result: null } })
+      }
+      if (url === '/api/tasks/current') {
+        return reply({ kind: 'preflight', state: 'running', done: 0, total: 2, message: '', result: null })
+      }
       return reply({ code: 'nope', message: 'No.', detail: null }, 404)
     }),
   )
@@ -88,10 +95,13 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 async function open() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
-    <MemoryRouter>
-      <ReviewPage />
-    </MemoryRouter>,
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>
+        <ReviewPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
   )
   await waitFor(() => expect(screen.queryByText('Loading…')).not.toBeInTheDocument())
 }
@@ -123,15 +133,26 @@ test('a video is a tile with a VIDEO badge and no thumbnail fetch', async () => 
   expect(tile.querySelector('img')).toBeNull()
 })
 
-test('the footer counts what is selected and the tooltip explains the disabled Delete', async () => {
+test('the footer counts what is selected and the Delete button names the count and size', async () => {
   groups = [group(2), group(1)]
   await open()
   expect(footer()).toHaveTextContent('3 selected, 3.0 MB')
   await userEvent.click(box(groups[0]?.copies[0]?.id as number))
   expect(footer()).toHaveTextContent('2 selected, 2.0 MB')
+  expect(screen.getByRole('button', { name: 'Delete 2 selected (2.0 MB)' })).not.toHaveAttribute('aria-disabled')
+  await userEvent.click(screen.getByRole('button', { name: 'Select none' }))
   const del = screen.getByRole('button', { name: 'Delete selected' })
   expect(del).toHaveAttribute('aria-disabled', 'true')
-  expect(del).toHaveAccessibleDescription('Deleting arrives in a later version')
+  expect(del).toHaveAccessibleDescription('Tick the files you want to delete first.')
+})
+
+test('Delete selected starts the checks with the ticked ids', async () => {
+  groups = [group(2)]
+  const ids = groups[0]?.copies.map((c) => c.id)
+  await open()
+  await userEvent.click(screen.getByRole('button', { name: 'Delete 2 selected (2.0 MB)' }))
+  await waitFor(() => expect(calls.find((c) => c.path === '/api/delete/preflight')?.body).toEqual({ source: 'cleanup', ids }))
+  expect(await screen.findByText('Checking 2 files…')).toBeInTheDocument()
 })
 
 test('toggling a checkbox saves it', async () => {

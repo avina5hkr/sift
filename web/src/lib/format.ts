@@ -63,3 +63,9 @@ export function formatAgo(epochSeconds: number, now: number = Date.now() / 1000)
 
 // "/sdcard/DCIM/Camera/IMG_1.jpg" -> "IMG_1.jpg"
 export const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+
+// Seconds since the epoch -> "7 Nov" (local time).
+export function formatDay(epochSeconds: number): string {
+  const d = new Date(epochSeconds * 1000)
+  return `${d.getDate()} ${d.toLocaleString('en-GB', { month: 'short' })}`
+}

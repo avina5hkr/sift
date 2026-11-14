@@ -128,6 +128,16 @@ export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact', enabled = 
     [commit, loadMore, TAB],
   )
 
+  /** Load every remaining page, then give the ids of all ticked copies in the tab. */
+  const loadAllTicked = useCallback(async (): Promise<number[]> => {
+    let last: number | null
+    do {
+      last = cursor.current
+      await loadMore()
+    } while (cursor.current != null && cursor.current !== last)
+    return [...selRef.current].filter(([, v]) => v).map(([id]) => id)
+  }, [loadMore])
+
   /** Every item in reading order (a group's keeper, then its copies) and where each one sits. */
   const flat = useMemo(() => {
     const items: ReviewItem[] = []
@@ -168,6 +178,7 @@ export function useReview(sort: ReviewSort, TAB: ReviewTab = 'exact', enabled = 
     clearError: () => setError(null),
     loadMore,
     reload,
+    loadAllTicked,
     isChecked,
     setChecked,
     setAll,
