@@ -73,6 +73,10 @@ class RemoteError(TransportError):
         self.errno = errno
 
 
+class NameTaken(RemoteError):
+    """A no-replace rename found its destination already taken; nothing was moved."""
+
+
 class FileChanged(RemoteError):
     """The file changed (shrank, grew or went away) while it was being read.
 
@@ -156,6 +160,11 @@ class Transport(Protocol):
     def delete(self, path: str) -> None: ...
 
     def push(self, local: Path, remote: str, mtime: int) -> None: ...
+
+    def rename_new(self, src: str, dst: str) -> None:
+        """Move the file `src` to `dst` only if `dst` does not exist (never over a file).
+        Raises NameTaken, with `src` left where it was, when `dst` is taken."""
+        ...
 
     def apps_probe(self, kind: str) -> str | None:
         """Text of one read-only app probe (packages, diskstats, usagestats, versions), or None

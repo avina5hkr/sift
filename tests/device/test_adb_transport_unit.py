@@ -32,6 +32,7 @@ from sift.device.transport import (
     DeviceTimeout,
     FileChanged,
     LinkHealth,
+    NameTaken,
     RemoteEntry,
     RemoteError,
     Transport,
@@ -130,6 +131,16 @@ class Phone:
             if raw not in self.server.files:
                 return [b"rm: no such file\nrc=1\n"]
             self.remove(raw)
+            return [b"rc=0\n"]
+        if words[:3] == ["mv", "-n", "--"] and words[5:] == ["2>&1;", "echo", "rc=$?"]:
+            src, dst = (w.encode("utf-8", "surrogateescape") for w in words[3:5])
+            if src not in self.server.files:
+                return [b"mv: no such file\nrc=1\n"]
+            if dst in self.server.stats:  # toybox -n: skips silently
+                return [b"rc=0\n"]
+            data, mtime = self.server.files[src], self.server.stats[src].mtime
+            self.remove(src)
+            self.add_file(dst, data, mtime)
             return [b"rc=0\n"]
         if words[:2] == ["am", "broadcast"]:
             self.rescanned.append(text)
@@ -1066,6 +1077,22 @@ def test_delete_removes_one_file_and_reports_a_refusal(
     assert transport.stat("/sdcard/a b.jpg") is None
     with pytest.raises(RemoteError, match="no such file"):
         transport.delete("/sdcard/a b.jpg")
+
+
+def test_rename_new_moves_a_file_and_never_replaces_one(
+    transport: AdbTransport, phone: Phone
+) -> None:
+    phone.add_file(b"/sdcard/DCIM/.sift-upload-1.part", b"mine", mtime=7)
+    phone.add_file(b"/sdcard/DCIM/taken.jpg", b"theirs")
+    with pytest.raises(NameTaken):
+        transport.rename_new("/sdcard/DCIM/.sift-upload-1.part", "/sdcard/DCIM/taken.jpg")
+    assert phone.server.files[b"/sdcard/DCIM/taken.jpg"] == b"theirs"
+    transport.rename_new("/sdcard/DCIM/.sift-upload-1.part", "/sdcard/DCIM/a b.jpg")
+    got = transport.stat("/sdcard/DCIM/a b.jpg")
+    assert got is not None and got.mtime == 7
+    assert transport.stat("/sdcard/DCIM/.sift-upload-1.part") is None
+    with pytest.raises(RemoteError, match="no such file"):
+        transport.rename_new("/sdcard/DCIM/gone.part", "/sdcard/DCIM/b.jpg")
 
 
 def test_push_writes_a_new_file_and_never_replaces_one(

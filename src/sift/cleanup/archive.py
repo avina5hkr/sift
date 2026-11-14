@@ -8,6 +8,7 @@ at that path is skipped.
 """
 
 import logging
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -170,10 +171,13 @@ def restore(
 
 def push_one(session: DeviceSession, local: Path, phone_path: str, mtime: int) -> str:
     """Push to `phone_path`, or to a free `_restored` name beside it; returns where it went.
-    For files with no content hash to check (a contacts file); backups use `push_verified`."""
-    target = _free_phone_name(session.transport, phone_path)
-    session.transport.push(local, target, mtime)
-    return target
+    For files with no content hash to check (a contacts file); backups use `push_verified`.
+    Same ownership rules as `push_verified`: the upload lands under Sift's own temporary name
+    and is moved into place without replacing anything."""
+    transport = session.transport
+    temp = _upload_name(transport, phone_path)
+    _push_own(transport, local, temp, mtime)
+    return _place(transport, temp, phone_path)
 
 
 def push_verified(
@@ -181,12 +185,14 @@ def push_verified(
 ) -> str:
     """Restore one backed-up file to the phone and prove it arrived intact.
 
-    The backup copy is hashed first (a damaged copy is never restored); it is pushed to
-    `phone_path` or a free `_restored` name beside it (never over a file); then the phone hashes
-    what it received. A wrong or partial upload is removed (it is the file this call just
-    created under a name that was free) and RestoreRefused is raised. Returns where it went."""
+    The backup copy is hashed first (a damaged copy is never restored). It is pushed to a
+    temporary name in the target folder that only Sift creates (`.sift-upload-<random>.part`),
+    and the phone hashes it there. A wrong or partial upload is removed by that temporary name,
+    so no other file can be touched, and RestoreRefused is raised. A good upload is then moved
+    to `phone_path`, or a free `_restored` name beside it, with a no-replace rename: a file that
+    appeared at that name meanwhile is left alone and the next free name is used. Returns where
+    the file went."""
     from sift.backup.staging import regular_file_sha256
-    from sift.device.transport import DeviceDisconnected, DeviceTimeout
 
     try:
         source = regular_file_sha256(local)
@@ -195,36 +201,74 @@ def push_verified(
     if source != digest:
         raise RestoreRefused("The backup copy is damaged (its content does not match).")
     transport = session.transport
-    target = _free_phone_name(transport, phone_path)
-    try:
-        transport.push(local, target, mtime)
-    except DeviceDisconnected, DeviceTimeout:
-        raise  # the phone went away: whatever arrived is checked by the next restore's stat
-    except Exception:
-        _remove_own_upload(transport, target)
-        raise
-    got = transport.sha256([target]).get(target)
+    temp = _upload_name(transport, phone_path)
+    _push_own(transport, local, temp, mtime)
+    got = transport.sha256([temp]).get(temp)
     if got != digest:
-        _remove_own_upload(transport, target)
+        _remove_own_upload(transport, temp)
         raise RestoreRefused("The phone did not receive the file intact; that copy was removed.")
-    return target
+    return _place(transport, temp, phone_path)
 
 
-def _free_phone_name(transport: Any, phone_path: str) -> str:
-    target = phone_path
-    p = PurePosixPath(phone_path)
-    n = 1
-    while transport.stat(target) is not None:  # never over a file on the phone
-        target = str(p.with_name(f"{p.stem}{'_restored' if n == 1 else f'_restored{n}'}{p.suffix}"))
-        n += 1
-        if n > 100:
-            raise RestoreRefused(f"No free name for {phone_path} on the phone.")
-    return target
+UPLOAD_PREFIX = ".sift-upload-"
 
 
-def _remove_own_upload(transport: Any, target: str) -> None:
+def _upload_name(transport: Any, phone_path: str) -> str:
+    """A temporary name beside `phone_path` that nothing but this upload uses: Sift's prefix,
+    128 random bits, a dot first so the media scanner ignores it."""
+    folder = PurePosixPath(phone_path).parent
+    for _ in range(3):
+        temp = str(folder / f"{UPLOAD_PREFIX}{secrets.token_hex(16)}.part")
+        if transport.stat(temp) is None:
+            return temp
+    raise RestoreRefused(f"No free temporary name for {phone_path} on the phone.")
+
+
+def _push_own(transport: Any, local: Path, temp: str, mtime: int) -> None:
+    from sift.device.transport import DeviceDisconnected, DeviceTimeout
+
     try:
-        if transport.stat(target) is not None:
-            transport.delete(target)
+        transport.push(local, temp, mtime)
+    except DeviceDisconnected, DeviceTimeout:
+        raise  # the phone went away: at most a hidden partial file under Sift's own name remains
+    except Exception:
+        _remove_own_upload(transport, temp)
+        raise
+
+
+def _place(transport: Any, temp: str, phone_path: str) -> str:
+    """Move the checked upload `temp` to `phone_path` or the first free `_restored` name, never
+    over a file. On any failure the upload is removed by its own name and the error raised."""
+    from sift.device.transport import DeviceDisconnected, DeviceTimeout, NameTaken
+
+    p = PurePosixPath(phone_path)
+    try:
+        for n in range(100):
+            target = phone_path if n == 0 else str(
+                p.with_name(f"{p.stem}{'_restored' if n == 1 else f'_restored{n}'}{p.suffix}")
+            )  # fmt: skip
+            if transport.stat(target) is not None:
+                continue
+            try:
+                transport.rename_new(temp, target)
+            except NameTaken:  # a file arrived there meanwhile: it stays, try the next name
+                continue
+            return target
+    except DeviceDisconnected, DeviceTimeout:
+        raise
+    except Exception:
+        _remove_own_upload(transport, temp)
+        raise
+    _remove_own_upload(transport, temp)
+    raise RestoreRefused(f"No free name for {phone_path} on the phone.")
+
+
+def _remove_own_upload(transport: Any, temp: str) -> None:
+    """Remove Sift's own temporary upload. Only names made by `_upload_name` come here."""
+    if not PurePosixPath(temp).name.startswith(UPLOAD_PREFIX):
+        raise AssertionError(f"not Sift's temporary upload: {temp}")
+    try:
+        if transport.stat(temp) is not None:
+            transport.delete(temp)
     except Exception as e:
-        log.warning("Could not remove the failed upload %s: %s", target, e)
+        log.warning("Could not remove the failed upload %s: %s", temp, e)

@@ -73,6 +73,7 @@ from sift.device.transport import (
     DeviceTimeout,
     FileChanged,
     LinkHealth,
+    NameTaken,
     RemoteEntry,
     RemoteError,
     TransportError,
@@ -910,6 +911,23 @@ class AdbTransport:
         written = self.stat(remote)
         if written is None or written.size != size:
             raise RemoteError(f"The phone did not keep all of {remote}.", remote)
+
+    def rename_new(self, src: str, dst: str) -> None:
+        """`mv -n` (no clobber) on the phone, then check what happened: `src` gone and `dst`
+        present is a move; `src` still there means `dst` was taken (NameTaken), nothing moved."""
+        _encode_path(src)
+        _encode_path(dst)
+        out = self._exec(
+            f"mv -n -- {shlex.quote(src)} {shlex.quote(dst)} 2>&1; echo rc=$?", self.limits.stat_s
+        )
+        text = out.decode("utf-8", "replace").strip()
+        if not text.endswith("rc=0"):
+            message = text.rsplit("rc=", 1)[0].strip() or "the phone refused"
+            raise RemoteError(f"Could not move {src}: {message}", src)
+        if self.stat(src) is not None:
+            raise NameTaken(f"{dst} already exists on the phone.", dst)
+        if self.stat(dst) is None:
+            raise RemoteError(f"The phone did not move {src} to {dst}.", dst)
 
     def apps_probe(self, kind: str) -> str | None:
         from sift.device.apps import PROBES

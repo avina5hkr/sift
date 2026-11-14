@@ -29,6 +29,7 @@ from sift.device.transport import (
     DeviceTimeout,
     FileChanged,
     LinkHealth,
+    NameTaken,
     RemoteEntry,
     RemoteError,
 )
@@ -438,7 +439,20 @@ class FakeTransport:
         with self._slot(self.limits.stat_s):
             if self.phone.is_unreadable(parent):
                 raise RemoteError(f"cannot write {remote}: permission denied", remote)
+            if self.phone.entry(remote) is not None:  # like AdbTransport: never over a file
+                raise RemoteError(f"{remote} already exists on the phone.", remote)
             self.phone.add_file(remote, local.read_bytes(), mtime=mtime)
+
+    def rename_new(self, src: str, dst: str) -> None:
+        self._begin("rename_new", dst, mutating=True)
+        with self._slot(self.limits.stat_s):
+            self._shell("rename_new")
+            entry = self.phone.entry(src)
+            if entry is None or entry.is_dir or entry.is_symlink:
+                raise RemoteError(f"cannot move {src}: no such file", src)
+            if self.phone.entry(dst) is not None:
+                raise NameTaken(f"{dst} already exists on the phone.", dst)
+            self.phone.move(src, dst)
 
     def apps_probe(self, kind: str) -> str | None:
         self._begin("apps_probe", kind)

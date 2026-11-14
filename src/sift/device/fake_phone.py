@@ -152,6 +152,13 @@ class FakePhone:
         file.size = len(data)
         file.mtime = mtime
 
+    def move(self, src: str, dst: str) -> None:
+        """Rename a file (the caller checks that `dst` is free)."""
+        src, dst = _canon(src), _canon(dst)
+        file = self.files.pop(src)
+        self._dirs[posixpath.dirname(src) or "/"].discard(src)
+        self._put(dst, file)
+
     def remove(self, path: str) -> None:
         """Remove a file or symlink, or a folder with everything in it."""
         path = _canon(path)
