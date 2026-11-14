@@ -95,6 +95,7 @@ export function useDeleteRun({ onFinished }: Options = {}) {
           body.source === 'slate'
             ? await post<{ run_id: number; task: TaskEvent; skipped?: string[] }>(`/api/slate/plan/${body.plan}/preflight`, {
                 dispositions: body.dispositions,
+                ...(body.fingerprint ? { fingerprint: body.fingerprint } : {}),
               })
             : await post<{ run_id: number; task: TaskEvent; skipped?: string[] }>('/api/delete/preflight', body)
         useEventStore.setState({ task: started.task })

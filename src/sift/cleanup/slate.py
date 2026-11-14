@@ -42,6 +42,9 @@ class Info:
     label: str | None = None
     text: str | None = None
     screenshot: bool = False
+    unreadable: bool = False
+    analysed: bool = True  # its words were read (or it never needs reading)
+    protect_sim: float = -1.0  # nearest picture the owner marked protected
 
 
 @dataclass(frozen=True)
@@ -76,8 +79,12 @@ def decide(
         or doc.hit(info.text) is not None
         or (cfg.scoring.protect_screenshots and shot)
         or _under(key, protected_folders)
+        or info.unreadable
+        or info.protect_sim >= cfg.scoring.protect_cosine
     ):
         return Decision("protected", "Protected")
+    if not info.analysed:  # its words are not read yet: it could be an ID or a receipt
+        return Decision("protected", "Not analysed yet")
     if row.id in kept_ids or _under(key, [phone_path_key(f) for f in kept_folders]):
         return Decision("keep", "You kept it")
     if _under(key, [phone_path_key(f) for f in rules.keep_folders]):
@@ -88,9 +95,35 @@ def decide(
         return Decision("keep", "You marked it keep")
     if rules.keep_camera and row.origin == "camera":
         return Decision("keep", "Camera original")
-    if any(fnmatch.fnmatch(key, phone_path_key(p)) for p in rules.patterns):
+    if any(pattern_keeps(key, p) for p in rules.patterns):
         return Decision("keep", "Matches a keep pattern")
     return Decision("remove", "No keep rule matches")
+
+
+def pattern_keeps(key: str, pattern: str) -> bool:
+    """A plain path keeps that file or everything below it; a glob is matched as a glob
+    (`*` also spans folders, and `/**/` may stand for no folder at all)."""
+    p = phone_path_key(pattern)
+    if not any(ch in p for ch in "*?["):
+        return _under(key, [p.rstrip("/")])
+    return fnmatch.fnmatch(key, p) or ("/**/" in p and fnmatch.fnmatch(key, p.replace("/**/", "/")))
+
+
+def normalise(path: str, *, pattern: bool = False) -> str | None:
+    """A phone path or pattern as Sift stores it (/sdcard/...), or None when it cannot be one.
+    `/storage/emulated/0` becomes `/sdcard`; a relative pattern such as `*.pdf` applies under
+    /sdcard."""
+    text = path.strip()
+    if not text:
+        return None
+    for alias in ("/storage/emulated/0", "/storage/self/primary"):
+        if text.casefold().startswith(alias):
+            text = "/sdcard" + text[len(alias) :]
+    if pattern and not text.startswith("/"):
+        text = "/sdcard/" + text
+    if not text.casefold().startswith("/sdcard/") or ".." in text.split("/"):
+        return None
+    return "/sdcard" + text[len("/sdcard") :]
 
 
 def category(row: FileRow, info: Info) -> str:
@@ -117,17 +150,58 @@ class Planned:
 
 
 def _infos(ctx: AppContext, hashes: Sequence[str]) -> dict[str, Info]:
+    from sift.analysis.embed import from_blob
+    from sift.analysis.ocr import MIN_SHORT_SIDE
+
     out: dict[str, Info] = {}
+    vectors: dict[str, Any] = {}
     with ctx.db.read() as conn:
         for start in range(0, len(hashes), 900):
             part = hashes[start : start + 900]
             marks = ",".join("?" for _ in part)
-            for h, label, text, shot in conn.execute(
-                "SELECT c.hash, l.label, c.ocr_text, c.is_screenshot FROM content c "
-                f"LEFT JOIN label l ON l.content_hash = c.hash WHERE c.hash IN ({marks})",
+            for (
+                h,
+                label,
+                text,
+                shot,
+                unreadable,
+                kind,
+                w,
+                hgt,
+                exif,
+                ocr_v,
+                idx_v,
+                emb,
+            ) in conn.execute(
+                "SELECT c.hash, l.label, c.ocr_text, c.is_screenshot, c.unreadable, c.kind, "
+                "c.width, c.height, c.has_camera_exif, c.ocr_version, c.analysis_version, "
+                "c.embedding FROM content c LEFT JOIN label l ON l.content_hash = c.hash "
+                f"WHERE c.hash IN ({marks})",
                 part,
             ):
-                out[str(h)] = Info(label, text, bool(shot))
+                needs_words = (
+                    kind == "image" and not exif and min(w or 0, hgt or 0) >= MIN_SHORT_SIDE
+                )
+                analysed = kind != "image" or (
+                    int(idx_v or 0) >= 1 and (not needs_words or int(ocr_v or 0) >= 1)
+                )
+                out[str(h)] = Info(label, text, bool(shot), bool(unreadable), analysed)
+                if emb is not None:
+                    vectors[str(h)] = from_blob(emb)
+        protected = [
+            from_blob(r[0])
+            for r in conn.execute(
+                "SELECT c.embedding FROM label l JOIN content c ON c.hash = l.content_hash "
+                "WHERE l.label = 'protected' AND c.embedding IS NOT NULL"
+            )
+        ]
+    if protected and vectors:
+        import numpy as np
+
+        keys = list(vectors)
+        sims = np.stack([vectors[k] for k in keys]) @ np.stack(protected).T
+        for k, s in zip(keys, sims.max(axis=1), strict=True):
+            out[k].protect_sim = float(s)
     return out
 
 
@@ -179,6 +253,16 @@ def plan(ctx: AppContext, plan_id: int, *, now: float | None = None) -> list[Pla
     return out
 
 
+def fingerprint(items: Sequence[Planned]) -> str:
+    """What the owner reviewed: the removal set (ids and sizes)."""
+    import hashlib
+
+    body = ",".join(
+        f"{p.row.id}:{p.row.size}" for p in sorted(removal(items), key=lambda p: p.row.id)
+    )
+    return hashlib.sha256(body.encode()).hexdigest()[:24]
+
+
 def summary(items: Sequence[Planned]) -> dict[str, Any]:
     def total(sel: Iterable[Planned]) -> dict[str, int]:
         sel = list(sel)
@@ -228,7 +312,7 @@ def keep(ctx: AppContext, plan_id: int, ids: Sequence[int], folders: Sequence[st
         )
         conn.executemany(
             "INSERT INTO slate_keep (plan_id, folder) VALUES (?, ?)",
-            [(plan_id, f) for f in folders if f.startswith("/sdcard/")],
+            [(plan_id, f) for f in (normalise(x) for x in folders) if f],
         )
 
 

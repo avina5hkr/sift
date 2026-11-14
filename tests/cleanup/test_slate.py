@@ -8,7 +8,6 @@ from hypothesis import strategies as st
 from sift.cleanup import slate
 from sift.cleanup.browse import FileRow
 from sift.cleanup.lexicons import load
-from sift.cleanup.preflight import run_preflight
 from sift.cleanup.quarantine import entries
 from sift.core.config import Config, phone_path_key
 from tests.backup.test_confirm import backed_up, device_id
@@ -96,20 +95,23 @@ def test_p7_no_kept_or_protected_file_is_ever_in_a_removal_set(
 def everything(rig: Rig) -> None:
     names = [s.name for s in rig.ctx.config.backup.sets if s.enabled]
     backed_up(rig, names)
+    with rig.ctx.db.tx() as conn:  # as after an Analyze: indexed and read
+        conn.execute("UPDATE content SET analysis_version = 2, ocr_version = 1")
 
 
 def test_clean_slate_plans_waits_for_gaps_and_removes_only_the_plan(rig: Rig) -> None:
     everything(rig)
-    rig.transport.phone.add_file("/sdcard/Download/stray.bin", b"stray", mtime=1_500_000_000)
-    from tests.backup.test_run import finished
-
-    jobs = rig.jobs()
-    finished(jobs, jobs.start_backup(["Camera"], dry_run=True))  # the stray file is seen
+    with rig.ctx.db.tx() as conn:  # a file Sift saw but no backup set covers
+        conn.execute(
+            "INSERT INTO phone_file (device_id, remote_path, origin, size, mtime, state, present) "
+            "VALUES (1, '/sdcard/Download/stray.bin', 'other', 5, 1500000000, 'discovered', 1)"
+        )
     c, h = client(rig)
     plan = c.post(
         "/api/slate/plan", headers=h, json={"keep_folders": [], "keep_newer_than_days": 0}
     ).json()
     assert plan["remove"]["files"] > 0 and plan["protected"]["files"] > 0  # screenshots stay
+    assert plan["gaps"]["files"] >= 1 and plan["gaps_no_set"]["files"] >= 1
     if plan["gaps"]["files"]:
         refused = c.post(f"/api/slate/plan/{plan['id']}/preflight", headers=h, json={})
         assert refused.status_code == 409 and refused.json()["code"] == "gaps"
@@ -153,24 +155,134 @@ def test_clean_slate_plans_waits_for_gaps_and_removes_only_the_plan(rig: Rig) ->
     assert len(entries(rig.ctx)) >= len(camera_gone) > 0  # camera chose quarantine
 
 
-def test_a_file_kept_after_the_plan_is_never_removed(rig: Rig) -> None:
-    everything(rig)
-    c, h = client(rig)
+def ready_plan(rig: Rig, c, h, **rules) -> dict:
     plan = c.post(
-        "/api/slate/plan", headers=h, json={"keep_folders": [], "keep_newer_than_days": 0}
+        "/api/slate/plan", headers=h, json={"keep_folders": [], "keep_newer_than_days": 0, **rules}
     ).json()
     gaps = c.get(f"/api/slate/plan/{plan['id']}/files?side=gaps", headers=h).json()["files"]
     if gaps:
-        c.post(
+        plan = c.post(
             f"/api/slate/plan/{plan['id']}/keep", headers=h, json={"ids": [g["id"] for g in gaps]}
-        )
-    started = c.post(f"/api/slate/plan/{plan['id']}/preflight", headers=h, json={}).json()
+        ).json()
+    return plan
+
+
+def test_a_file_kept_after_the_checks_is_never_removed(rig: Rig) -> None:
+    everything(rig)
+    c, h = client(rig)
+    plan = ready_plan(rig, c, h)
+    started = c.post(
+        f"/api/slate/plan/{plan['id']}/preflight",
+        headers=h,
+        json={"fingerprint": plan["fingerprint"]},
+    ).json()
     assert rig.ctx.tasks.wait(60)
     first = c.get(f"/api/slate/plan/{plan['id']}/files?side=remove", headers=h).json()["files"][0]
-    slate.keep(rig.ctx, plan["id"], [first["id"]], [])  # the owner changes their mind
-    run_preflight(rig.ctx, started["run_id"], rig.session)  # the checks run again
+    kept = c.post(f"/api/slate/plan/{plan['id']}/keep", headers=h, json={"ids": [first["id"]]})
+    assert kept.status_code == 200
     run = c.get(f"/api/delete/runs/{started['run_id']}", headers=h).json()
-    assert next(i for i in run["items"] if i["id"] == first["id"])["check"] == "kept"
+    assert run["state"] == "blocked"  # the checks no longer match the plan
+    refused = c.post(
+        "/api/delete/execute", headers=h,
+        json={"run_id": run["id"], "confirm": True, "typed_count": run["passed"]},
+    )  # fmt: skip
+    assert refused.status_code == 409 and deletes(rig) == []
+    # even a run left "ready" is refused when the plan now keeps one of its files
+    with rig.ctx.db.tx() as conn:
+        conn.execute("UPDATE delete_run SET state = 'ready' WHERE id = ?", (run["id"],))
+    refused = c.post(
+        "/api/delete/execute", headers=h,
+        json={"run_id": run["id"], "confirm": True, "typed_count": run["passed"]},
+    )  # fmt: skip
+    assert refused.status_code == 409 and refused.json()["code"] == "plan_changed"
+    stale = c.post(
+        f"/api/slate/plan/{plan['id']}/preflight", headers=h, json={"fingerprint": "old"}
+    )
+    assert stale.status_code == 409 and stale.json()["code"] == "plan_changed"
+
+
+def test_pictures_not_analysed_yet_are_protected(rig: Rig) -> None:
+    names = [s.name for s in rig.ctx.config.backup.sets if s.enabled]
+    backed_up(rig, names)  # no Analyze yet
+    c, h = client(rig)
+    plan = ready_plan(rig, c, h)
+    files = c.get(f"/api/slate/plan/{plan['id']}/files?side=remove", headers=h).json()["files"]
+    assert not [f for f in files if f["kind"] == "image"]
+    prot = c.get(f"/api/slate/plan/{plan['id']}/files?side=protected", headers=h).json()["files"]
+    assert any(f["reason"] == "Not analysed yet" for f in prot)
+
+
+def test_keep_paths_are_normalised_or_refused_and_plain_paths_keep_below(rig: Rig) -> None:
+    everything(rig)
+    c, h = client(rig)
+    bad = c.post("/api/slate/plan", headers=h, json={"keep_folders": ["C:/Photos"]})
+    assert bad.status_code == 422 and bad.json()["code"] == "bad_keep_path"
+    plan = c.post(
+        "/api/slate/plan",
+        headers=h,
+        json={"keep_folders": ["/storage/emulated/0/DCIM"], "keep_newer_than_days": 0,
+              "patterns": ["/sdcard/Pictures", "*.mp4"]},
+    ).json()  # fmt: skip
+    assert plan["rules"]["keep_folders"] == ["/sdcard/DCIM"]
+    assert plan["rules"]["patterns"] == ["/sdcard/Pictures", "/sdcard/*.mp4"]
+    remove = c.get(f"/api/slate/plan/{plan['id']}/files?side=remove", headers=h).json()["files"]
+    assert not [f for f in remove if f["path"].startswith(("/sdcard/DCIM/", "/sdcard/Pictures/"))]
+    assert not [f for f in remove if f["path"].endswith(".mp4")]
+    assert slate.pattern_keeps("/sdcard/a/b/x.pdf", "/sdcard/**/x.pdf")
+    assert slate.pattern_keeps("/sdcard/a/x.pdf", "/sdcard/a/**/x.pdf")
+
+
+def test_archive_categories_are_never_quarantined(rig: Rig) -> None:
+    everything(rig)
+    c, h = client(rig)
+    with rig.ctx.db.tx() as conn:  # junk-labelled camera pictures: archive was chosen for camera
+        conn.execute(
+            "INSERT OR IGNORE INTO label (content_hash, label, source, created_at) "
+            "SELECT content_hash, 'junk', 'manual', 1 FROM phone_file "
+            "WHERE remote_path LIKE '%/DCIM/Camera/%' AND content_hash IS NOT NULL"
+        )
+    plan = ready_plan(rig, c, h)
+    started = c.post(
+        f"/api/slate/plan/{plan['id']}/preflight", headers=h,
+        json={"dispositions": {c_: "archive" for c_ in slate.CATEGORIES}},
+    ).json()  # fmt: skip
+    assert rig.ctx.tasks.wait(60)
+    run = c.get(f"/api/delete/runs/{started['run_id']}", headers=h).json()
+    c.post(
+        "/api/delete/execute", headers=h,
+        json={"run_id": run["id"], "confirm": True, "typed_count": run["passed"]},
+    )  # fmt: skip
+    assert rig.ctx.tasks.wait(60) and deletes(rig)
+    assert entries(rig.ctx) == []  # archive everywhere: nothing went to quarantine
+
+
+def test_p8_faults_through_the_slate_path(rig: Rig) -> None:
+    import random
+
+    from tests.cleanup.test_delete import local_of, path_of
+
+    everything(rig)
+    c, h = client(rig)
+    plan = ready_plan(rig, c, h)
+    remove = c.get(f"/api/slate/plan/{plan['id']}/files?side=remove", headers=h).json()["files"]
+    backed = [f["id"] for f in remove if f["path"].startswith("/sdcard/DCIM/Camera/")]
+    rng = random.Random(5)
+    edited, corrupted, hashed, late = rng.sample(backed, 4)
+    phone = rig.transport.phone
+    phone.modify(path_of(rig, edited), b"x", int(time.time()) - 40 * 86400)
+    local_of(rig, corrupted).write_bytes(b"")
+    rig.transport.faults.wrong_sha256.add(path_of(rig, hashed))
+    started = c.post(f"/api/slate/plan/{plan['id']}/preflight", headers=h, json={}).json()
+    assert rig.ctx.tasks.wait(60)
+    phone.modify(path_of(rig, late), b"late", int(time.time()) - 40 * 86400)
+    run = c.get(f"/api/delete/runs/{started['run_id']}", headers=h).json()
+    c.post(
+        "/api/delete/execute", headers=h,
+        json={"run_id": run["id"], "confirm": True, "typed_count": run["passed"]},
+    )  # fmt: skip
+    assert rig.ctx.tasks.wait(60)
+    gone = set(deletes(rig))
+    assert gone and not gone & {path_of(rig, p) for p in (edited, corrupted, hashed, late)}
 
 
 def test_a_50k_file_plan_takes_seconds(rig: Rig) -> None:

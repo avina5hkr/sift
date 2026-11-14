@@ -38,7 +38,7 @@ export default function SlatePage() {
     if (!plan) return
     const body: Record<string, Disposition> = {}
     for (const [k, v] of Object.entries(dispositions)) if (plan.categories[k as keyof typeof plan.categories]?.files > 0) body[k] = v
-    void flow.start({ source: 'slate', plan: plan.id, dispositions: body })
+    void flow.start({ source: 'slate', plan: plan.id, dispositions: body, fingerprint: plan.fingerprint })
   }
 
   return (

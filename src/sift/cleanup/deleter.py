@@ -69,6 +69,22 @@ def check_execute(
         )
     if typed and typed_count != int(passed):
         raise ExecuteRefused("typed_count", f"Type the number of files, {passed}, to confirm.")
+    if source == "slate":
+        from sift.cleanup.preflight import _slate_kept
+
+        with ctx.db.read() as conn:
+            ok = {
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT phone_file_id FROM delete_item WHERE run_id = ? "
+                    "AND check_result = 'ok'",
+                    (run_id,),
+                )
+            }
+        if _slate_kept(ctx, run_id, ok):
+            raise ExecuteRefused(
+                "plan_changed", "The plan now keeps some of these files. Check again."
+            )
     if source == "cleanup" and selection_hash(ticked) != sel_hash:
         raise ExecuteRefused("selection_changed", "The ticked files changed. Run the checks again.")
     from sift.cleanup.preflight import copies_problem

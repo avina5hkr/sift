@@ -430,7 +430,7 @@ export type DeleteBody =
       folders: string[]
       filters?: { q: string; kind: string; older_days: number; min_bytes: number; status: string }
     }
-  | { source: 'slate'; plan: number; dispositions: Record<string, Disposition> }
+  | { source: 'slate'; plan: number; dispositions: Record<string, Disposition>; fingerprint?: string }
 /** What happens to the backup copy of a file deleted from Browse. */
 export type Disposition = 'archive' | 'quarantine'
 
@@ -446,6 +446,7 @@ export type SlateRules = {
 }
 export type SlatePlan = {
   id: number
+  fingerprint?: string
   rules: SlateRules
   kept_by_hand: { files: number; folders: string[] }
   remove: SlateTotal

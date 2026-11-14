@@ -67,11 +67,13 @@ def quarantine_run(ctx: AppContext, run_id: int) -> int:
                 "AND i.state = 'deleted' AND i.content_hash IS NOT NULL "
                 "AND NOT EXISTS (SELECT 1 FROM phone_file p WHERE p.content_hash = i.content_hash "
                 "AND p.present = 1) "
-                "AND ((SELECT source FROM delete_run WHERE id = i.run_id) = 'browse' "
-                "OR i.quarantine = 1 "
+                "AND (CASE (SELECT source FROM delete_run WHERE id = i.run_id) "
+                "WHEN 'slate' THEN NOT EXISTS (SELECT 1 FROM delete_item j WHERE "
+                "j.run_id = i.run_id AND j.content_hash = i.content_hash AND j.quarantine = 0) "
+                "ELSE ((SELECT source FROM delete_run WHERE id = i.run_id) = 'browse' "
                 "OR EXISTS (SELECT 1 FROM label l WHERE l.content_hash = i.content_hash "
                 "AND l.label = 'junk') OR EXISTS (SELECT 1 FROM near_member m "
-                "WHERE m.content_hash = i.content_hash AND m.role = 'copy'))",
+                "WHERE m.content_hash = i.content_hash AND m.role = 'copy')) END)",
                 (run_id,),
             )
         ]

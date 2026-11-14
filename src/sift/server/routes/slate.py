@@ -27,6 +27,32 @@ class RulesIn(BaseModel):
     patterns: list[str] = Field(default_factory=list, max_length=100)
 
 
+def _clean(paths: list[str], *, pattern: bool) -> list[str]:
+    """Normalise keep folders or patterns; one that cannot name a phone path is refused, never
+    dropped (dropping it would plan its files for removal)."""
+    out = []
+    for raw in paths:
+        if not raw.strip():
+            continue
+        found = slate.normalise(raw, pattern=pattern)
+        if found is None:
+            raise ApiError(
+                422, "bad_keep_path", f"Sift cannot use {raw!r}: keep paths start with /sdcard/."
+            )
+        out.append(found)
+    return out
+
+
+def _active_run(ctx: Ctx, plan_id: int) -> tuple[int, str] | None:
+    with ctx.db.read() as conn:
+        row = conn.execute(
+            "SELECT r.id, r.state FROM slate_plan p JOIN delete_run r ON r.id = p.run_id "
+            "WHERE p.id = ? AND r.state IN ('preflight', 'ready', 'running')",
+            (plan_id,),
+        ).fetchone()
+    return None if row is None else (int(row[0]), str(row[1]))
+
+
 def _items(ctx: Ctx, plan_id: int) -> list[slate.Planned]:
     try:
         return slate.plan(ctx, plan_id)
@@ -43,6 +69,7 @@ def _out(ctx: Ctx, plan_id: int) -> dict[str, Any]:
         "kept_by_hand": {"files": len(kept_ids), "folders": kept_folders},
         **slate.summary(items),
         "gap_sets": slate.gap_sets(ctx, items),
+        "fingerprint": slate.fingerprint(items),
     }
 
 
@@ -51,11 +78,11 @@ def create_plan(ctx: Ctx, body: RulesIn) -> dict[str, Any]:
     device_id = _device(ctx)
     rules = slate.Rules.defaults(ctx.config)
     if body.keep_folders is not None:
-        rules.keep_folders = [f for f in body.keep_folders if f.startswith("/sdcard/")]
+        rules.keep_folders = _clean(body.keep_folders, pattern=False)
     if body.keep_newer_than_days is not None:
         rules.keep_newer_than_days = body.keep_newer_than_days
     rules.keep_labelled, rules.keep_camera = body.keep_labelled, body.keep_camera
-    rules.patterns = [p for p in body.patterns if p.startswith("/sdcard/")]
+    rules.patterns = _clean(body.patterns, pattern=True)
     return _out(ctx, slate.create(ctx, device_id, rules))
 
 
@@ -110,7 +137,17 @@ class KeepIn(BaseModel):
 @router.post("/slate/plan/{plan_id}/keep")
 def keep(ctx: Ctx, plan_id: int, body: KeepIn) -> dict[str, Any]:
     _items(ctx, plan_id)
-    slate.keep(ctx, plan_id, body.ids, body.folders)
+    active = _active_run(ctx, plan_id)
+    if active is not None and active[1] in ("preflight", "running"):
+        raise ApiError(409, "run_active", "Wait until the current run ends, then change the plan.")
+    folders = _clean(body.folders, pattern=False)
+    slate.keep(ctx, plan_id, body.ids, folders)
+    if active is not None:  # checks already passed: they no longer match the plan
+        with ctx.db.tx() as conn:
+            conn.execute(
+                "UPDATE delete_run SET state = 'blocked', blocked_reason = ? WHERE id = ?",
+                ("The plan changed. Check the files again.", active[0]),
+            )
     return _out(ctx, plan_id)
 
 
@@ -132,6 +169,7 @@ def backup_gaps(ctx: Ctx, plan_id: int) -> dict[str, Any]:
 
 class SlateRun(BaseModel):
     dispositions: dict[str, Literal["archive", "quarantine"]] = Field(default_factory=dict)
+    fingerprint: str | None = None  # the plan the owner reviewed
 
 
 @router.post("/slate/plan/{plan_id}/preflight")
@@ -143,6 +181,10 @@ def start_checks(ctx: Ctx, plan_id: int, body: SlateRun) -> PreflightStarted:
     if any(p.gap is not None for p in items):
         raise ApiError(
             409, "gaps", "Some files to remove are not backed up yet. Back them up or keep them."
+        )
+    if body.fingerprint is not None and body.fingerprint != slate.fingerprint(items):
+        raise ApiError(
+            409, "plan_changed", "The plan changed since you reviewed it. Look at it again."
         )
     chosen = slate.removal(items)
     if not chosen:
