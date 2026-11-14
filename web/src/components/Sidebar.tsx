@@ -19,6 +19,10 @@ export function Sidebar() {
       aria-label="Main"
       className="w-[200px] shrink-0 border-r border-neutral-200 p-3 dark:border-neutral-800"
     >
+      <div className="mb-3 flex items-center gap-2 px-3 py-1">
+        <img src="/favicon.svg" alt="" width={28} height={28} className="h-7 w-7" />
+        <span className="text-lg font-semibold tracking-tight">Sift</span>
+      </div>
       <ul className="flex flex-col gap-1">
         {AREAS.map(({ to, label }) => (
           <li key={to}>

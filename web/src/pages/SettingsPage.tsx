@@ -199,7 +199,8 @@ function About() {
   })
   return (
     <section aria-labelledby="about-title" className="mt-6 flex flex-col gap-2">
-      <h2 id="about-title" className="text-lg font-semibold">
+      <h2 id="about-title" className="flex items-center gap-2 text-lg font-semibold">
+        <img src="/favicon.svg" alt="" width={32} height={32} className="h-8 w-8" />
         About Sift
       </h2>
       <p>Version {version ?? '…'}</p>

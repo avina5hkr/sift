@@ -26,6 +26,8 @@ The first public release.
 - Apps: sizes, last use and safe uninstall, with WhatsApp and authenticators protected.
   WhatsApp chat backups are kept until you choose to remove old ones.
 - Phone health report and a factory-reset checklist.
+- An app icon and logo (an inverted pyramid of photo tiles ending in one kept, checked
+  tile), in the Dock, the sidebar, setup and About; drawn by `make logo`.
 - A macOS app (Apple Silicon, macOS 14+, ad-hoc signed) built by `make build`, with a crash
   dialog, logs and a self-check; release builds from version tags on GitHub Actions.
 

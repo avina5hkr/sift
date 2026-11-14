@@ -21,7 +21,7 @@ fake-phone:
 e2e: web
 	cd web && npm exec playwright test
 
-.PHONY: test lint web web-test dev fake-phone e2e codemap build
+.PHONY: test lint web web-test dev fake-phone e2e codemap build logo
 
 codemap:
 	uv run python scripts/codemap.py > docs/CODEMAP.md
@@ -31,3 +31,6 @@ bench:
 
 build:
 	packaging/build_dmg.sh
+
+logo:
+	uv run python scripts/make_logo.py

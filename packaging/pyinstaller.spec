@@ -67,6 +67,7 @@ coll = COLLECT(exe, a.binaries, a.datas, name="Sift")
 app = BUNDLE(
     coll,
     name="Sift.app",
+    icon=str(ROOT / "packaging" / "Sift.icns"),  # drawn by scripts/make_logo.py
     bundle_identifier="local.sift.app",
     version=VERSION,
     info_plist={
