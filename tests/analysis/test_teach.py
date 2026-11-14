@@ -22,7 +22,7 @@ from sift.analysis.models import (
     download,
     installed,
 )
-from sift.analysis.ocr import recognize
+from sift.analysis.ocr import languages, recognize
 from sift.core.config import AnalysisConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
@@ -60,6 +60,8 @@ def test_ocr_reads_english_and_hindi(text_fixtures) -> None:
     folder, names = text_fixtures
     en = recognize(folder / names["greeting"][0])
     assert en is not None and "good morning" in en.text and en.density > 0
+    if "hi-IN" not in languages():  # older macOS (CI runners): Vision has no Hindi
+        pytest.skip("Vision on this Mac cannot read Hindi")
     hi = recognize(folder / names["greeting_hi"][1])
     assert hi is not None and "शुभ" in hi.text  # Hindi is read (D1)
 

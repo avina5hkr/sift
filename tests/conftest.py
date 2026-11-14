@@ -19,7 +19,8 @@ from sift.core.paths import AppPaths
 from tests import helpers
 
 # `dev` keeps local runs quick; `ci` runs 200 examples per property test with no deadline.
-settings.register_profile("dev", max_examples=50)
+# `dev` names its deadline: on a CI machine Hypothesis's own defaults drop the deadline.
+settings.register_profile("dev", max_examples=50, deadline=200)
 settings.register_profile("ci", max_examples=200, deadline=None)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 
