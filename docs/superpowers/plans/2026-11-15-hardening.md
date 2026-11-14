@@ -44,3 +44,23 @@ summarised in `docs/defaults-and-safety.md`.
   calibration of at least 50 items. Images whose text reading had failed are read again on the
   next Analyze. Teaching saved before this change loads as format 1 (every label as a picture's
   own); save it again to keep group provenance.
+
+## Follow-up (second review)
+
+| Finding | Verdict | Fix |
+| --- | --- | --- |
+| Upload cleanup could delete an unrelated phone file | Confirmed: a file appearing at the chosen name made `push` fail with "already exists", and the cleanup removed that file | Uploads go to Sift's own random hidden name, are hashed there, and move into place with `mv -n` (checked afterwards; `rename_new` on the transports); cleanup only removes names with Sift's prefix. Archive restore, quarantine restore and the contacts upload (`push_one`) |
+| Calibration identity ignored OCR languages | Confirmed; also stored readings were never redone after a language change | Each reading records the configured list; a reading for another list is not checked (protected, kept by Clean slate) and is read again; the list is in the fingerprint |
+| Probability calibration discarded group weights | Confirmed: Platt and isotonic were unweighted, the isotonic switch and class balance counted pictures | Weighted Platt and isotonic, weighted class balance, isotonic from 200 decisions |
+| Neighbour vote and support ignored groups | Confirmed, and the Teach page suggestions too | A group takes at most 5 neighbour places (its closest members); Teach suggestions use weighted minimums and say |
+| Model pre-selection | Policy | Opt-in `cleanup.precheck_suggestions`, off; `never_precheck` retired, so existing installs are off too |
+
+Assumptions: F1. `mv -n` (toybox) is the no-replace rename; its result is verified by stat,
+so a phone without it refuses restores rather than risking a file. The owner's phone (Android
+16, toybox 0.8.12) lists `-n`; a real restore is part of Gate C. F2. In the neighbour vote a
+group's cap is applied to places rather than to per-picture weights, so a big group cannot crowd
+out other labels. F3. Readings made before this change carry the languages Vision used, which
+match the default list, so default installs read nothing again.
+
+Migration: none for the schema. Pre-ticking of model suggestions is off for everyone until the
+owner turns it on in Settings, General. A changed language list reopens every reading.
