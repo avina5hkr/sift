@@ -20,6 +20,7 @@ from sift.server.routes import (
     setup,
     slate,
     status,
+    storage,
     teach,
     testphone,
     vault,
@@ -52,6 +53,7 @@ def create_app(ctx: AppContext) -> FastAPI:
     app.include_router(browse.router, prefix="/api")
     app.include_router(slate.router, prefix="/api")
     app.include_router(apps.router, prefix="/api")
+    app.include_router(storage.router, prefix="/api")
     if testhooks.flag("SIFT_TEST_PHONE_CONTROL"):
         app.include_router(testphone.router, prefix="/api")  # the browser tests only
     mount_web(app, ctx.web_dist)

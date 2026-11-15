@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -44,6 +44,18 @@ beforeEach(() => {
       if (url === '/api/settings') return Promise.resolve(method === 'PUT' ? putReply() : json(SETTINGS))
       if (url === '/api/status') return Promise.resolve(json({ app: { version: '1.2.3', schema_version: 1, config_warnings: [] } }))
       if (url === '/api/logs/open') return Promise.resolve(new Response(null, { status: 204 }))
+      if (url === '/api/storage')
+        return Promise.resolve(
+          json({
+            data_folder: { path: '/Users/me/Library/Application Support/Sift', exists: true, free_bytes: null },
+            overridden: false,
+            settings_file: { path: '/Users/me/Library/Application Support/Sift/config.toml', exists: true, free_bytes: null },
+            database: { path: '/Users/me/Library/Application Support/Sift/state.db', exists: true, free_bytes: null },
+            mac_backup: { path: '/Users/me/PhoneBackup', exists: true, free_bytes: 300_000_000_000 },
+            ssd: { configured: true, connected: true, name: 'T7', volume_id: 'ABCD1234', folder: '/Volumes/T7/PhoneBackup', status: 'SSD: 120 files pending' },
+          }),
+        )
+      if (url === '/api/storage/reveal') return Promise.resolve(json({ opened: true }))
       if (url === '/api/phone/wifi') {
         return Promise.resolve(json({
           remembered: [{ name: 'Pixel', address: '192.168.1.5:5555', paired_at: 1, last_connected: null }],
@@ -153,4 +165,16 @@ test('General shows About with the version, the update note and removal steps; O
   expect(screen.getByText(/Drag Sift to the Bin, then delete ~\/Library\/Application Support\/Sift and ~\/Library\/Caches\/Sift\. Your backups are never touched\./)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Open logs folder' }))
   await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/api/logs/open')).toBe(true))
+})
+
+test('General lists where this Sift keeps its data, read-only, with Reveal in Finder', async () => {
+  renderAt('/settings/general')
+  const section = await screen.findByRole('region', { name: 'Storage locations' })
+  expect(await within(section).findByText('/Users/me/Library/Application Support/Sift/state.db')).toBeInTheDocument()
+  expect(within(section).getByText('/Users/me/PhoneBackup')).toBeInTheDocument()
+  expect(within(section).getByTestId('storage-ssd')).toHaveTextContent(/T7, connected.*drive ABCD1234….*\/Volumes\/T7\/PhoneBackup.*SSD: 120 files pending/)
+  await userEvent.click(within(section).getByRole('button', { name: 'Reveal database in Finder' }))
+  await waitFor(() =>
+    expect(calls.some((c) => c.method === 'POST' && c.path === '/api/storage/reveal')).toBe(true),
+  )
 })

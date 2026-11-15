@@ -13,6 +13,7 @@ import { PAGE_TITLES } from '../lib/settingsLabels'
 import type { SetupState } from '../lib/types'
 import { MacFolder } from './Wizard/MacFolder'
 import { Ssd } from './Wizard/Ssd'
+import { StorageLocations } from '../components/settings/StorageLocations'
 import { SwitchPhone } from './Wizard/SwitchPhone'
 import { plain } from './Wizard/request'
 
@@ -107,6 +108,7 @@ function PageForm({ page }: { page: string }) {
       )}
       {page === 'destinations' && <Folders />}
       {page === 'general' && <GeneralLinks />}
+      {page === 'general' && <StorageLocations />}
       {page === 'general' && <About />}
       {fields.length > 0 && (
         <form
