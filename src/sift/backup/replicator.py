@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.backup.layout import rel_key, resolve_collision
+from sift.backup.lease import DRIVE_LEASE
 from sift.backup.problems import add_problem
 from sift.backup.staging import (
     ChecksumMismatch,
@@ -37,9 +38,6 @@ log = logging.getLogger("sift.backup")
 CHUNK = 4 * 1024 * 1024
 STAGING = ".staging"
 NOT_A_FILE = "-"
-
-# One replication at a time, whoever starts it (a backup run or plugging the SSD in).
-REPLICATION_LOCK = threading.Lock()
 
 _writes_lock = threading.Lock()
 _writes = 0
@@ -59,7 +57,7 @@ def ssd_writing() -> Iterator[None]:
 
 
 def writes_in_progress() -> bool:
-    return _writes > 0 or REPLICATION_LOCK.locked()
+    return _writes > 0 or DRIVE_LEASE.held()
 
 
 class SourceCorrupt(Exception):

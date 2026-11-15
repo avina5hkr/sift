@@ -11,6 +11,7 @@ import sift
 from sift.analysis.cluster import Stopped as ClusteringStopped
 from sift.analysis.models import ConsentNeeded, DownloadStopped, ModelDownloadError
 from sift.analysis.near import NearStopped
+from sift.backup.lease import SsdBusy
 from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
@@ -27,6 +28,7 @@ from sift.cleanup.errors import (
 )
 from sift.core.db import (
     DatabaseBusyError,
+    DatabaseClosedError,
     DatabaseCorruptError,
     DatabaseTooNewError,
     MigrationError,
@@ -86,6 +88,7 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "NearStopped": NearStopped,
     "NothingToRepairFrom": NothingToRepairFrom,
     "TaskBusy": TaskBusy,
+    "SsdBusy": SsdBusy,
     "ScanNotPending": ScanNotPending,
     "UnstorablePath": UnstorablePath,
     "ReaderTestCancelled": ReaderTestCancelled,
@@ -108,6 +111,7 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "DatabaseCorruptError": DatabaseCorruptError,
     "DatabaseTooNewError": DatabaseTooNewError,
     "DatabaseBusyError": DatabaseBusyError,
+    "DatabaseClosedError": DatabaseClosedError,
     "MigrationError": MigrationError,
     "ApiError": lambda m: ApiError(500, "x", m, m),
     "unknown": ValueError,

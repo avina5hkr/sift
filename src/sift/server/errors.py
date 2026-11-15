@@ -9,6 +9,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from sift.backup.lease import SsdBusy
+
 logger = logging.getLogger("sift.server")
 
 INTERNAL_MESSAGE = "Something went wrong. Details are in Logs."
@@ -63,7 +65,13 @@ async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
     return error_response(500, "internal", INTERNAL_MESSAGE)
 
 
+async def _ssd_busy(request: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, SsdBusy)
+    return error_response(409, "ssd_busy", exc.message)
+
+
 def install_error_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(SsdBusy, _ssd_busy)
     app.add_exception_handler(ApiError, _api_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)

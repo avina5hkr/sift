@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from sift.backup.lease import DRIVE_LEASE
 from sift.backup.replicator import writes_in_progress
 from sift.core.jobs import TERMINAL
 from sift.core.migrations import schema_version
@@ -80,9 +81,18 @@ def _mac_folder(mac_root: str) -> FolderStatus:
     return FolderStatus(path=str(root), exists=root.is_dir(), free_bytes=_free_bytes(root))
 
 
+STUCK_EJECT_MESSAGE = (
+    "An earlier copy to the SSD has not finished. Quit and reopen Sift before ejecting."
+)
+
+
 def ssd_busy(ctx: Ctx) -> bool:
-    """True while a backup, a long task or a replication may be writing to the SSD."""
-    if writes_in_progress():
+    """True while a backup, a long task or a replication may be writing to the SSD.
+
+    That includes a copy the backup gave up on that is still stuck inside macOS: it keeps the
+    drive lease until it ends, even after its job has finished.
+    """
+    if writes_in_progress() or DRIVE_LEASE.held():
         return True
     if (
         ctx.tasks is not None
@@ -108,6 +118,8 @@ def eject_ssd(ctx: Ctx) -> SsdStatus | None:
     state = ctx.ssd.state() if ctx.ssd is not None else None
     if state is None or not state.connected or not state.mount:
         raise ApiError(409, "no_ssd", "The backup SSD is not connected.")
+    if DRIVE_LEASE.stuck:
+        raise ApiError(409, "ssd_busy", STUCK_EJECT_MESSAGE)
     if ssd_busy(ctx):
         raise ApiError(409, "ssd_busy", "Sift is still writing to the SSD. Wait for it to finish.")
     try:

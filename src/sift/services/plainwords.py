@@ -9,6 +9,7 @@ The one value it reads is `RemoteError.errno`, to pick between fixed sentences.
 from sift.analysis.cluster import Stopped as ClusteringStopped
 from sift.analysis.models import ConsentNeeded, DownloadStopped, ModelDownloadError
 from sift.analysis.near import NearStopped
+from sift.backup.lease import BUSY_MESSAGE, SsdBusy
 from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
@@ -25,6 +26,7 @@ from sift.cleanup.errors import (
 )
 from sift.core.db import (
     DatabaseBusyError,
+    DatabaseClosedError,
     DatabaseCorruptError,
     DatabaseTooNewError,
     MigrationError,
@@ -93,6 +95,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (AdbError, "There is a problem with adb."),
     (AdbPortBusy, "Another program is using adb's port and is not answering."),
     (AlreadyRunningError, "Sift is already running."),
+    (SsdBusy, BUSY_MESSAGE),
     (TaskBusy, "Sift is busy with another task. Try again when it has finished."),
     (BusClosed, "Sift is closing."),
     (NoPhone, "Connect your phone to start a backup."),
@@ -107,6 +110,7 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (DatabaseCorruptError, "Sift's database is damaged."),
     (DatabaseTooNewError, "Sift's data was written by a newer version of Sift."),
     (DatabaseBusyError, "Sift's database is busy. Try again in a moment."),
+    (DatabaseClosedError, "Sift is closing."),
     (MigrationError, "Sift could not update its data to this version."),
     (ApiError, "The request could not be completed."),
 )

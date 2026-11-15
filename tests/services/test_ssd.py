@@ -114,7 +114,7 @@ def test_status_reports_the_ssd(ctx: AppContext, tmp_path: Path) -> None:
 def test_eject_runs_diskutil_only_when_nothing_writes_to_the_ssd(
     ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sift.backup.replicator import REPLICATION_LOCK
+    from sift.backup.lease import DRIVE_LEASE
     from sift.server.routes import status as status_route
     from tests.helpers import client_for
 
@@ -129,12 +129,42 @@ def test_eject_runs_diskutil_only_when_nothing_writes_to_the_ssd(
     client = client_for(ctx)
     h = {"X-Sift-Token": "t0k"}
     assert client.get("/api/status", headers=h).json()["ssd"]["safe_to_unplug"] is True
-    with REPLICATION_LOCK:
+    with DRIVE_LEASE.hold("test"):
         assert client.get("/api/status", headers=h).json()["ssd"]["safe_to_unplug"] is False
         assert client.post("/api/ssd/eject", headers=h).status_code == 409
     assert ejected == []
     assert client.post("/api/ssd/eject", headers=h).status_code == 200
     assert ejected == ["/Volumes/Backup SSD"]
+
+
+def test_eject_is_refused_while_a_stuck_copy_holds_the_lease_after_its_job_ended(
+    ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sift.backup.lease import DRIVE_LEASE
+    from sift.server.routes import status as status_route
+    from tests.helpers import client_for
+
+    ctx.config.backup.ssd_volume_uuid = UUID
+    (tmp_path / "Backup SSD").mkdir()
+    mounted = {str(tmp_path / "Backup SSD"), "/Volumes/Backup SSD"}
+    w = watcher(ctx, tmp_path, mounted, Diskutil())
+    w.poll_once()
+    ctx.ssd = w
+    ejected: list[str] = []
+    monkeypatch.setattr(status_route, "eject", lambda mount: ejected.append(mount))
+    client = client_for(ctx)
+    h = {"X-Sift-Token": "t0k"}
+    assert DRIVE_LEASE.acquire("backup", timeout_s=0)
+    DRIVE_LEASE.hand_to_stuck("SSD copy (not answering)")  # no job is running any more
+    try:
+        assert client.get("/api/status", headers=h).json()["ssd"]["safe_to_unplug"] is False
+        r = client.post("/api/ssd/eject", headers=h)
+        assert r.status_code == 409
+        assert "unplug" not in r.json()["message"].lower()
+        assert "Quit and reopen Sift" in r.json()["message"]
+    finally:
+        DRIVE_LEASE.release()
+    assert ejected == []
 
 
 def test_after_a_run_the_database_is_copied_to_the_ssd(ctx: AppContext, tmp_path: Path) -> None:

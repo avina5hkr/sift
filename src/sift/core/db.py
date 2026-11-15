@@ -34,6 +34,10 @@ class DatabaseBusyError(Exception):
     """Another connection held the write lock for longer than the retries allow."""
 
 
+class DatabaseClosedError(RuntimeError):
+    """The database was closed (Sift is closing); nothing more can be written."""
+
+
 class MigrationError(Exception):
     """A schema migration failed and was rolled back."""
 
@@ -114,7 +118,7 @@ class Database:
         handle: _ReaderHandle | None = getattr(self._local, "handle", None)
         if handle is None:
             if self._writer is None:
-                raise RuntimeError("The database is not open")
+                raise DatabaseClosedError("The database is not open")
             conn = self._connect()
             try:
                 conn.execute("PRAGMA query_only = ON")
@@ -191,9 +195,11 @@ class Database:
         Migration-only, for code that manages its own transaction (the migration runner). Use
         `tx()` everywhere else.
         """
-        if self._writer is None:
-            raise RuntimeError("The database is not open")
         with _WRITE_LOCK:
+            # Checked under the lock: `close()` takes it too, so a writer racing a close either
+            # finishes first or finds the database closed, never a connection closed under it.
+            if self._writer is None:
+                raise DatabaseClosedError("The database is not open")
             _WRITE_STATE.active = True
             try:
                 yield self._writer

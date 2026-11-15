@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sift.backup.replicator import REPLICATION_LOCK
+from sift.backup.lease import DRIVE_LEASE
 from sift.backup.run import usable_dests
 from sift.cleanup.errors import ChatBackupKept as DeleteRefused
 from sift.core.context import AppContext
@@ -109,7 +109,9 @@ def listing(ctx: AppContext) -> list[Copy]:
 def delete(ctx: AppContext, hashes: list[str]) -> dict[str, Any]:
     """Delete these chat backup copies from every backup folder. All or nothing per request:
     any copy that may not be deleted refuses the whole request before a file is touched."""
-    with REPLICATION_LOCK:  # no backup copies to or from the folders meanwhile
+    with DRIVE_LEASE.hold(
+        "chat backup delete"
+    ):  # no backup copies to or from the folders meanwhile
         by_hash = {c.content_hash: c for c in listing(ctx)}
         wanted = list(dict.fromkeys(hashes))
         for h in wanted:

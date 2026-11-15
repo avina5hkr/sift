@@ -167,3 +167,40 @@ def test_write_connection_is_migration_only(db):
     assert not hasattr(db, "write_connection")
     with db._write_connection() as conn:
         assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_a_write_after_close_raises_database_closed(db):
+    from sift.core.db import DatabaseClosedError
+
+    db.close()
+    with pytest.raises(DatabaseClosedError), db.tx():
+        pass
+
+
+def test_a_writer_racing_close_finishes_first_or_finds_it_closed(db):
+    """close() waits for a transaction in flight; one that starts after it raises a typed error."""
+    from sift.core.db import DatabaseClosedError
+
+    inside, release = threading.Event(), threading.Event()
+    outcome: list[str] = []
+
+    def writer() -> None:
+        with db.tx() as conn:
+            inside.set()
+            release.wait(5)
+            conn.execute("CREATE TABLE IF NOT EXISTS t_close (x)")
+        outcome.append("committed")
+
+    t = threading.Thread(target=writer)
+    t.start()
+    assert inside.wait(5)
+    closer = threading.Thread(target=db.close)
+    closer.start()
+    time.sleep(0.05)
+    assert closer.is_alive()  # waiting for the write in flight
+    release.set()
+    t.join(5)
+    closer.join(5)
+    assert outcome == ["committed"] and not closer.is_alive()
+    with pytest.raises(DatabaseClosedError), db.tx():
+        pass

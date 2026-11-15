@@ -20,9 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.backup.destination import sanitize_label
+from sift.backup.lease import DRIVE_LEASE
 from sift.backup.places import one_place
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
-from sift.backup.replicator import REPLICATION_LOCK, Dest, Replicator, load_dest
+from sift.backup.replicator import Dest, Replicator, load_dest
 from sift.backup.scanner import ScanResult, scan, space_check
 from sift.backup.sets import resolve_roots
 from sift.backup.skiprules import SkipRules
@@ -174,7 +175,7 @@ def replicate_to_ssd(
             "Choose a folder on the SSD in Settings."
         )
         return
-    if ssd is None or not REPLICATION_LOCK.acquire(blocking=False):
+    if ssd is None or not DRIVE_LEASE.acquire("backup", timeout_s=0):
         pending_now = ssd_pending(ctx, mac)
         if pending_now:
             progress.warnings.append(f"Mac done, SSD pending: {pending_now} files.")
@@ -185,7 +186,7 @@ def replicate_to_ssd(
             mac, ssd, should_stop=lambda: ctl.stop_requested
         )
     finally:
-        REPLICATION_LOCK.release()
+        DRIVE_LEASE.release()
     corrupt = to_ssd.corrupt + to_mac.corrupt
     failed = to_ssd.failed + to_mac.failed
     if corrupt:
@@ -208,7 +209,7 @@ def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
     if ssd is not None and one_place(mac.root, ssd.root):
         log.warning("The SSD folder is on the Mac folder's drive; no copy is made")
         return
-    if ssd is None or not REPLICATION_LOCK.acquire(blocking=False):
+    if ssd is None or not DRIVE_LEASE.acquire("plug-in replication", timeout_s=0):
         return  # a backup run is replicating already
     try:
         ctx.bus.publish("replication", {"state": "running"})
@@ -224,7 +225,7 @@ def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
             },
         )
     finally:
-        REPLICATION_LOCK.release()
+        DRIVE_LEASE.release()
         ctx.db.release_thread()
 
 

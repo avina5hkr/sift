@@ -18,8 +18,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sift.backup.layout import rel_key
+from sift.backup.lease import DRIVE_LEASE
 from sift.backup.phonepaths import from_db, to_db
-from sift.backup.replicator import REPLICATION_LOCK
 from sift.backup.run import usable_dests
 from sift.cleanup.errors import RestoreRefused
 from sift.core.context import AppContext
@@ -91,7 +91,7 @@ def quarantine_run(ctx: AppContext, run_id: int) -> int:
             )
         ]
     moved = 0
-    with REPLICATION_LOCK:  # no copy to or from these folders while files move
+    with DRIVE_LEASE.hold("quarantine"):  # no copy to or from these folders while files move
         for digest, dest_id, rel in replicas:
             dest = usable.get(dest_id)
             if dest is None:
@@ -137,7 +137,7 @@ def reconcile(ctx: AppContext) -> int:
     usable = {d.id: d for d in usable_dests(ctx)}
     fixed = 0
     fixed += _reconcile_restores(ctx, usable)
-    with REPLICATION_LOCK, ctx.db.tx() as conn:
+    with DRIVE_LEASE.hold("quarantine"), ctx.db.tx() as conn:
         for qid, _digest, dest_id, orig, q_rel in _active(conn):
             dest = usable.get(dest_id)
             if dest is None:
@@ -171,7 +171,7 @@ def _reconcile_restores(ctx: AppContext, usable: dict[int, Any]) -> int:
             "SELECT id, dest_id, q_rel, restore_to FROM quarantine WHERE restore_to IS NOT NULL "
             "AND purged_at IS NULL AND restored_at IS NULL"
         ).fetchall()
-    with REPLICATION_LOCK:
+    with DRIVE_LEASE.hold("quarantine"):
         for qid, dest_id, q_rel, back in rows:
             dest = usable.get(int(dest_id))
             if dest is None:
@@ -229,7 +229,7 @@ def purge_due(ctx: AppContext, *, now: float | None = None) -> int:
             (at,),
         ).fetchall()
     purged = 0
-    with REPLICATION_LOCK:
+    with DRIVE_LEASE.hold("quarantine"):
         purged = _purge(ctx, due, usable, at)
     return purged
 
@@ -305,7 +305,7 @@ def restore(
         if free is None or free < need + ROOM_BYTES:
             raise RestoreRefused("The phone needs room for these files plus 2 GB.")
     restored = pushed = 0
-    with REPLICATION_LOCK:
+    with DRIVE_LEASE.hold("quarantine"):
         for e in chosen:
             done = _restore_one(ctx, e, to, session, usable, phone_done)
             restored += 1
