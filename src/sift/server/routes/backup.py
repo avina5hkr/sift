@@ -352,6 +352,9 @@ class SetStatus(BaseModel):
     on_phone: int
     backed_up: int
     pending: int
+    # The newest copy of one of this set's files: not a confirmation (a set is never called
+    # backed up because one recent file was copied; see the confirmation for that).
+    last_copied_at: int | None = None
 
 
 class RecentFile(BaseModel):
@@ -380,6 +383,7 @@ def overview(ctx: Ctx) -> OverviewOut:
     where it is before the next `progress` event)."""
     device_id = _connected_device_id(ctx)
     counts: dict[str, tuple[int, int, int]] = {}
+    newest: dict[str, int] = {}
     recent: list[Any] = []
     held = None
     if device_id is not None:
@@ -393,6 +397,17 @@ def overview(ctx: Ctx) -> OverviewOut:
                     "AND set_name IS NOT NULL GROUP BY set_name",
                     (device_id,),
                 )
+            }
+            newest = {
+                str(r[0]).casefold(): int(r[1])
+                for r in conn.execute(
+                    "SELECT f.set_name, MAX(r.verified_at) FROM phone_file f "
+                    "JOIN replica r ON r.content_hash = f.content_hash "
+                    "WHERE f.device_id = ? AND f.state = 'done' AND f.set_name IS NOT NULL "
+                    "GROUP BY f.set_name",
+                    (device_id,),
+                )
+                if r[1] is not None
             }
             recent = conn.execute(
                 "SELECT f.remote_path, f.size, MAX(r.verified_at) AS at FROM phone_file f "
@@ -416,6 +431,7 @@ def overview(ctx: Ctx) -> OverviewOut:
                 on_phone=on_phone,
                 backed_up=backed_up,
                 pending=pending,
+                last_copied_at=newest.get(s.name.casefold()),
             )
         )
     running = (

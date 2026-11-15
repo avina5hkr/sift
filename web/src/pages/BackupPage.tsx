@@ -504,6 +504,11 @@ export default function BackupPage() {
                     : `${formatCount(s.on_phone)} on the phone, ${formatCount(s.backed_up)} backed up on the Mac, ${formatCount(s.pending)} waiting`}
                 </p>
                 <ConfirmStatus set={s.name} />
+                {s.last_copied_at != null && (
+                  <p className="text-sm text-neutral-600 dark:text-neutral-400" data-testid={`last-copied-${s.name}`}>
+                    Last file copied <When at={s.last_copied_at} />
+                  </p>
+                )}
               </div>
               <ReasonButton
                 label={`Confirm ${s.name}`}

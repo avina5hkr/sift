@@ -187,6 +187,7 @@ export type SetStatus = {
   on_phone: number
   backed_up: number
   pending: number
+  last_copied_at?: number | null // the newest copy of one of its files (not a confirmation)
 }
 export type RecentFile = { path: string; size: number; at: number }
 

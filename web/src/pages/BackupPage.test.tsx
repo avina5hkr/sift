@@ -45,7 +45,7 @@ function status(device: Partial<StatusResponse['device'] & object> | null = {}, 
 }
 
 const SETS = [
-  { name: 'Camera', enabled: true, on_phone: 120, backed_up: 100, pending: 20 },
+  { name: 'Camera', enabled: true, on_phone: 120, backed_up: 100, pending: 20, last_copied_at: 1_700_000_000 },
   { name: 'Screenshots', enabled: true, on_phone: 10, backed_up: 10, pending: 0 },
   { name: 'Downloads', enabled: false, on_phone: 0, backed_up: 0, pending: 0 },
 ]
@@ -724,6 +724,9 @@ test('each set shows Confirmed, Stale or Not confirmed, and Confirm starts the t
   await waitFor(() => expect(screen.getByTestId('confirm-Camera')).toHaveTextContent(/^Confirmed (today|yesterday|\d+ \w+( \d{4})?) at \d\d:\d\d$/))
   expect(screen.getByTestId('confirm-Screenshots')).toHaveTextContent('Stale: New files arrived since.')
   expect(screen.getByTestId('confirm-Downloads')).toHaveTextContent('Not confirmed')
+  // the newest copy is shown apart from the confirmation, and never as "backed up"
+  expect(screen.getByTestId('last-copied-Camera')).toHaveTextContent(/^Last file copied /)
+  expect(screen.queryByTestId('last-copied-Screenshots')).not.toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Confirm Camera' }))
   expect(posts().find((c) => c.path === '/api/backup/confirm')?.body).toEqual({ set: 'Camera' })
 })

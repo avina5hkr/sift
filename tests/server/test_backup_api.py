@@ -650,6 +650,9 @@ def test_overview_counts_files_and_lists_the_last_eight(rig: Rig) -> None:
     shots = next(s for s in body["sets"] if s["name"] == "Screenshots")
     assert shots["on_phone"] > 0 and shots["backed_up"] == shots["on_phone"]
     assert shots["pending"] == 0
+    assert shots["last_copied_at"] is not None  # its newest copy (not a confirmation)
+    camera = next(s for s in body["sets"] if s["name"] == "Camera")
+    assert camera["last_copied_at"] is None  # nothing of this set was copied
     assert 0 < len(body["recent"]) <= 8
     assert all(f["path"].startswith("/") and f["size"] >= 0 for f in body["recent"])
 
