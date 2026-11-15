@@ -102,6 +102,7 @@ export function startEventStream(qc: QueryClient): () => void {
             if (task.kind === 'analyse' && task.state === 'done' && typeof id === 'number') {
               useEventStore.setState({ analysisId: id })
             }
+            if (task.kind === 'analyse') void qc.invalidateQueries({ queryKey: ['analysis'] })
           }
         }
       }

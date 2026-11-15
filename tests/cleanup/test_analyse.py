@@ -83,3 +83,66 @@ def test_analyse_over_the_api(rig: Rig) -> None:
     body = client.get(f"/api/analyse/phone/{run_id}", headers=H).json()
     assert body["state"] == "done" and body["result"]["sets"]["Camera"]["verified"]["files"] > 0
     assert client.get("/api/analyse/phone/999", headers=H).status_code == 404
+
+
+def test_unchecked_files_are_their_own_group_until_hashed(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    seen: list[tuple[int, int, int]] = []
+
+    def partial(found) -> None:  # type: ignore[no-untyped-def]
+        cam = found.sets["Camera"]
+        seen.append((found.processed_files, cam.unchecked.files, cam.verified.files))
+
+    found = analyse(rig.ctx.db, rig.ctx.config, rig.transport, ["Camera"], on_partial=partial)
+    first, last = seen[0], seen[-1]
+    assert first[1] > 0 and first[2] == 0  # before any hash: unchecked, never "not backed up"
+    assert last[1] == 0 and found.sets["Camera"].unchecked.files == 0
+    assert found.processed_files == found.total_files > 0
+
+
+def test_a_stopped_run_keeps_its_partial_apart_and_names_the_unchecked(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    run_id = run_analysis(  # stopped after the listing, before the first hash
+        rig.ctx.db,
+        rig.ctx.config,
+        rig.transport,
+        device_id(rig),
+        ["Camera"],
+        should_stop=lambda: True,
+    )
+    stored = load_analysis(rig.ctx.db, run_id)
+    assert stored is not None and stored["state"] == "stopped" and stored["result"] is None
+    cam = stored["partial"]["sets"]["Camera"]
+    assert cam["unchecked"]["files"] > 0 and cam["not_backed_up"]["files"] == 0
+    assert stored["processed"] < stored["total"]
+
+
+def test_latest_keeps_the_complete_result_apart_and_marks_it_stale_after_a_backup(
+    rig: Rig,
+) -> None:
+    from sift.cleanup.analyse import latest_analyses, stale_reason
+
+    backed_up(rig, ["Camera"])
+    done_id = run_analysis(rig.ctx.db, rig.ctx.config, rig.transport, device_id(rig), ["Camera"])
+    stopped_id = run_analysis(
+        rig.ctx.db,
+        rig.ctx.config,
+        rig.transport,
+        device_id(rig),
+        ["Camera"],
+        should_stop=lambda: True,
+    )
+    found = latest_analyses(rig.ctx.db, device_id(rig))
+    assert found["completed"]["id"] == done_id and found["ended"]["id"] == stopped_id
+    assert found["active"] is None
+    assert stale_reason(found["completed"], rig.ctx.config, None) is None
+    later = (found["completed"]["finished_at"] or 0) + 10
+    assert "backup ran after" in (stale_reason(found["completed"], rig.ctx.config, later) or "")
+    rig.ctx.config.backup.mac_root = rig.ctx.config.backup.mac_root + "-moved"
+    assert "changed" in (stale_reason(found["completed"], rig.ctx.config, None) or "")
+
+
+def test_coverage_names_the_sets_left_out(rig: Rig) -> None:
+    backed_up(rig, ["Camera"])
+    found = analyse(rig.ctx.db, rig.ctx.config, rig.transport, ["Camera"])
+    assert "Camera" not in found.left_out_sets and len(found.left_out_sets) >= 1

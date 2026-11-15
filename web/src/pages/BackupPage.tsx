@@ -17,7 +17,7 @@ import { formatBytes, formatCount, formatEta, formatSpeed } from '../lib/format'
 import { When } from '../components/When'
 import { SsdProgressLine } from '../components/backup/SsdProgressLine'
 import type {
-  Analysis,
+  LatestAnalyses,
   BackupOverview,
   BackupSummary,
   DeviceStatus,
@@ -216,11 +216,19 @@ export default function BackupPage() {
     onSettled: done,
   })
 
+  // The last complete result, a run going on now and a stopped one, each with its id. While a
+  // check runs the answer is asked for every 2 s; an older answer never replaces a newer one.
   const analysisId = useEventStore((s) => s.analysisId)
+  const checking = task?.kind === 'analyse' && task.state === 'running'
+  const newest = useRef<LatestAnalyses | null>(null)
   const analysis = useQuery({
-    queryKey: ['analysis', analysisId],
-    queryFn: () => apiFetch<Analysis>(`/api/analyse/phone/${analysisId}`),
-    enabled: analysisId != null,
+    queryKey: ['analysis', 'latest', analysisId],
+    queryFn: async () => {
+      const got = await apiFetch<LatestAnalyses>('/api/analyse/phone/latest')
+      newest.current = newerOf(newest.current, got)
+      return newest.current
+    },
+    refetchInterval: checking ? 2000 : false,
   })
 
   // -- Open backup folder
@@ -484,7 +492,9 @@ export default function BackupPage() {
         </p>
       </section>
 
-      {analysis.data && <AnalysisCard analysis={analysis.data} />}
+      {analysis.data && (analysis.data.completed || analysis.data.active || analysis.data.ended) && (
+        <AnalysisCard latest={analysis.data} />
+      )}
 
       <section aria-labelledby="sets-title">
         <h2 id="sets-title" className="mb-2 text-lg font-semibold">
@@ -571,6 +581,20 @@ export default function BackupPage() {
       )}
     </div>
   )
+}
+
+/** Keep the newest of two answers, part by part: a slow, older reply never undoes a newer one. */
+function newerOf(old: LatestAnalyses | null, got: LatestAnalyses): LatestAnalyses {
+  if (!old) return got
+  const id = (a: { id: number } | null) => a?.id ?? -1
+  const completed = id(got.completed) >= id(old.completed) ? got.completed : old.completed
+  const ended = id(got.ended) >= id(old.ended) ? got.ended : old.ended
+  return {
+    completed,
+    stale_reason: completed === got.completed ? got.stale_reason : old.stale_reason,
+    active: got.active, // a run that ended shows up as completed or ended in the same answer
+    ended: ended && id(ended) > id(completed) ? ended : null,
+  }
 }
 
 const BTN =

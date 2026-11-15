@@ -9,6 +9,7 @@ import type {
   BackupOverview,
   BackupSummary,
   Analysis,
+  LatestAnalyses,
   Confirmation,
   FailuresResponse,
   JobEvent,
@@ -113,7 +114,7 @@ type World = {
   problems: Problem[]
   confirmations: Record<string, Confirmation>
   task: TaskEvent | null
-  analysis: Analysis | null
+  analysis: LatestAnalyses | null
   failPost?: Record<string, { status: number; code: string; message: string }>
 }
 let world: World
@@ -161,7 +162,7 @@ beforeEach(() => {
         const c = world.confirmations[decodeURIComponent(url.split('=')[1])]
         return c ? reply(c) : reply({ code: 'no_phone', message: 'Connect your phone first.', detail: null }, 409)
       }
-      if (url.startsWith('/api/analyse/phone/')) return reply(world.analysis)
+      if (url === '/api/analyse/phone/latest') return reply(world.analysis ?? { completed: null, stale_reason: null, active: null, ended: null })
       if (method === 'POST') return reply({ job_id: 8 })
       return reply({ code: 'nope', message: 'No.', detail: null }, 404)
     }),
@@ -739,9 +740,8 @@ test('Confirm needs the phone', async () => {
   expect(button).toHaveAccessibleDescription('Connect your phone to confirm.')
 })
 
-test('a finished analysis shows four groups per set, the time estimate and Delete only', async () => {
-  const g = (files: number, bytes: number) => ({ files, bytes })
-  world.analysis = {
+const g = (files: number, bytes: number) => ({ files, bytes })
+const DONE: Analysis = {
     id: 3,
     sets: ['Camera'],
     state: 'done',
@@ -756,10 +756,16 @@ test('a finished analysis shows four groups per set, the time estimate and Delet
     },
     error: null,
   }
+
+test('a finished analysis shows its groups per set, a summary in words, the estimate and Delete', async () => {
+  world.analysis = { completed: DONE, stale_reason: null, active: null, ended: null }
   await ready()
   act(() => useEventStore.setState({ analysisId: 3 }))
-  const card = await screen.findByRole('region', { name: 'What is on the phone' })
-  for (const label of ['Backed up and verified', 'Not verified yet', 'Not backed up', 'Problems']) {
+  const card = await screen.findByRole('region', { name: 'Files in your selected backup folders' })
+  expect(within(card).getByTestId('analysis-completed')).toHaveTextContent(/Checked (today|yesterday|\d+ \w+)/)
+  expect(card).toHaveTextContent('90 of 98 files backed up and verified · 1 not backed up · 2 with problems')
+  expect(within(card).getAllByText('2 with problems').length).toBeGreaterThan(0)
+  for (const label of ['Backed up and verified', 'Not verified yet', 'Not checked yet', 'Not backed up', 'Problems']) {
     expect(within(card).getByText(label)).toBeInTheDocument()
   }
   expect(card).toHaveTextContent('90 files, 9.0 MB')
@@ -767,7 +773,7 @@ test('a finished analysis shows four groups per set, the time estimate and Delet
   expect(card).toHaveTextContent('would take about 10 min')
   expect(within(card).getByRole('button', { name: 'Delete the backed-up files (9.0 MB)' })).toBeInTheDocument()
   await userEvent.click(within(card).getByRole('button', { name: 'Not now' }))
-  expect(within(card).queryByRole('button')).not.toBeInTheDocument()
+  expect(within(card).queryByRole('button', { name: /Delete the backed-up files/ })).not.toBeInTheDocument()
 })
 
 const SSD = {
@@ -821,4 +827,49 @@ test('The summary says the SSD is pending, with a badge in words and each phase 
   expect(screen.getByTestId('summary-times')).toHaveTextContent(/Phone → Mac .* · Mac → SSD .* · took 2 min 5 s/)
   expect(screen.getByTestId('last-backup')).toHaveTextContent(/Last backup: .* · Mac complete · SSD: 120 files pending/)
   expect(screen.getByTestId('last-backup')).not.toHaveTextContent(/Complete: Mac and SSD/)
+})
+
+test('the details fold away to the summary, and the choice is remembered', async () => {
+  world.analysis = { completed: DONE, stale_reason: null, active: null, ended: null }
+  await ready()
+  const card = await screen.findByRole('region', { name: 'Files in your selected backup folders' })
+  await userEvent.click(within(card).getByRole('button', { name: 'Hide details' }))
+  expect(within(card).queryByText('Not verified yet')).not.toBeInTheDocument()
+  expect(card).toHaveTextContent('90 of 98 files backed up and verified')
+  expect(localStorage.getItem('sift.analysis.details')).toBe('closed')
+  await userEvent.click(within(card).getByRole('button', { name: 'Show details' }))
+  localStorage.removeItem('sift.analysis.details')
+})
+
+test('a check going on now shows apart from the last complete result, with no percentage', async () => {
+  world.analysis = {
+    completed: DONE,
+    stale_reason: 'A backup ran after this check, so it may be out of date. Analyse again.',
+    active: {
+      id: 4, sets: ['Camera'], state: 'running', started_at: 1_700_000_000, finished_at: null, result: null, error: null,
+      processed: 2_200, total: 51_106,
+      partial: { sets: { Camera: { verified: g(2_000, 1), not_verified: g(0, 0), not_backed_up: g(0, 0), problems: g(0, 0), unchecked: g(48_906, 1) } }, hashed_files: 0, hashed_bytes: 0, estimate_s: 0, warnings: [] },
+    },
+    ended: null,
+  }
+  await ready()
+  const active = await screen.findByTestId('analysis-active')
+  expect(active).toHaveTextContent(/Checking now: 2,200 of 51,106 · started /)
+  expect(active).toHaveTextContent('So far: 2,000 backed up and verified, 0 not backed up, 48,906 not checked yet.')
+  expect(active).not.toHaveTextContent('%')
+  expect(screen.getByTestId('analysis-completed')).toHaveTextContent('90 of 98 files backed up and verified')
+  expect(screen.getByRole('note')).toHaveTextContent('may be out of date')
+  expect(screen.queryByRole('button', { name: /Delete the backed-up files/ })).not.toBeInTheDocument()
+})
+
+test('a stopped check never replaces the complete result', async () => {
+  world.analysis = {
+    completed: DONE,
+    stale_reason: null,
+    active: null,
+    ended: { id: 5, sets: ['Camera'], state: 'stopped', started_at: 1, finished_at: 1_700_000_000, result: null, error: null, processed: 2_200, total: 51_106 },
+  }
+  await ready()
+  expect(await screen.findByTestId('analysis-ended')).toHaveTextContent(/Stopped at 2,200 of 51,106/)
+  expect(screen.getByTestId('analysis-completed')).toBeInTheDocument()
 })

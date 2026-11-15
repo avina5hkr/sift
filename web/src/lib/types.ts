@@ -314,21 +314,38 @@ export type AnalyseSet = {
   not_verified: AnalyseGroup
   not_backed_up: AnalyseGroup
   problems: AnalyseGroup
+  unchecked?: AnalyseGroup // same size as stored content, not hashed yet
+}
+export type AnalysisResult = {
+  sets: Record<string, AnalyseSet>
+  hashed_files: number
+  hashed_bytes: number
+  estimate_s: number
+  warnings: string[]
+  total_files?: number
+  processed_files?: number
+  skipped_by_rule?: number
+  unreadable?: string[]
+  left_out_sets?: string[]
 }
 export type Analysis = {
   id: number
   sets: string[]
-  state: string
+  state: string // running, done, stopped, failed
   started_at: number | null
   finished_at: number | null
-  result: {
-    sets: Record<string, AnalyseSet>
-    hashed_files: number
-    hashed_bytes: number
-    estimate_s: number
-    warnings: string[]
-  } | null
+  result: AnalysisResult | null
   error: string | null
+  processed?: number | null
+  total?: number | null
+  partial?: AnalysisResult | null // what a running (or stopped) run found so far
+}
+// GET /api/analyse/phone/latest: the complete result is kept apart from a run going on now.
+export type LatestAnalyses = {
+  completed: Analysis | null
+  stale_reason: string | null
+  active: Analysis | null
+  ended: Analysis | null // stopped or failed, newer than the complete result
 }
 
 // Mirrors GET /api/cleanup/summary.

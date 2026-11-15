@@ -12,7 +12,7 @@ from sift.backup.problems import open_problems
 from sift.backup.replicator import Dest
 from sift.backup.run import usable_dests
 from sift.backup.verifier import NothingToRepairFrom, repair, verify_dest
-from sift.cleanup.analyse import load_analysis, run_analysis
+from sift.cleanup.analyse import latest_analyses, load_analysis, run_analysis, stale_reason
 from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.services.tasks import TaskBusy, TaskControl, TaskRunner, TaskStatus
@@ -243,6 +243,10 @@ def start_analyse(ctx: Ctx, body: AnalyseRequest) -> TaskOut:
     device_id, session = _phone(ctx)
 
     def work(control: TaskControl) -> dict[str, Any]:
+        def started(run_id: int) -> None:
+            # every event of this task names its run, so a screen never mixes two runs up
+            control.status.result = {"analysis_id": run_id}
+
         run_id = run_analysis(
             ctx.db,
             ctx.config,
@@ -251,10 +255,29 @@ def start_analyse(ctx: Ctx, body: AnalyseRequest) -> TaskOut:
             body.sets,
             should_stop=lambda: control.should_stop,
             on_progress=control.progress,
+            on_start=started,
         )
         return {"analysis_id": run_id}
 
     return start_task(ctx, "analyse", work)
+
+
+@router.get("/analyse/phone/latest")
+def get_latest_analyses(ctx: Ctx) -> dict[str, Any]:
+    """The connected phone's newest complete result (with why it may be out of date), the run
+    going on now, and a stopped or failed run newer than the complete one. Each carries its id."""
+    from sift.server.routes.backup import _connected_device_id
+
+    found = latest_analyses(ctx.db, _connected_device_id(ctx))
+    completed = found["completed"]
+    return {
+        "completed": completed,
+        "stale_reason": None
+        if completed is None
+        else stale_reason(completed, ctx.config, found["last_backup"]),
+        "active": found["active"],
+        "ended": found["ended"],
+    }
 
 
 @router.get("/analyse/phone/{run_id}")
