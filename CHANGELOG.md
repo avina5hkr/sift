@@ -45,6 +45,12 @@ behaviour.
 - A drive is followed by its UUID: a renamed SSD is followed, a different drive under the same
   name gets nothing.
 
+### Fixed
+
+- Once background work starts, the profile stays locked until the app process exits, even if
+  shutdown has finished and an SSD write is still blocked. Restarting cannot overlap that
+  writer. Early startup failures still release the profile for another attempt.
+
 ## [0.0.1] - 2026-11-15
 
 The first public build, a beta.

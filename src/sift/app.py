@@ -641,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
             _log.warning("%s", warning)
         recover_at_startup(ctx)  # before any job can start
         load_starter_teaching(ctx)
+        # Shutdown can finish before an abandoned writer: keep this profile locked until exit.
+        lock.retain_until_process_exit()
         threading.Thread(target=purge_quarantine, args=(ctx,), daemon=True).start()
         # Headless runs (tests, dev servers) have no Cocoa app, and never post notifications.
         jobs = build_jobs(ctx, NullNotifier() if args.no_window else MacNotifier())

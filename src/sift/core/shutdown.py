@@ -2,7 +2,8 @@
 
 Steps are added as each resource comes up and run in reverse order, each exactly once. A step
 that fails or overruns its time budget is logged and the next one still runs, so the database
-is closed and the single-instance lock is freed however the earlier steps went.
+is closed however the earlier steps went. The application's instance guard remains held until
+process exit, since a timed-out step may still be writing after logical shutdown completes.
 """
 
 import logging

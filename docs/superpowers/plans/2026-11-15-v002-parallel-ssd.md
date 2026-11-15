@@ -501,14 +501,13 @@ The deferred items from the hardening pass: clustering time, and the near-duplic
 
 ## Implementation notes that touch the safety guarantees
 
-- **D1 (open, reported to the owner).** At quit, shutdown releases the instance lock before the
-  process has fully exited. If an abandoned SSD thread is still stuck in the OS at that moment,
-  a new Sift can start while that thread exists. On exFAT, the no-replace rename falls back to
-  "check the name is free, then rename" inside one process. A stuck thread resuming between those
-  two steps, while the new Sift writes the same name, could replace a file. The window is tiny and
-  was already there in v0.0.1. Proposed fix: skip the explicit release when a stuck worker exists,
-  so the kernel releases the lock only when the process really ends. Not done; waiting for the
-  owner.
+- **D1 (fixed locally; not released).** Once background work starts, the profile's
+  instance guard is retained until process exit, rather than unlocked at logical shutdown.
+  `tests/core/test_instance_lifetime.py` reproduces the old overlap and checks headless/window
+  quit, timed-out cleanup, writer completion before process exit, normal exit and forced exit.
+  Early port/database startup errors keep their explicit release behavior. This prevents a new
+  same-profile Sift overlapping an abandoned writer in the exFAT fallback; it does not provide
+  filesystem-wide atomicity against other profiles or unrelated programs.
 - **D2 (fixed).** The verifier repair and the after-run database copy wrote to the SSD without
   the lease (P9).
 - **D3 (fixed).** A drive renamed in the middle of a file wrote that file under the old path, and
