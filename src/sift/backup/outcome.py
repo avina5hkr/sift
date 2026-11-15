@@ -57,11 +57,16 @@ def backup_outcome(
         return BackupOutcome("complete", "Complete", at, None)
     if pending == 0:
         return BackupOutcome("complete", "Complete: Mac and SSD", at, 0)
-    reason = (summary.get("ssd") or {}).get("reason") or ""
+    ssd = summary.get("ssd") or {}
+    reason = ssd.get("reason") or ""
     unplugged = "not connected" in reason or "unplugged" in reason
     text = "Mac complete · SSD: " + (_files(pending) if pending else "some files") + " pending"
     if unplugged:
         text += " (drive unplugged)"
+    elif ssd.get("state") in ("stopped", "failed") and reason:
+        # the copy to the SSD ended early: say why, beside what is still pending
+        stopped = f"Mac complete · SSD copy stopped: {reason.rstrip('.')}"
+        text = f"{stopped} · SSD: " + (_files(pending) if pending else "some files") + " pending"
     return BackupOutcome("ssd_pending", text, at, pending)
 
 

@@ -129,7 +129,7 @@ class SsdProgress:
             ):
                 state = "waiting_access"
             elif (
-                state in ("copying", "paused", "stopping")
+                state in ("copying", "stopping")  # paused: waiting by choice, not stuck
                 and self.tick is not None
                 and now - self.tick >= NOT_ANSWERING_S
             ):
@@ -295,6 +295,12 @@ class SsdWorker:
             self._holds_lease = True
             if self._abandoned:
                 raise SsdCopyStopped()
+        # The drive may have changed while the lease was awaited: find it again by its UUID
+        # (never by name) before anything is written, so a same-named drive gets nothing.
+        found = self._locate()
+        if found is None:
+            raise SsdCopyEnded("unplugged", "The SSD is not connected.")
+        self.ssd = found
         self.progress.update(state="starting", started=time.monotonic())
         self._first_op()
         files, size = pending_totals(self._db, self.mac, self.ssd)
@@ -313,12 +319,16 @@ class SsdWorker:
             raise SsdCopyEnded("unplugged", "The SSD is not connected.")
         self.ssd.root.mkdir(exist_ok=True)
         self._dev = self._device(self.ssd.root)
-        self.ssd.staging.mkdir(parents=True, exist_ok=True)
+        self.ssd.staging.mkdir(exist_ok=True)
+        # The calls above are what a macOS prompt holds up: given up on meanwhile, do no more.
+        if self._should_stop():
+            raise SsdCopyStopped()
         # Unfinished copies an earlier run left (a crash, a quit): only the lease holder, which
         # every writer to this drive is, may clear them (G5).
         sweep_staging(self.ssd.staging)
         self.progress.update(first_op_done=True, tick=time.monotonic())
-        self_heal(self._db, self.ssd)
+        if not self._write(lambda: self_heal(self._db, self.ssd)):  # rows: under commit_lock
+            raise SsdCopyStopped()
 
     def _main_pass(self) -> None:
         cursor = 0
@@ -386,8 +396,9 @@ class SsdWorker:
         if self._should_stop():
             raise SsdCopyStopped()
         if self._control.pause_requested:
-            self.progress.update(state="paused")
+            self.progress.update(state="paused", tick=time.monotonic())
             while self._control.wait_while_paused(1.0):
+                self.progress.update(tick=time.monotonic())  # paused, not "not answering"
                 if self._should_stop():
                     raise SsdCopyStopped()
             if self._should_stop():
@@ -438,7 +449,7 @@ class SsdWorker:
             raise SsdCopyEnded("other_drive", "A different drive is mounted with this name.")
         raise SsdCopyEnded("unplugged", "The SSD was unplugged.")
 
-    def _write(self, fn: Callable[[], None]) -> bool:
+    def _write(self, fn: Callable[[], object]) -> bool:
         """Run one database write under `commit_lock`, unless abandoned (G1)."""
         with self.commit_lock:
             if self._abandoned:
@@ -490,6 +501,8 @@ class SsdWorker:
             return
         except FileNotFoundError:
             self._check_drive()  # unplugged: raises; otherwise the Mac file is gone
+            if not self.mac.root.is_dir():  # the Mac folder itself went: its rows stay
+                raise SsdCopyEnded("failed", "The Mac backup folder is not there.") from None
             self._defer(row, "The file is missing from the Mac backup folder.")
             self._write(lambda: self._drop_mac_row(row))
             return

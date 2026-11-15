@@ -35,6 +35,9 @@ PREFIX = ".sift-access-"
 FILE = "probe"
 WAIT_S = 15.0  # how long a request waits for the probe before answering "waiting"
 
+_probe_lock = threading.Lock()
+_probing: threading.Thread | None = None
+
 MESSAGES = {
     "ok": "Sift can write to this drive.",
     "denied": (
@@ -154,18 +157,23 @@ def probe_waiting(
 ) -> AccessResult:
     """`probe` on its own thread; "waiting" when it has not finished in `wait_s` (a macOS prompt
     is open). The thread finishes and cleans up by itself when the owner answers."""
-    box: list[AccessResult] = []
+    global _probing
+    with _probe_lock:
+        if _probing is not None and _probing.is_alive():
+            return AccessResult.of("waiting")  # one probe at a time: the first is still held
+        box: list[AccessResult] = []
 
-    def work() -> None:
-        try:
-            box.append(run(db, mount))
-        except Exception:
-            log.exception("SSD access check failed")
-            box.append(AccessResult.of("error"))
-        finally:
-            db.release_thread()
+        def work() -> None:
+            try:
+                box.append(run(db, mount))
+            except Exception:
+                log.exception("SSD access check failed")
+                box.append(AccessResult.of("error"))
+            finally:
+                db.release_thread()
 
-    t = threading.Thread(target=work, name="sift-ssd-access", daemon=True)
-    t.start()
+        t = threading.Thread(target=work, name="sift-ssd-access", daemon=True)
+        _probing = t
+        t.start()
     t.join(wait_s)
     return box[0] if box else AccessResult.of("waiting")

@@ -82,3 +82,12 @@ def test_the_end_of_run_message_names_the_ssd_pending() -> None:
     }
     title, body, level = message_for(snap, s)
     assert title == "Backup finished" and "SSD: 120 files pending" in body and level == "warning"
+
+
+def test_a_stopped_ssd_copy_says_why_beside_what_is_pending() -> None:
+    s = summary(state="failed", reason="The SSD is not accepting writes.")
+    out = backup_outcome(s, 40, ssd_chosen=True)
+    assert out.level == "ssd_pending"
+    assert out.headline == (
+        "Mac complete · SSD copy stopped: The SSD is not accepting writes · SSD: 40 files pending"
+    )

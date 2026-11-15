@@ -77,7 +77,8 @@ export function SummaryCard({ job, summary, onOpenFolder, openError }: Props) {
           )}
           {mine.ssd?.finished_at != null && mine.ssd.state !== 'none' && (
             <>
-              {' · Mac → SSD '}
+              {/* only a complete copy "finished"; any other ended early */}
+              {mine.ssd.state === 'complete' ? ' · Mac → SSD ' : ' · SSD copy ended '}
               <When at={mine.ssd.finished_at} />
             </>
           )}

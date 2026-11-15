@@ -355,6 +355,9 @@ class SetStatus(BaseModel):
     # The newest copy of one of this set's files: not a confirmation (a set is never called
     # backed up because one recent file was copied; see the confirmation for that).
     last_copied_at: int | None = None
+    ssd_pending: int | None = (
+        None  # backed-up files of this set the chosen SSD lacks (None: no SSD)
+    )
 
 
 class RecentFile(BaseModel):
@@ -384,6 +387,8 @@ def overview(ctx: Ctx) -> OverviewOut:
     device_id = _connected_device_id(ctx)
     counts: dict[str, tuple[int, int, int]] = {}
     newest: dict[str, int] = {}
+    on_ssd_missing: dict[str, int] = {}
+    ssd_uuid = ctx.config.backup.ssd_volume_uuid
     recent: list[Any] = []
     held = None
     if device_id is not None:
@@ -409,6 +414,19 @@ def overview(ctx: Ctx) -> OverviewOut:
                 )
                 if r[1] is not None
             }
+            if ssd_uuid:
+                on_ssd_missing = {
+                    str(r[0]).casefold(): int(r[1])
+                    for r in conn.execute(
+                        "SELECT f.set_name, COUNT(*) FROM phone_file f "
+                        "WHERE f.device_id = ? AND f.state = 'done' AND f.present = 1 "
+                        "AND f.set_name IS NOT NULL AND f.content_hash IS NOT NULL "
+                        "AND NOT EXISTS (SELECT 1 FROM replica r JOIN destination d "
+                        "ON d.id = r.dest_id WHERE r.content_hash = f.content_hash "
+                        "AND d.kind = 'ssd' AND d.volume_uuid = ?) GROUP BY f.set_name",
+                        (device_id, ssd_uuid),
+                    )
+                }
             recent = conn.execute(
                 "SELECT f.remote_path, f.size, MAX(r.verified_at) AS at FROM phone_file f "
                 "JOIN replica r ON r.content_hash = f.content_hash "
@@ -432,6 +450,7 @@ def overview(ctx: Ctx) -> OverviewOut:
                 backed_up=backed_up,
                 pending=pending,
                 last_copied_at=newest.get(s.name.casefold()),
+                ssd_pending=on_ssd_missing.get(s.name.casefold(), 0) if ssd_uuid else None,
             )
         )
     running = (

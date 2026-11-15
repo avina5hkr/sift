@@ -96,3 +96,18 @@ def test_a_probe_held_by_a_macos_prompt_answers_waiting(db: Database, tmp_path: 
 
     assert probe_waiting(db, tmp_path, wait_s=0.1, run=held).state == "waiting"
     release.set()
+
+
+def test_only_one_probe_runs_at_a_time(db: Database, tmp_path: Path) -> None:
+    release = threading.Event()
+    started: list[int] = []
+
+    def held(db: Database, mount: Path) -> ssdaccess.AccessResult:
+        started.append(1)
+        release.wait(5)
+        return ssdaccess.AccessResult.of("ok")
+
+    assert probe_waiting(db, tmp_path, wait_s=0.05, run=held).state == "waiting"
+    assert probe_waiting(db, tmp_path, wait_s=0.05, run=held).state == "waiting"
+    assert started == [1]  # the second request did not start another probe
+    release.set()

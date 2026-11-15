@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.backup.destination import sanitize_label
-from sift.backup.lease import DRIVE_LEASE
+from sift.backup.lease import DRIVE_LEASE, LEASE_WAIT_S
 from sift.backup.outcome import forget_cached
 from sift.backup.places import one_place
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
@@ -211,7 +211,15 @@ def finish_ssd(
         ctl.set_state(JobState.replicating)
         copy.drain()
     corrupt = failed = 0
-    if worker.end_state in ("done", "incomplete") and DRIVE_LEASE.acquire("backup", timeout_s=0):
+    if worker.end_state not in ("done", "incomplete"):
+        pass
+    elif not DRIVE_LEASE.acquire(
+        "backup", timeout_s=LEASE_WAIT_S, should_stop=lambda: ctl.stop_requested
+    ):
+        progress.warnings.append(
+            "The SSD was busy, so files only on the SSD were not copied to the Mac this time."
+        )
+    else:
         try:
             ctl.set_state(JobState.replicating)
             to_mac = Replicator(ctx.db, clock=clock).replicate(
@@ -235,6 +243,15 @@ def finish_ssd(
             progress.warnings.append(f"Mac done, SSD pending: {pending_now} files.")
 
 
+def _backup_running(ctx: AppContext) -> bool:
+    jobs = getattr(ctx, "jobs", None)
+    if jobs is None:
+        return False
+    from sift.core.jobs import TERMINAL
+
+    return any(s.state not in TERMINAL and not s.dry_run for s in jobs.snapshot())
+
+
 def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
     """Plugging the SSD in: bring both destinations to the same content, without a phone."""
     if not ctx.config.backup.mac_root:
@@ -245,6 +262,8 @@ def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
     if ssd is not None and one_place(mac.root, ssd.root):
         log.warning("The SSD folder is on the Mac folder's drive; no copy is made")
         return
+    if _backup_running(ctx):
+        return  # a backup's own SSD copy does this; never two copies beside one pull
     if ssd is None or not DRIVE_LEASE.acquire("plug-in replication", timeout_s=0):
         return  # a backup run is replicating already
     try:

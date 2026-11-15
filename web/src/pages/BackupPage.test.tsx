@@ -46,7 +46,7 @@ function status(device: Partial<StatusResponse['device'] & object> | null = {}, 
 }
 
 const SETS = [
-  { name: 'Camera', enabled: true, on_phone: 120, backed_up: 100, pending: 20, last_copied_at: 1_700_000_000 },
+  { name: 'Camera', enabled: true, on_phone: 120, backed_up: 100, pending: 20, last_copied_at: 1_700_000_000, ssd_pending: 7 },
   { name: 'Screenshots', enabled: true, on_phone: 10, backed_up: 10, pending: 0 },
   { name: 'Downloads', enabled: false, on_phone: 0, backed_up: 0, pending: 0 },
 ]
@@ -728,6 +728,7 @@ test('each set shows Confirmed, Stale or Not confirmed, and Confirm starts the t
   // the newest copy is shown apart from the confirmation, and never as "backed up"
   expect(screen.getByTestId('last-copied-Camera')).toHaveTextContent(/^Last file copied /)
   expect(screen.queryByTestId('last-copied-Screenshots')).not.toBeInTheDocument()
+  expect(screen.getByText(/· SSD: 7 pending/)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Confirm Camera' }))
   expect(posts().find((c) => c.path === '/api/backup/confirm')?.body).toEqual({ set: 'Camera' })
 })
@@ -824,7 +825,7 @@ test('The summary says the SSD is pending, with a badge in words and each phase 
   await ready()
   const status = await screen.findByTestId('summary-status')
   expect(status).toHaveTextContent('SSD pending Mac complete · SSD: 120 files pending')
-  expect(screen.getByTestId('summary-times')).toHaveTextContent(/Phone → Mac .* · Mac → SSD .* · took 2 min 5 s/)
+  expect(screen.getByTestId('summary-times')).toHaveTextContent(/Phone → Mac .* · SSD copy ended .* · took 2 min 5 s/)
   expect(screen.getByTestId('last-backup')).toHaveTextContent(/Last backup: .* · Mac complete · SSD: 120 files pending/)
   expect(screen.getByTestId('last-backup')).not.toHaveTextContent(/Complete: Mac and SSD/)
 })
@@ -872,4 +873,11 @@ test('a stopped check never replaces the complete result', async () => {
   await ready()
   expect(await screen.findByTestId('analysis-ended')).toHaveTextContent(/Stopped at 2,200 of 51,106/)
   expect(screen.getByTestId('analysis-completed')).toBeInTheDocument()
+})
+
+test('files deferred for the next run are not counted as left', async () => {
+  world.overview.job = job('replicating', { ssd: { ...SSD, deferred: 200 } })
+  await ready()
+  await waitFor(() => expect(stateText()).toHaveTextContent('Copying to SSD: 1,000 left'))
+  expect(screen.getByText(/200 could not be copied this time/)).toBeInTheDocument()
 })

@@ -146,3 +146,27 @@ def test_coverage_names_the_sets_left_out(rig: Rig) -> None:
     backed_up(rig, ["Camera"])
     found = analyse(rig.ctx.db, rig.ctx.config, rig.transport, ["Camera"])
     assert "Camera" not in found.left_out_sets and len(found.left_out_sets) >= 1
+
+
+def test_an_analysis_left_running_by_a_quit_is_stopped_at_start_and_never_shown_as_active(
+    rig: Rig,
+) -> None:
+    from sift.app import recover_at_startup
+    from sift.cleanup.analyse import latest_analyses
+
+    backed_up(rig, ["Camera"])
+    with rig.ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO analysis_run (device_id, sets, state, started_at) "
+            "VALUES (?, '[\"Camera\"]', 'running', 1)",
+            (device_id(rig),),
+        )
+    newer = run_analysis(rig.ctx.db, rig.ctx.config, rig.transport, device_id(rig), ["Camera"])
+    found = latest_analyses(rig.ctx.db, device_id(rig))
+    assert found["active"] is None and found["completed"]["id"] == newer  # older than a done run
+    recover_at_startup(rig.ctx)
+    with rig.ctx.db.read() as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM analysis_run WHERE state = 'running'").fetchone()[0]
+            == 0
+        )

@@ -40,7 +40,8 @@ export function ssdStateText(ssd: SsdProgress): string {
 
 /** The second bar, "Mac → SSD": its totals grow while the pull adds files ("so far"). */
 export function SsdProgressLine({ ssd, pullDone }: { ssd: SsdProgress; pullDone: boolean }) {
-  const known = Math.max(ssd.known_files, ssd.files_done)
+  // files deferred this run stay pending for the next one: they are not "left" now
+  const known = Math.max(ssd.known_files - ssd.deferred, ssd.files_done)
   const value = known > 0 ? (ssd.files_done / known) * 100 : ssd.state === 'starting' ? null : 0
   const earlier = ssd.backlog_files > 0 ? ` (including ${formatCount(ssd.backlog_files)} from earlier runs)` : ''
   return (

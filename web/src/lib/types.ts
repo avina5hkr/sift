@@ -188,6 +188,7 @@ export type SetStatus = {
   backed_up: number
   pending: number
   last_copied_at?: number | null // the newest copy of one of its files (not a confirmation)
+  ssd_pending?: number | null // backed-up files of this set the chosen SSD lacks (null: no SSD)
 }
 export type RecentFile = { path: string; size: number; at: number }
 

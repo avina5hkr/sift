@@ -593,3 +593,101 @@ def test_the_drain_pauses_and_stops_through_the_coordinators_checkpoint(drives: 
     assert not t.is_alive() and control.checkpoints >= 1
     copy.close()
     assert copy.outcome(stopped=False, pending_after=0).state == "complete"
+
+
+# -- the review's findings ----------------------------------------------------------------
+
+
+def test_the_drive_is_found_again_after_the_lease_wait_and_a_same_named_one_gets_nothing(
+    drives: Drives,
+) -> None:
+    drives.add()
+    lease = DriveLease()
+    lease.acquire("plug-in replication", timeout_s=0)  # the worker has to wait for it
+    swapped = {"done": False}
+    w = worker(drives, lease=lease, locate=lambda: None if swapped["done"] else drives.ssd)
+    w.start()
+    time.sleep(0.2)
+    swapped["done"] = True  # meanwhile the SSD left and a drive with its name arrived
+    lease.release()
+    assert w.thread is not None
+    w.thread.join(10)
+    assert w.end_state == "unplugged" and not drives.ssd.root.exists()
+
+
+def test_abandoned_while_the_first_operation_is_held_nothing_is_written_after(
+    drives: Drives, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drives.add()
+    gone = drives.add()  # an SSD row whose file is missing: self-heal would delete it
+    drives.ssd.root.mkdir()
+    with drives.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO replica (content_hash, dest_id, rel_path, rel_key, size, verified_at) "
+            "VALUES (?, ?, 'x.jpg', 'x.jpg', 1, 0)",
+            (gone, drives.ssd.id),
+        )
+    held = threading.Event()
+    real = ssdcopy.device_of
+
+    def device(path: Path) -> int:
+        held.wait(10)  # the macOS prompt
+        return real(path)
+
+    w = worker(drives, device=device)
+    w.start()
+    time.sleep(0.2)
+    assert w.abandon() is True
+    held.set()  # the owner clicks Allow, after Sift gave up
+    assert w.thread is not None
+    w.thread.join(10)
+    assert gone in drives.on_ssd()  # self-heal did not run after the abandonment
+    assert not list(drives.ssd.staging.glob("*")) if drives.ssd.staging.exists() else True
+
+
+def test_a_missing_mac_folder_ends_the_copy_and_keeps_every_mac_row(drives: Drives) -> None:
+    for _ in range(3):
+        drives.add()
+    w = worker(drives)
+    real = w._copy_once
+
+    def copy_once(row):  # type: ignore[no-untyped-def]
+        if drives.mac.root.exists():
+            drives.mac.root.rename(drives.mac.root.with_name("mac-away"))
+        real(row)
+
+    w._copy_once = copy_once  # type: ignore[method-assign]
+    run_to_end(w)
+    assert w.end_state == "failed" and "Mac backup folder" in (w.reason or "")
+    with drives.db.read() as conn:
+        mac_rows = conn.execute(
+            "SELECT count(*) FROM replica WHERE dest_id = ?", (drives.mac.id,)
+        ).fetchone()[0]
+    assert mac_rows == 3
+
+
+def test_a_long_pause_reads_paused_not_not_answering(
+    drives: Drives, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drives.add()
+    monkeypatch.setattr(ssdcopy, "NOT_ANSWERING_S", 0.3)
+    control = Control(pause=True)
+    w = worker(drives, control)
+    w.start()
+    time.sleep(1.5)
+    assert w.progress.snapshot()["state"] == "paused"
+    control.set(pause=False)
+    assert w.thread is not None
+    w.thread.join(10)
+
+
+def test_an_error_in_the_worker_ends_its_copy_as_failed_with_the_reason_kept(
+    drives: Drives, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drives.add()
+    _failing_copy(monkeypatch, lambda h: RuntimeError("boom"))
+    w = run_to_end(worker(drives))
+    assert w.end_state == "failed" and isinstance(w.error, RuntimeError)
+    copy = SsdCopy(drives.db, Control(), locate=lambda: drives.ssd)
+    copy.worker = w
+    assert copy.outcome(stopped=False, pending_after=1).state == "failed"

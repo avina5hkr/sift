@@ -515,6 +515,22 @@ The deferred items from the hardening pass: clustering time, and the near-duplic
   the staging folder was made with missing parents before any drive check. The worker now checks
   the drive before each file and starts the file again at the new mount.
 
+- **Review (one pass, fixed).**
+  - The worker finds the drive again by UUID after waiting for the lease.
+  - It stops before the sweep and self-heal when it was given up on during the first operation, and runs self-heal under `commit_lock`.
+  - A missing Mac folder ends the copy instead of dropping Mac rows.
+  - A deliberate Pause never reads "not answering".
+  - An analysis left running by a quit is stopped at start.
+  - The analysis answer is kept per phone, and an older reply never brings back an ended run.
+  - One access probe runs at a time.
+  - The reverse phase waits for the lease, or says it skipped.
+  - Stale is per phone and only after a backup that copied something.
+  - A plug-in copy never starts during a backup.
+  - Per-set "SSD: N pending".
+  - "SSD copy stopped: reason".
+- Not done in A: a Hypothesis test over Stop and Pause timing (the forced interleavings are covered
+  by barrier tests), and "SSD pending" on Health (Health shows no backup status today).
+
 ## Product decisions (accepted by the owner, 2026-11-15)
 
 1. A run with the SSD unplugged or incomplete reads "Mac complete · SSD pending N", not a

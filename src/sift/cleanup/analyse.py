@@ -317,11 +317,18 @@ def latest_analyses(db: Database, device_id: int | None) -> dict[str, Any]:
         completed = newest("state = 'done'")
         active = newest("state = 'running'")
         ended = newest("state IN ('stopped', 'failed')")
+        # a backup of this phone that copied something (not a failed or discarded run)
         last_backup = conn.execute(
-            "SELECT max(finished_at) FROM run_summary WHERE outcome != 'failed'"
+            "SELECT max(finished_at) FROM run_summary WHERE outcome IN ('done', 'stopped') "
+            "AND discarded = 0 AND new_files > 0"
+            + (" AND device_id = ?" if device_id is not None else ""),
+            args,
         ).fetchone()[0]
     if ended is not None and completed is not None and ended["id"] < completed["id"]:
         ended = None
+    newest_end = max((r["id"] for r in (completed, ended) if r is not None), default=-1)
+    if active is not None and active["id"] < newest_end:
+        active = None  # a newer run has finished: this row is left over
     return {"completed": completed, "active": active, "ended": ended, "last_backup": last_backup}
 
 

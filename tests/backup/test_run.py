@@ -500,3 +500,46 @@ def test_a_run_sift_quit_in_the_middle_of_gets_a_stopped_summary_at_start(rig: R
     s = latest_summary(db)
     assert s is not None and s["outcome"] == "stopped" and s["ssd"]["state"] == "stopped"
     assert summarize_unfinished(db, 400, "again") == 0  # never twice
+
+
+def test_a_plug_in_copy_never_starts_while_a_backup_runs(rig: Rig, tmp_path: Path) -> None:
+    from sift.backup import run as run_mod
+
+    rig.ctx.ssd = FakeSsd(rig, tmp_path / "ssd" / "backup")  # type: ignore[assignment]
+
+    class Busy:
+        def snapshot(self):  # type: ignore[no-untyped-def]
+            return [
+                JobSnapshot(
+                    1,
+                    "backup",
+                    JobState.pulling,
+                    ("Camera",),
+                    False,
+                    0,
+                    0,
+                    None,
+                    None,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    "reference",
+                    False,
+                    False,
+                    None,
+                    1,
+                    None,
+                )
+            ]
+
+    rig.ctx.jobs = Busy()  # type: ignore[assignment]
+    calls: list[str] = []
+    real = run_mod.Replicator.replicate_union
+    run_mod.Replicator.replicate_union = lambda *a, **k: calls.append("x")  # type: ignore[method-assign]
+    try:
+        run_mod.replicate_now(rig.ctx, should_stop=lambda: False)
+    finally:
+        run_mod.Replicator.replicate_union = real  # type: ignore[method-assign]
+    assert calls == []

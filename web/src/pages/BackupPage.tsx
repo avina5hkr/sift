@@ -220,13 +220,16 @@ export default function BackupPage() {
   // check runs the answer is asked for every 2 s; an older answer never replaces a newer one.
   const analysisId = useEventStore((s) => s.analysisId)
   const checking = task?.kind === 'analyse' && task.state === 'running'
-  const newest = useRef<LatestAnalyses | null>(null)
+  // Per phone: another phone's answers never mix in (the server answers for the one connected).
+  const phoneKey = device?.device_uuid ?? device?.serial ?? null
+  const newest = useRef<{ phone: string | null; latest: LatestAnalyses | null }>({ phone: null, latest: null })
   const analysis = useQuery({
-    queryKey: ['analysis', 'latest', analysisId],
+    queryKey: ['analysis', 'latest', phoneKey, analysisId],
     queryFn: async () => {
       const got = await apiFetch<LatestAnalyses>('/api/analyse/phone/latest')
-      newest.current = newerOf(newest.current, got)
-      return newest.current
+      const before = newest.current.phone === phoneKey ? newest.current.latest : null
+      newest.current = { phone: phoneKey, latest: newerOf(before, got) }
+      return newest.current.latest as LatestAnalyses
     },
     refetchInterval: checking ? 2000 : false,
   })
@@ -289,7 +292,7 @@ export default function BackupPage() {
         {job?.state === 'stopping'
           ? 'Stopping after this file…'
           : job?.state === 'replicating' && job.ssd
-            ? `Copying to SSD: ${formatCount(Math.max(0, job.ssd.known_files - job.ssd.files_done))} left`
+            ? `Copying to SSD: ${formatCount(Math.max(0, job.ssd.known_files - job.ssd.files_done - job.ssd.deferred))} left`
             : STATE_LABEL[state]}
       </p>
       {running && job?.started_at != null && (
@@ -512,6 +515,11 @@ export default function BackupPage() {
                   {noPhoneCounts
                     ? 'Connect your phone to see what is on it.'
                     : `${formatCount(s.on_phone)} on the phone, ${formatCount(s.backed_up)} backed up on the Mac, ${formatCount(s.pending)} waiting`}
+                  {!noPhoneCounts && s.ssd_pending != null && s.ssd_pending > 0 && (
+                    <span className="font-medium text-amber-800 dark:text-amber-300">
+                      {' '}· SSD: {formatCount(s.ssd_pending)} pending
+                    </span>
+                  )}
                 </p>
                 <ConfirmStatus set={s.name} />
                 {s.last_copied_at != null && (
@@ -589,10 +597,13 @@ function newerOf(old: LatestAnalyses | null, got: LatestAnalyses): LatestAnalyse
   const id = (a: { id: number } | null) => a?.id ?? -1
   const completed = id(got.completed) >= id(old.completed) ? got.completed : old.completed
   const ended = id(got.ended) >= id(old.ended) ? got.ended : old.ended
+  // A slow, older reply never brings back a run that has ended since: an active run must be
+  // newer than every finished one this screen has seen.
+  const active = got.active && id(got.active) > Math.max(id(completed), id(ended)) ? got.active : null
   return {
     completed,
     stale_reason: completed === got.completed ? got.stale_reason : old.stale_reason,
-    active: got.active, // a run that ended shows up as completed or ended in the same answer
+    active,
     ended: ended && id(ended) > id(completed) ? ended : null,
   }
 }

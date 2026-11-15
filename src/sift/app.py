@@ -367,6 +367,14 @@ def recover_at_startup(ctx: AppContext) -> None:
         reconcile(ctx)
     except Exception:
         _log.exception("Delete-run recovery at startup failed")
+    try:  # an analysis Sift quit in the middle of is stopped, not "checking now" for ever
+        with ctx.db.tx() as conn:
+            conn.execute(
+                "UPDATE analysis_run SET state = 'stopped', finished_at = strftime('%s', 'now') "
+                "WHERE state = 'running'"
+            )
+    except Exception:
+        _log.exception("Analysis recovery at startup failed")
     try:  # an SSD access check a quit interrupted: remove its folder (plan A4)
         from sift.services.ssdaccess import finish_leftover
 
