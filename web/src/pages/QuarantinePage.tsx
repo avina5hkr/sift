@@ -28,6 +28,69 @@ export default function QuarantinePage() {
     onSettled: () => void qc.invalidateQueries({ queryKey: ['quarantine'] }),
   })
 
+  // How long files wait here: the Cleanup setting, editable here too. A change moves the date
+  // of the files already here as well.
+  const settings = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => apiFetch<{ pages: Record<string, { section: string; key: string; value: unknown }[]> }>('/api/settings'),
+  })
+  const savedDays = Object.values(settings.data?.pages ?? {})
+    .flat()
+    .find((f) => f.section === 'cleanup' && f.key === 'quarantine_days')?.value as number | undefined
+  const [days, setDays] = useState<string | null>(null)
+  const saveDays = useMutation({
+    mutationFn: (value: number) =>
+      apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ changes: [{ section: 'cleanup', key: 'quarantine_days', value }] }),
+      }),
+    onMutate: () => setMessage(null),
+    onSuccess: (_r, value) => {
+      setDays(null)
+      setMessage({ text: `Files now wait ${formatCount(value)} ${value === 1 ? 'day' : 'days'}, including the ones already here.`, bad: false })
+    },
+    onError: (e) => setMessage({ text: plain(e), bad: true }),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['settings'] })
+      void qc.invalidateQueries({ queryKey: ['quarantine'] })
+    },
+  })
+  const dayValue = days ?? (savedDays != null ? String(savedDays) : '')
+  const dayNumber = Number(dayValue)
+  const daysOk = Number.isInteger(dayNumber) && dayNumber >= 1 && dayNumber !== savedDays
+
+  const clearExpired = useMutation({
+    mutationFn: () => post<{ purged: number }>('/api/quarantine/purge'),
+    onMutate: () => setMessage(null),
+    onSuccess: (r) =>
+      setMessage({
+        text: r.purged ? `Removed ${formatCount(r.purged)} ${r.purged === 1 ? 'file' : 'files'} whose time was up.` : 'Nothing has reached its date yet.',
+        bad: false,
+      }),
+    onError: (e) => setMessage({ text: plain(e), bad: true }),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['quarantine'] }),
+  })
+  const [confirmAll, setConfirmAll] = useState(false)
+  const [typed, setTyped] = useState('')
+  const deleteAll = useMutation({
+    mutationFn: (count: number) => post<{ purged: number; waiting: number }>('/api/quarantine/purge-all', { count }),
+    onMutate: () => setMessage(null),
+    onSuccess: (r) => {
+      setConfirmAll(false)
+      setTyped('')
+      setPicked(new Set())
+      setMessage({
+        text:
+          `Deleted ${formatCount(r.purged)} ${r.purged === 1 ? 'file' : 'files'} for good.` +
+          (r.waiting ? ` ${formatCount(r.waiting)} are on a drive that is not connected, or back on the phone; they stay until then.` : ''),
+        bad: false,
+      })
+    },
+    onError: (e) => setMessage({ text: plain(e), bad: true }),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['quarantine'] }),
+  })
+
   const entries = list.data ?? []
   const toggle = (id: number) =>
     setPicked((p) => {
@@ -47,6 +110,90 @@ export default function QuarantinePage() {
         </Link>
         .
       </p>
+      <section aria-labelledby="clear-title" className="flex flex-col gap-3 rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
+        <h2 id="clear-title" className="font-semibold">
+          Clearing the quarantine
+        </h2>
+        <form
+          className="flex flex-wrap items-center gap-2 text-sm"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (daysOk) saveDays.mutate(dayNumber)
+          }}
+        >
+          <label htmlFor="quarantine-days">Remove files for good</label>
+          <input
+            id="quarantine-days"
+            type="number"
+            min={1}
+            step={1}
+            value={dayValue}
+            onChange={(e) => setDays(e.target.value)}
+            className="w-20 rounded-md border border-neutral-300 px-2 py-1 dark:border-neutral-700 dark:bg-neutral-900"
+          />
+          <span>days after they were deleted.</span>
+          <button type="submit" disabled={!daysOk || saveDays.isPending} className={BTN}>
+            Save
+          </button>
+        </form>
+        <p className="text-sm text-neutral-600 dark:text-neutral-400">
+          Sift removes them when it opens and when the SSD is plugged in. A drive that is not connected keeps its files
+          until it is.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => clearExpired.mutate()} disabled={clearExpired.isPending || entries.length === 0} className={BTN}>
+            Clear expired now
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmAll(true)}
+            disabled={entries.length === 0 || confirmAll}
+            className={`${BTN} border-red-300 text-red-800 dark:border-red-800 dark:text-red-300`}
+          >
+            Delete everything in quarantine now…
+          </button>
+        </div>
+        {confirmAll && (
+          <div role="group" aria-labelledby="all-title" className="flex flex-col gap-2 rounded-md border border-red-300 p-3 text-sm dark:border-red-800">
+            <p id="all-title" className="font-medium">
+              Delete all {formatCount(entries.length)} {entries.length === 1 ? 'file' : 'files'} in quarantine for good?
+            </p>
+            <p>
+              Their backup copies on the Mac and the SSD are removed and cannot be restored. Files you deleted from the
+              phone are then gone everywhere.
+            </p>
+            <label className="flex flex-wrap items-center gap-2">
+              Type {formatCount(entries.length)} to confirm:
+              <input
+                inputMode="numeric"
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                className="w-28 rounded-md border border-neutral-300 px-2 py-1 dark:border-neutral-700 dark:bg-neutral-900"
+              />
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={typed.replace(/[\s,.]/g, '') !== String(entries.length) || deleteAll.isPending}
+                onClick={() => deleteAll.mutate(entries.length)}
+                className="rounded-md bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-800 disabled:opacity-50"
+              >
+                Delete {formatCount(entries.length)} for good
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmAll(false)
+                  setTyped('')
+                }}
+                className={BTN}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
       {list.error && <p role="alert" className="text-sm">{plain(list.error)}</p>}
       {message && (
         <p role={message.bad ? 'alert' : 'status'} className={`text-sm ${message.bad ? 'text-amber-800 dark:text-amber-300' : ''}`}>
@@ -101,3 +248,6 @@ export default function QuarantinePage() {
     </div>
   )
 }
+
+const BTN =
+  'rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium hover:bg-neutral-100 disabled:opacity-60 dark:border-neutral-700 dark:hover:bg-neutral-800'

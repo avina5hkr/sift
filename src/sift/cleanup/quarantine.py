@@ -4,7 +4,9 @@ After a run with disposition quarantine, each deleted content that is labelled j
 near-duplicate copy, and has no present phone path left on any phone, has its replicas renamed
 into `DEST_ROOT/.quarantine/YYYY-MM-DD/REL_PATH` on every mounted destination (same volume, so a
 rename). The replica row moves with the file (plan F3). Purge removes quarantined files past
-purge_after from mounted destinations, then their replica rows. Restore moves a file back into
+their time (the quarantine-days setting as it is now) from mounted destinations, then their
+replica rows: at start, when the SSD is plugged in, or when the owner asks (Clear expired now;
+Delete everything now, with the count typed). Restore moves a file back into
 the tree, and for "phone" first pushes it to its original path (a clash gets `_restored`), with
 its original mtime, after checking the phone has room for it plus 2 GB.
 These are the only places Sift removes or moves a file inside a backup destination, and only
@@ -215,18 +217,37 @@ def revive(ctx: AppContext) -> int:
         return 0
 
 
+def keep_s(ctx: AppContext) -> int:
+    """How long a file waits in quarantine: the setting as it is now, for every file (changing
+    it moves the date of files already there too)."""
+    return int(ctx.config.cleanup.quarantine_days) * DAY_S
+
+
 def purge_due(ctx: AppContext, *, now: float | None = None) -> int:
-    """Remove quarantined files past purge_after on mounted destinations; returns how many."""
+    """Remove quarantined files whose time is up on mounted destinations; returns how many."""
     at = int(now if now is not None else time.time())
+    return _purge_where(ctx, at, at - keep_s(ctx))
+
+
+def purge_all(ctx: AppContext, *, now: float | None = None) -> dict[str, int]:
+    """Remove everything in quarantine now, on the drives that are connected (the owner asked,
+    with the count typed). A file that is on a phone again goes back into the tree instead, as
+    always. Returns how many were removed and how many wait for their drive to be plugged in."""
+    at = int(now if now is not None else time.time())
+    purged = _purge_where(ctx, at, at + 1)
+    return {"purged": purged, "waiting": len(entries(ctx))}
+
+
+def _purge_where(ctx: AppContext, at: int, moved_before: int) -> int:
     revive(ctx)
     usable = {d.id: d for d in usable_dests(ctx)}
     with ctx.db.read() as conn:
         due = conn.execute(
-            "SELECT q.id, q.dest_id, q.q_rel FROM quarantine q WHERE q.purge_after <= ? "
+            "SELECT q.id, q.dest_id, q.q_rel FROM quarantine q WHERE q.moved_at <= ? "
             "AND q.purged_at IS NULL AND q.restored_at IS NULL "
             "AND NOT EXISTS (SELECT 1 FROM phone_file p WHERE p.content_hash = q.content_hash "
             "AND p.present = 1)",
-            (at,),
+            (moved_before,),
         ).fetchall()
     purged = 0
     with DRIVE_LEASE.hold("quarantine"):
@@ -274,11 +295,12 @@ def entries(ctx: AppContext) -> list[Entry]:
     with ctx.db.read() as conn:
         rows = conn.execute(
             "SELECT q.id, q.content_hash, q.dest_id, q.orig_rel, q.q_rel, q.moved_at, "
-            "q.purge_after, IFNULL(c.size, 0), (SELECT d.remote_path FROM deletion_log d "
+            "q.moved_at + ?, IFNULL(c.size, 0), (SELECT d.remote_path FROM deletion_log d "
             "WHERE d.content_hash = q.content_hash AND d.result = 'deleted' "
             "ORDER BY d.id DESC LIMIT 1) FROM quarantine q LEFT JOIN content c "
             "ON c.hash = q.content_hash WHERE q.purged_at IS NULL AND q.restored_at IS NULL "
-            "ORDER BY q.moved_at DESC, q.id"
+            "ORDER BY q.moved_at DESC, q.id",
+            (keep_s(ctx),),
         ).fetchall()
     return [
         Entry(int(a), str(b), int(c), str(d), str(e), int(f), int(g), int(h),

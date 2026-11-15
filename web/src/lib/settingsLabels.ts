@@ -100,7 +100,7 @@ export const LABELS: Record<string, FieldText> = {
   },
   'cleanup.quarantine_days': {
     label: 'Quarantine days',
-    help: 'Deleted files wait in Quarantine this long before they are gone for good.',
+    help: 'Deleted files wait in Quarantine this long before they are gone for good. A change applies to the files already there too.',
   },
   'scoring.protect_screenshots': {
     label: 'Protect screenshots',

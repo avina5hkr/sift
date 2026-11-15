@@ -238,7 +238,30 @@ def restore(ctx: Ctx, body: RestoreRequest) -> dict[str, int]:
 
 @router.post("/quarantine/purge")
 def purge(ctx: Ctx) -> dict[str, int]:
+    """Clear expired now: remove the files whose time in quarantine is up."""
+    _no_backup_running(ctx)
     return {"purged": quarantine.purge_due(ctx)}
+
+
+class PurgeAllRequest(BaseModel):
+    count: int  # the number of files in quarantine, typed by the owner
+
+
+@router.post("/quarantine/purge-all")
+def purge_all(ctx: Ctx, body: PurgeAllRequest) -> dict[str, int]:
+    """Delete everything in quarantine now, for good. The owner types how many files that is;
+    a different number (the list changed meanwhile, say) removes nothing."""
+    _no_backup_running(ctx)
+    present = len(quarantine.entries(ctx))
+    if present == 0:
+        raise ApiError(409, "nothing_selected", "Nothing is in quarantine.")
+    if body.count != present:
+        raise ApiError(
+            409,
+            "count_mismatch",
+            f"Type the number of files in quarantine ({present:,}) to delete them all.",
+        )
+    return quarantine.purge_all(ctx)
 
 
 class ReadySet(BaseModel):

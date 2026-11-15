@@ -27,6 +27,11 @@ beforeEach(() => {
     vi.fn((url: string, init: RequestInit = {}) => {
       calls.push({ method: init.method ?? 'GET', path: url, body: init.body ? JSON.parse(init.body as string) : null })
       if (url === '/api/quarantine') return reply(ENTRIES)
+      if (url === '/api/settings' && (init.method ?? 'GET') === 'GET')
+        return reply({ pages: { cleanup: [{ section: 'cleanup', key: 'quarantine_days', value: 30 }] }, warnings: [] })
+      if (url === '/api/settings') return reply({ pages: {}, warnings: [] })
+      if (url === '/api/quarantine/purge') return reply({ purged: 1 })
+      if (url === '/api/quarantine/purge-all') return reply({ purged: 2, waiting: 0 })
       if (url === '/api/quarantine/restore') {
         return refuse
           ? reply({ code: 'restore_refused', message: 'Plug in the drive that holds these files first.', detail: null }, 409)
@@ -68,4 +73,43 @@ test('Restore to backup only sends to backup, and a refusal is shown', async () 
   await userEvent.click(screen.getByRole('button', { name: 'Restore to backup only' }))
   await waitFor(() => expect(calls.find((c) => c.path === '/api/quarantine/restore')?.body).toEqual({ ids: [1, 2], to: 'backup' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('Plug in the drive that holds these files first.')
+})
+
+test('Clear expired now posts, and says how many went', async () => {
+  renderPage()
+  await screen.findByText('/sdcard/DCIM/Camera/IMG_1.jpg')
+  await userEvent.click(screen.getByRole('button', { name: 'Clear expired now' }))
+  expect(await screen.findByText('Removed 1 file whose time was up.')).toBeInTheDocument()
+})
+
+test('Delete everything needs the number of files typed, and warns it cannot be undone', async () => {
+  renderPage()
+  await screen.findByText('/sdcard/DCIM/Camera/IMG_1.jpg')
+  await userEvent.click(screen.getByRole('button', { name: 'Delete everything in quarantine now…' }))
+  expect(screen.getByText(/cannot be restored/)).toBeInTheDocument()
+  const go = screen.getByRole('button', { name: 'Delete 2 for good' })
+  expect(go).toBeDisabled()
+  await userEvent.type(screen.getByRole('textbox'), '3')
+  expect(go).toBeDisabled()
+  await userEvent.clear(screen.getByRole('textbox'))
+  await userEvent.type(screen.getByRole('textbox'), '2')
+  await userEvent.click(go)
+  await waitFor(() => expect(calls.find((c) => c.path === '/api/quarantine/purge-all')?.body).toEqual({ count: 2 }))
+  expect(await screen.findByText('Deleted 2 files for good.')).toBeInTheDocument()
+})
+
+test('the number of days can be changed here, and applies to the files already there', async () => {
+  renderPage()
+  const input = await screen.findByLabelText('Remove files for good')
+  await waitFor(() => expect(input).toHaveValue(30))
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  await userEvent.clear(input)
+  await userEvent.type(input, '7')
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await waitFor(() =>
+    expect(calls.find((c) => c.method === 'PUT' && c.path === '/api/settings')?.body).toEqual({
+      changes: [{ section: 'cleanup', key: 'quarantine_days', value: 7 }],
+    }),
+  )
+  expect(await screen.findByText('Files now wait 7 days, including the ones already here.')).toBeInTheDocument()
 })

@@ -543,3 +543,58 @@ def test_a_quarantined_file_removed_by_hand_breaks_nothing(rig: Rig) -> None:
     assert counts == {"ok": 1}
     assert purge_due(rig.ctx, now=time.time() + 40 * 86400) == 0
     assert entries(rig.ctx) == []
+
+
+def _quarantined_junk(rig: Rig) -> list[Path]:
+    ids = whatsapp(rig)
+    with rig.ctx.db.tx() as conn:
+        conn.executemany(
+            "INSERT INTO label (content_hash, label, source, created_at) "
+            "SELECT content_hash, 'junk', 'manual', 1 FROM phone_file WHERE id = ?",
+            [(i,) for i in ids],
+        )
+    run_id, _counts = preflight(rig, ids, source="cleanup", disposition="quarantine")
+    run(rig, run_id)
+    return [Path(rig.root) / e.q_rel for e in entries(rig.ctx)]
+
+
+def test_the_quarantine_days_setting_applies_to_files_already_there(rig: Rig) -> None:
+    files = _quarantined_junk(rig)
+    assert files and all(p.exists() for p in files)
+    first = entries(rig.ctx)[0]
+    assert first.purge_after == first.moved_at + 30 * 86400
+    rig.ctx.config.cleanup.quarantine_days = 2  # shortened after the files went in
+    assert entries(rig.ctx)[0].purge_after == first.moved_at + 2 * 86400
+    assert purge_due(rig.ctx, now=time.time() + 1 * 86400) == 0
+    assert purge_due(rig.ctx, now=time.time() + 3 * 86400) == len(files)
+    assert not any(p.exists() for p in files)
+
+
+def test_delete_everything_needs_the_count_typed_and_removes_only_quarantined_files(
+    rig: Rig,
+) -> None:
+    from tests.helpers import H, client_for
+
+    files = _quarantined_junk(rig)
+    before = {p for p in Path(rig.root).rglob("*") if p.is_file() and ".quarantine" not in p.parts}
+    client = client_for(rig.ctx)
+    wrong = client.post("/api/quarantine/purge-all", headers=H, json={"count": len(files) + 1})
+    assert wrong.status_code == 409 and all(p.exists() for p in files)
+    ok = client.post("/api/quarantine/purge-all", headers=H, json={"count": len(files)})
+    assert ok.status_code == 200 and ok.json() == {"purged": len(files), "waiting": 0}
+    assert not any(p.exists() for p in files) and entries(rig.ctx) == []
+    after = {p for p in Path(rig.root).rglob("*") if p.is_file() and ".quarantine" not in p.parts}
+    assert after == before  # nothing outside the quarantine folder was touched
+    assert client.post("/api/quarantine/purge-all", headers=H, json={"count": 0}).status_code == 409
+
+
+def test_clear_expired_now_removes_only_files_whose_time_is_up(rig: Rig) -> None:
+    from tests.helpers import H, client_for
+
+    files = _quarantined_junk(rig)
+    client = client_for(rig.ctx)
+    assert client.post("/api/quarantine/purge", headers=H).json() == {"purged": 0}
+    rig.ctx.config.cleanup.quarantine_days = 1
+    with rig.ctx.db.tx() as conn:  # they went in two days ago
+        conn.execute("UPDATE quarantine SET moved_at = moved_at - 2 * 86400")
+    assert client.post("/api/quarantine/purge", headers=H).json() == {"purged": len(files)}
