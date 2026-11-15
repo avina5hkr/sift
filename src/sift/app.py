@@ -367,6 +367,12 @@ def recover_at_startup(ctx: AppContext) -> None:
         reconcile(ctx)
     except Exception:
         _log.exception("Delete-run recovery at startup failed")
+    try:  # an SSD access check a quit interrupted: remove its folder (plan A4)
+        from sift.services.ssdaccess import finish_leftover
+
+        finish_leftover(ctx.db)
+    except Exception:
+        _log.exception("SSD access-check cleanup at startup failed")
     try:  # a backup Sift quit in the middle of has a summary that says so (plan G7)
         from sift.backup.summary import summarize_unfinished
         from sift.core.jobs import STALE_MESSAGE

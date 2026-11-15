@@ -41,6 +41,7 @@ from sift.server.routes.backup import _job_error, _run_lock, _sets_lock, _unknow
 from sift.server.routes.devices import AdbManagerDep
 from sift.services.plainwords import describe
 from sift.services.ssd import drive_folder, ssd_root
+from sift.services.ssdaccess import AccessResult, probe_waiting
 from sift.services.volumes import Volume, list_external_volumes
 
 router = APIRouter(prefix="/setup")
@@ -535,6 +536,25 @@ def save_ssd(ctx: Ctx, body: SsdRequest, lister: VolumeLister) -> VolumesOut:
     if ctx.ssd is not None:  # look now: the chosen drive is usually plugged in already
         ctx.ssd.poll_once(force=True)
     return list_volumes(ctx, lister)
+
+
+class AccessOut(BaseModel):
+    state: str  # ok, denied, full, read_only, not_connected, other_drive, waiting, error
+    message: str
+
+
+@router.post("/ssd-access")
+def check_ssd_access(ctx: Ctx, lister: VolumeLister) -> AccessOut:
+    """May Sift write to the chosen SSD? One small probe file, removed again (plan A4)."""
+    uuid = ctx.config.backup.ssd_volume_uuid
+    if not uuid:
+        raise ApiError(409, "no_ssd", "Choose an SSD first.")
+    volume = next((v for v in lister() if v.uuid == uuid and v.mount_point), None)
+    if volume is None or volume.mount_point is None:
+        result = AccessResult.of("not_connected")
+    else:
+        result = probe_waiting(ctx.db, Path(volume.mount_point))
+    return AccessOut(state=result.state, message=result.message)
 
 
 class FolderPickRequest(BaseModel):

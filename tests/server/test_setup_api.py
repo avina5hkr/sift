@@ -1065,3 +1065,18 @@ def test_the_folder_dialog_needs_the_window(client: TestClient, ctx: AppContext)
     assert post(client, "pick-folder", {}).status_code == 409
     ctx.pick_folder = lambda start: f"{start}/picked"
     assert post(client, "pick-folder", {"start": "/Users"}).json() == {"path": "/Users/picked"}
+
+
+def test_the_ssd_access_check_probes_the_chosen_drive_and_leaves_it_as_it_was(
+    client: TestClient, ctx: AppContext, tmp_path: Path
+) -> None:
+    mount = tmp_path / "T7"
+    mount.mkdir()
+    with_volumes(client, Volume("T7", "ExFAT", "uuid-t7", 700, 1000, True, None, str(mount)))
+    assert post(client, "ssd-access", {}).status_code == 409  # no SSD chosen yet
+    ctx.config.backup.ssd_volume_uuid = "uuid-t7"
+    r = post(client, "ssd-access", {})
+    assert r.status_code == 200 and r.json()["state"] == "ok"
+    assert list(mount.iterdir()) == []
+    ctx.config.backup.ssd_volume_uuid = "uuid-other"
+    assert post(client, "ssd-access", {}).json()["state"] == "not_connected"

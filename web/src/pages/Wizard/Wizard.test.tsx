@@ -302,7 +302,8 @@ test('choosing a drive posts its uuid', async () => {
     'GET /api/setup/folder': () => ({ path: '/p', ok: true, problem: null, exists: false, free_bytes: 1 }),
     'POST /api/setup/mac-folder': () => ({ mac_root: '~/PhoneBackup', device_label: 'Phone', free_bytes: 1 }),
     'GET /api/setup/volumes': () => VOLUMES,
-    'POST /api/setup/ssd': () => VOLUMES,
+    'POST /api/setup/ssd': () => ({ ...VOLUMES, selected_uuid: 'u-ssd' }),
+    'POST /api/setup/ssd-access': () => ({ state: 'ok', message: 'Sift can write to this drive.' }),
     'GET /api/setup/sets': () => TREE,
   })
   renderWizard()
@@ -493,4 +494,29 @@ test('Settings lets the owner choose the Mac and SSD backup folders with the fol
     expect.objectContaining({ path: '/Users/me/Backups' }),
     { path: '/Volumes/T7/Backups' },
   ])
+})
+
+test('a drive macOS has not allowed says where to allow it, and setup can go on anyway', async () => {
+  const denied =
+    'macOS has not allowed Sift to use this drive. Open System Settings, Privacy & Security, Files and Folders, and turn on Removable Volumes for Sift.'
+  mockApi({
+    'GET /api/setup/adb': () => ({ ...ADB_MISSING, status: 'ready', version: '1' }),
+    'GET /api/setup/devices': () => ({ phones: [PHONES.phones[0]] }),
+    'GET /api/setup/folder': () => ({ path: '/p', ok: true, problem: null, exists: false, free_bytes: 1 }),
+    'POST /api/setup/mac-folder': () => ({ mac_root: '~/PhoneBackup', device_label: 'Phone', free_bytes: 1 }),
+    'GET /api/setup/volumes': () => VOLUMES,
+    'POST /api/setup/ssd': () => ({ ...VOLUMES, selected_uuid: 'u-ssd' }),
+    'POST /api/setup/ssd-access': () => ({ state: 'denied', message: denied }),
+    'GET /api/setup/sets': () => TREE,
+  })
+  renderWizard()
+  await goTo('Choose the backup folder', 'Get started', 'Continue', 'Continue', 'Continue')
+  await screen.findByText(/free here/)
+  await goTo(/An SSD for a second copy/, 'Save and continue')
+  await userEvent.click(await screen.findByRole('radio', { name: /Backup SSD/ }))
+  await click('Use this drive')
+  expect(await screen.findByText(/turn on Removable Volumes for Sift/)).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 2, name: /An SSD/ })).toBeInTheDocument()
+  await click('Continue anyway')
+  await screen.findByRole('heading', { level: 2, name: 'What to back up' })
 })

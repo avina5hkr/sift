@@ -9,6 +9,7 @@ import { ChooseFolderButton } from '../../components/ChooseFolderButton'
 
 type Volumes = { volumes: SsdVolume[]; selected_uuid: string; folder?: string }
 type SsdFolderSaved = { volume_name: string; folder: string; root: string }
+export type SsdAccess = { state: string; message: string }
 
 export function Ssd({ next, settings = false }: StepProps & { settings?: boolean }) {
   const qc = useQueryClient()
@@ -19,6 +20,18 @@ export function Ssd({ next, settings = false }: StepProps & { settings?: boolean
   })
   const [picked, setPicked] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [access, setAccess] = useState<SsdAccess | null>(null)
+  // After choosing a drive: one small test write, so a macOS prompt or a refusal shows here and
+  // not halfway through the first backup. Setup goes on once Sift may write to the drive.
+  const check = useMutation({
+    mutationFn: () => post<SsdAccess>('/api/setup/ssd-access', {}),
+    onMutate: () => setAccess({ state: 'checking', message: 'Checking that Sift may write to the drive…' }),
+    onSuccess: (r) => {
+      setAccess(r)
+      if (r.state === 'ok') next()
+    },
+    onError: (e) => setAccess({ state: 'error', message: plain(e) }),
+  })
   const save = useMutation({
     mutationFn: async (uuid: string | null) => {
       try {
@@ -33,7 +46,10 @@ export function Ssd({ next, settings = false }: StepProps & { settings?: boolean
       }
     },
     onMutate: () => setError(null),
-    onSuccess: next,
+    onSuccess: (r) => {
+      if (r.selected_uuid) check.mutate()
+      else next()
+    },
     onError: (e) => setError(plain(e)),
     onSettled: () => void qc.invalidateQueries({ queryKey: ['setup', 'volumes'] }),
   })
@@ -43,7 +59,7 @@ export function Ssd({ next, settings = false }: StepProps & { settings?: boolean
     onMutate: () => setError(null),
     onSuccess: (r) => {
       setSavedFolder(`${r.folder} on ${r.volume_name}`)
-      next()
+      check.mutate()
     },
     onError: (e) => setError(plain(e)),
     onSettled: () => void qc.invalidateQueries({ queryKey: ['setup', 'volumes'] }),
@@ -65,8 +81,7 @@ export function Ssd({ next, settings = false }: StepProps & { settings?: boolean
       </p>
       <Hint>
         The first time Sift writes to an external drive, macOS asks whether Sift may use removable volumes. Choose Allow,
-        or the second copy cannot be made. Sift only looks at which drives are plugged in for now; copying to the drive
-        comes later, so the status bar keeps saying &quot;SSD not connected&quot; until then.
+        or the second copy cannot be made. Sift checks this as soon as you choose the drive.
       </Hint>
       {list.isPending && <p role="status">Looking for external drives…</p>}
       {list.isError && <ErrorNote message={plain(list.error)} />}
@@ -101,6 +116,21 @@ export function Ssd({ next, settings = false }: StepProps & { settings?: boolean
         </p>
       )}
       <ErrorNote message={error} />
+      {access && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={
+            access.state === 'ok'
+              ? 'text-sm text-green-800 dark:text-green-300'
+              : access.state === 'checking' || access.state === 'waiting'
+                ? 'text-sm'
+                : 'text-sm text-amber-800 dark:text-amber-300'
+          }
+        >
+          {access.message}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-3">
         <ChooseFolderButton
           start="/Volumes"
@@ -116,6 +146,14 @@ export function Ssd({ next, settings = false }: StepProps & { settings?: boolean
         <Button disabled={list.isFetching} onClick={() => void list.refetch()}>
           Look again
         </Button>
+        {list.data?.selected_uuid && (
+          <Button disabled={check.isPending} onClick={() => check.mutate()}>
+            Check access
+          </Button>
+        )}
+        {!settings && access && access.state !== 'ok' && access.state !== 'checking' && (
+          <Button onClick={next}>Continue anyway</Button>
+        )}
       </div>
     </section>
   )
