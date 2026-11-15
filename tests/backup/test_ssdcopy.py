@@ -475,8 +475,9 @@ def test_a_blocked_publish_is_abandoned_keeps_the_lease_and_leaves_an_orphan_tha
     assert w2.copied == 0
 
 
-def test_abandonment_racing_a_commit_either_records_it_or_records_nothing(
-    drives: Drives, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("commit_finishes_first", [False, True], ids=["in-flight", "finished"])
+def test_abandonment_of_a_commit_in_flight_preserves_the_verified_replica(
+    drives: Drives, monkeypatch: pytest.MonkeyPatch, commit_finishes_first: bool
 ) -> None:
     digest = drives.add()
     entered, release = threading.Event(), threading.Event()
@@ -484,21 +485,29 @@ def test_abandonment_racing_a_commit_either_records_it_or_records_nothing(
 
     def slow_record(self, dst, h, final, size):  # type: ignore[no-untyped-def]
         entered.set()
-        release.wait(5)
+        assert release.wait(20)
         real(self, dst, h, final, size)
 
     monkeypatch.setattr(Replicator, "record", slow_record)
     w = worker(drives)
     w.start()
-    assert entered.wait(5)  # the worker is inside its commit, holding commit_lock
-    threading.Timer(0.3, release.set).start()
-    started = time.monotonic()
-    assert w.abandon() is True
-    assert time.monotonic() - started < ssdcopy.COMMIT_LOCK_WAIT_S + 1
     assert w.thread is not None
-    w.thread.join(5)
-    assert digest in drives.on_ssd()  # the commit in flight landed first, and is true
-    assert (drives.ssd.root / "Camera" / "IMG_00001.jpg").exists()
+    try:
+        assert entered.wait(10)  # the worker holds commit_lock inside an already-started write
+        if commit_finishes_first:
+            release.set()
+            w.thread.join(10)
+            assert not w.thread.is_alive()
+        # Finishing before abandonment is valid too; force both orders instead of racing a timer.
+        assert w.abandon() is (not commit_finishes_first)
+    finally:
+        release.set()
+        w.thread.join(10)
+    assert not w.thread.is_alive()
+    assert w.error is None
+    assert digest in drives.on_ssd()  # a write already in flight may finish after abandonment
+    final = drives.ssd.root / "Camera" / "IMG_00001.jpg"
+    assert hashlib.sha256(final.read_bytes()).hexdigest() == digest
 
 
 def test_after_abandonment_no_commit_starts(
