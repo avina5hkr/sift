@@ -483,6 +483,38 @@ The deferred items from the hardening pass: clustering time, and the near-duplic
 - P5. Lease waits for other holders: 30 s; tail passes after the final pass: at most 3; failures in
   a row before the worker gives up: 20.
 
+- P6 (implementation). The worker takes the drive lease on its own thread and releases it
+  itself, instead of the coordinator acquiring it and handing it over. The lease is then held
+  exactly while a thread that can write is alive, with no hand-off race. Abandonment only marks
+  it stuck.
+- P7. `abandon()` waits at most 2 s for `commit_lock`. If a slow write holds it longer (the
+  bounded-shutdown requirement), the flag is set anyway: only the one write already begun can
+  land, and its row is true (G2). G1 holds whenever the lock is had.
+- P8. The SSD copy reads in the existing 4 MB chunks (not 8 MB): a finer stop.
+- P9. The verifier's repair copy and the after-run database copy to the SSD also take the lease
+  (repair waits up to 30 s; the database copy skips when the drive is busy). Staging folders are
+  never made with missing parents, so a swapped or unplugged drive fails instead of a folder
+  appearing at the old path.
+- P10. A running analysis saves its partial result at most every 2 s. A result marked out of date
+  offers no delete (the delete's preflight re-checks everything anyway).
+- P11. The version is 0.0.2 on `develop`; no tag until the owner has tested the dmg.
+
+## Implementation notes that touch the safety guarantees
+
+- **D1 (open, reported to the owner).** At quit, shutdown releases the instance lock before the
+  process has fully exited. If an abandoned SSD thread is still stuck in the OS at that moment,
+  a new Sift can start while that thread exists. On exFAT, the no-replace rename falls back to
+  "check the name is free, then rename" inside one process. A stuck thread resuming between those
+  two steps, while the new Sift writes the same name, could replace a file. The window is tiny and
+  was already there in v0.0.1. Proposed fix: skip the explicit release when a stuck worker exists,
+  so the kernel releases the lock only when the process really ends. Not done; waiting for the
+  owner.
+- **D2 (fixed).** The verifier repair and the after-run database copy wrote to the SSD without
+  the lease (P9).
+- **D3 (fixed).** A drive renamed in the middle of a file wrote that file under the old path, and
+  the staging folder was made with missing parents before any drive check. The worker now checks
+  the drive before each file and starts the file again at the new mount.
+
 ## Product decisions (accepted by the owner, 2026-11-15)
 
 1. A run with the SSD unplugged or incomplete reads "Mac complete · SSD pending N", not a

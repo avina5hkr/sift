@@ -7,6 +7,36 @@ behaviour.
 
 ## [Unreleased]
 
+## [0.0.2] - unreleased (being tested)
+
+### Added
+
+- The copy to the SSD runs alongside the copy from the phone instead of after it, with its own
+  progress bar ("Mac → SSD"), files left over from earlier runs counted in, and "Copying to SSD:
+  N left" once the phone is done. Pause and Stop work in every phase.
+- A check when the SSD is chosen that Sift may write to it: one small test file, removed again.
+  A drive macOS has not allowed says where to allow it. During a backup, a first write held by the
+  macOS prompt says to look for it.
+- One status line for the last backup everywhere (Backup, the status bar, the end-of-run
+  message): "Mac complete · SSD: 120 files pending" until the SSD really has the files, never
+  "complete" and never "failed" for a good Mac backup.
+- The analysis card, now "Files in your selected backup folders": the last complete result with
+  when it was checked and whether a later backup made it out of date, apart from a check going on
+  ("Checking now: 2,200 of 51,106"); a "Not checked yet" group; a stacked bar and a badge in
+  words per set, problems first; Hide details folds it.
+- Times in one format ("today at 18:47"), with the full date on hover; each phase's finish time;
+  each set's last copied file, apart from its confirmation.
+- Settings, General, Storage locations: the data folder, settings file, database, Mac backup
+  folder and SSD this Sift uses, with Reveal in Finder.
+
+### Changed
+
+- One writer per backup drive at a time (the drive lease), including verification repairs and the
+  database copy to the SSD. A copy stuck inside macOS keeps the drive busy until it returns, so
+  Eject waits, and nothing suggests unplugging meanwhile.
+- A drive is followed by its UUID: a renamed SSD is followed, a different drive under the same
+  name gets nothing.
+
 ## [0.0.1] - 2026-11-15
 
 The first public build, a beta.
