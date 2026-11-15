@@ -17,6 +17,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field, StrictBool, StrictStr, ValidationError
 
+from sift.backup.outcome import backup_outcome, live_ssd_pending
 from sift.backup.phonepaths import from_db, shown
 from sift.backup.scanner import ScanNotPending, confirm_scan, discard_scan
 from sift.backup.sets import resolve_roots
@@ -145,6 +146,25 @@ def stop_backup(ctx: Ctx, body: JobRef | None = None) -> dict[str, Any]:
 # -- summary, failures, retry --------------------------------------------------------------------
 
 
+class SsdPartOut(BaseModel):
+    state: str  # none, complete, incomplete, stopped, failed (as the run ended)
+    copied: int
+    bytes: int
+    deferred: int
+    pending_after: int | None
+    finished_at: int | None
+    reason: str | None
+
+
+class OutcomeOut(BaseModel):
+    """The one status line for the last backup (`sift.backup.outcome`)."""
+
+    level: str  # none, complete, ssd_pending, stopped, failed, discarded
+    headline: str
+    finished_at: int | None
+    ssd_pending: int | None
+
+
 class SummaryOut(BaseModel):
     job_id: int
     sets: list[str]
@@ -160,6 +180,9 @@ class SummaryOut(BaseModel):
     bytes: int
     warnings: list[str]
     error: str | None
+    pull_finished_at: int | None = None
+    ssd: SsdPartOut | None = None
+    status: OutcomeOut | None = None
 
 
 @router.get("/summary")
@@ -168,7 +191,12 @@ def summary(ctx: Ctx) -> SummaryOut | None:
     no phone connected."""
     device_id = _connected_device_id(ctx)
     found = None if device_id is None else latest_summary(ctx.db, device_id=device_id)
-    return None if found is None else SummaryOut(**found)
+    if found is None:
+        return None
+    status = backup_outcome(
+        found, live_ssd_pending(ctx), ssd_chosen=bool(ctx.config.backup.ssd_volume_uuid)
+    )
+    return SummaryOut(**found, status=OutcomeOut(**status.as_dict()))
 
 
 class FailedOut(BaseModel):

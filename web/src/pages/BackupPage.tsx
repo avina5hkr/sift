@@ -13,7 +13,9 @@ import { TaskLine } from '../components/backup/TaskLine'
 import { ApiError, apiFetch } from '../lib/api'
 import { disabledReason, isConnected, isRunning, screenState, type ScreenState } from '../lib/backupState'
 import { useEventStore } from '../lib/events'
-import { formatBytes, formatCount, formatEta, formatSpeed, formatWhen } from '../lib/format'
+import { formatBytes, formatCount, formatEta, formatSpeed } from '../lib/format'
+import { When } from '../components/When'
+import { SsdProgressLine } from '../components/backup/SsdProgressLine'
 import type {
   Analysis,
   BackupOverview,
@@ -276,8 +278,17 @@ export default function BackupPage() {
       )}
 
       <p role="status" data-testid="screen-state" className="text-lg font-medium">
-        {job?.state === 'stopping' ? 'Stopping after this file…' : STATE_LABEL[state]}
+        {job?.state === 'stopping'
+          ? 'Stopping after this file…'
+          : job?.state === 'replicating' && job.ssd
+            ? `Copying to SSD: ${formatCount(Math.max(0, job.ssd.known_files - job.ssd.files_done))} left`
+            : STATE_LABEL[state]}
       </p>
+      {running && job?.started_at != null && (
+        <p className="-mt-3 text-sm text-neutral-600 dark:text-neutral-400">
+          Started <When at={job.started_at} />
+        </p>
+      )}
 
       {state === 'not_connected' && (
         <p className="text-neutral-700 dark:text-neutral-300">
@@ -337,12 +348,14 @@ export default function BackupPage() {
               {job.bytes_total != null && ` of ${formatBytes(job.bytes_total)}`}
             </span>
           </div>
-          <div className="flex items-center gap-3">
-            <ProgressBar label="Overall progress" value={state === 'scanning' ? null : percent(job)} />
+          <div className="flex items-center gap-3 text-sm">
+            <span className="w-24 shrink-0">Phone → Mac</span>
+            <ProgressBar label="Phone → Mac" value={state === 'scanning' ? null : percent(job)} />
             {percent(job) != null && state !== 'scanning' && (
               <span className="w-12 text-right text-sm tabular-nums">{Math.round(percent(job) ?? 0)}%</span>
             )}
           </div>
+          {job.ssd && <SsdProgressLine ssd={job.ssd} pullDone={job.state === 'replicating'} />}
           {state === 'backing_up' && (job.speed_bps != null || job.eta_s != null) && (
             <p className="text-sm text-neutral-700 dark:text-neutral-300">
               {job.speed_bps != null && formatSpeed(job.speed_bps)}
@@ -529,7 +542,16 @@ export default function BackupPage() {
             </ul>
           )}
         </div>
-        <p className="text-sm">{lastBackup ? `Last backup: ${formatWhen(lastBackup)}` : 'No backup yet'}</p>
+        <p className="text-sm" data-testid="last-backup">
+          {lastBackup ? (
+            <>
+              Last backup: <When at={lastBackup} />
+              {savedSummary?.status && ` · ${savedSummary.status.headline}`}
+            </>
+          ) : (
+            'No backup yet'
+          )}
+        </p>
       </section>
 
       {showFailed && (

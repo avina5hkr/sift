@@ -1,5 +1,22 @@
 import { formatBytes, formatCount, formatDuration } from '../../lib/format'
-import type { BackupSummary, JobEvent } from '../../lib/types'
+import type { BackupOutcome, BackupSummary, JobEvent } from '../../lib/types'
+import { When } from '../When'
+
+const BADGE: Record<BackupOutcome['level'], { text: string; cls: string }> = {
+  none: { text: '', cls: '' },
+  complete: { text: 'Complete', cls: 'bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-200' },
+  ssd_pending: { text: 'SSD pending', cls: 'bg-amber-100 text-amber-950 dark:bg-amber-950 dark:text-amber-100' },
+  stopped: { text: 'Stopped', cls: 'bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100' },
+  failed: { text: 'Failed', cls: 'bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200' },
+  discarded: { text: 'Nothing copied', cls: 'bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100' },
+}
+
+/** A small badge with words, so colour is never the only signal. */
+export function StatusBadge({ level }: { level: BackupOutcome['level'] }) {
+  const b = BADGE[level]
+  if (!b.text) return null
+  return <span className={`rounded px-1.5 py-0.5 text-xs font-semibold ${b.cls}`}>{b.text}</span>
+}
 
 type Props = {
   /** The run that just ended in this window, if any; otherwise the saved summary alone. */
@@ -42,6 +59,31 @@ export function SummaryCard({ job, summary, onOpenFolder, openError }: Props) {
       <h2 id="summary-title" className="text-lg font-semibold">
         {heading(job, mine)}
       </h2>
+      {mine?.status && mine.status.level !== 'none' && (
+        <p data-testid="summary-status" className="mt-1 text-sm font-medium">
+          <StatusBadge level={mine.status.level} /> {mine.status.headline}
+        </p>
+      )}
+      {mine && (
+        <p className="mt-1 text-sm text-neutral-700 dark:text-neutral-300" data-testid="summary-times">
+          {mine.pull_finished_at != null ? (
+            <>
+              Phone → Mac <When at={mine.pull_finished_at} />
+            </>
+          ) : (
+            <>
+              Ended <When at={mine.finished_at} />
+            </>
+          )}
+          {mine.ssd?.finished_at != null && mine.ssd.state !== 'none' && (
+            <>
+              {' · Mac → SSD '}
+              <When at={mine.ssd.finished_at} />
+            </>
+          )}
+          {` · took ${formatDuration(mine.duration_s)}`}
+        </p>
+      )}
       {mine?.outcome === 'discarded' && (
         <p className="mt-1 text-sm">You chose not to go ahead, so nothing changed.</p>
       )}

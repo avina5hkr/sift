@@ -1,5 +1,15 @@
-import { expect, test } from 'vitest'
-import { formatAgo, formatBytes, formatCount, formatDuration, formatEta, formatSpeed, shortPath } from './format'
+import { describe, expect, test } from 'vitest'
+import {
+  formatAgo,
+  formatBytes,
+  formatCount,
+  formatDuration,
+  formatEta,
+  formatFull,
+  formatSpeed,
+  formatWhen,
+  shortPath,
+} from './format'
 
 test('formatBytes', () => {
   expect(formatBytes(0)).toBe('0 B')
@@ -42,4 +52,18 @@ test('shortPath drops the storage root and shortens the WhatsApp media folder', 
   expect(shortPath('/sdcard/WhatsApp/Media/WhatsApp Images/a.jpg')).toBe('WhatsApp/Media/WhatsApp Images/a.jpg')
   expect(shortPath('/sdcard/a.jpg')).toBe('a.jpg')
   expect(shortPath('/mnt/other/a.jpg')).toBe('/mnt/other/a.jpg')
+})
+
+describe('formatWhen, the one time format', () => {
+  const now = new Date(2026, 10, 15, 20, 0, 0)
+  const at = (y: number, m: number, d: number, hh: number, mm: number) => new Date(y, m, d, hh, mm).getTime() / 1000
+  test('today, yesterday, a date this year, and another year', () => {
+    expect(formatWhen(at(2026, 10, 15, 18, 47), now)).toBe('today at 18:47')
+    expect(formatWhen(at(2026, 10, 14, 9, 12), now)).toBe('yesterday at 09:12')
+    expect(formatWhen(at(2026, 10, 3, 18, 47), now)).toBe('3 Nov at 18:47')
+    expect(formatWhen(at(2025, 10, 15, 18, 47), now)).toBe('15 Nov 2025 at 18:47')
+  })
+  test('the full form for hovering', () => {
+    expect(formatFull(at(2026, 10, 15, 18, 47))).toMatch(/Sunday 15 November 2026, 18:47:00/)
+  })
 })

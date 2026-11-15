@@ -1,3 +1,4 @@
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -6,7 +7,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from sift.backup.lease import DRIVE_LEASE
+from sift.backup.outcome import backup_outcome, live_ssd_pending
 from sift.backup.replicator import writes_in_progress
+from sift.backup.summary import latest_summary
 from sift.core.jobs import TERMINAL
 from sift.core.migrations import schema_version
 from sift.device.tracker import ConnectionState, NoAdbReason
@@ -14,6 +17,7 @@ from sift.server.deps import Ctx
 from sift.server.errors import ApiError
 from sift.services.ssd import eject
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -63,6 +67,7 @@ class StatusResponse(BaseModel):
     ssd: SsdStatus | None = None  # None when no SSD watcher runs
     mac_folder: FolderStatus
     jobs: list[dict[str, Any]] = []
+    backup: dict[str, Any] | None = None  # the last backup's status line (`backup_outcome`)
 
 
 def _free_bytes(path: Path) -> int | None:
@@ -143,4 +148,17 @@ def get_status(ctx: Ctx) -> StatusResponse:
         ),
         mac_folder=_mac_folder(ctx.config.backup.mac_root),
         ssd=_ssd(ctx),
+        backup=_last_backup(ctx),
     )
+
+
+def _last_backup(ctx: Ctx) -> dict[str, Any] | None:
+    try:
+        return backup_outcome(
+            latest_summary(ctx.db),
+            live_ssd_pending(ctx),
+            ssd_chosen=bool(ctx.config.backup.ssd_volume_uuid),
+        ).as_dict()
+    except Exception:
+        logger.exception("Could not work out the last backup's status")
+        return None

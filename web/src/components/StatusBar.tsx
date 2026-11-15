@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ApiError, apiFetch } from '../lib/api'
 import { isRunning } from '../lib/backupState'
-import { formatBytes } from '../lib/format'
+import { formatBytes, formatCount } from '../lib/format'
 import { useEventStore } from '../lib/events'
 import type { DeviceStatus, SsdStatus, StatusResponse } from '../lib/types'
 import { Chip } from './Chip'
@@ -147,6 +147,15 @@ export function StatusBar({ status, onOpenSettings, onRetry, retrying = false, o
         </button>
       )}
       <SsdChip ssd={status?.ssd} onOpenSettings={onOpenSettings} onEjected={onEjected} />
+      {status?.backup?.level === 'ssd_pending' && status.backup.ssd_pending != null && (
+        <span
+          data-testid="ssd-pending"
+          title={status.backup.headline}
+          className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-950 dark:bg-amber-950 dark:text-amber-100"
+        >
+          SSD: {formatCount(status.backup.ssd_pending)} pending
+        </span>
+      )}
       <Chip onClick={onOpenSettings} title={folder?.path}>
         {folder ? macFolderLabel(folder) : 'Mac folder: checking'}
       </Chip>

@@ -45,6 +45,12 @@ def message_for(snap: JobSnapshot, summary: dict[str, Any] | None) -> tuple[str,
     if summary["outcome"] == "discarded":
         return "Backup ended", "You discarded the scan, so nothing was copied.", "info"
     stopped = summary["outcome"] == "stopped" or snap.stopped
+    ssd = summary.get("ssd") or {}
+    if ssd.get("state") in ("incomplete", "stopped", "failed") and ssd.get("pending_after"):
+        # never "complete" while the SSD lacks files, never "failed" for a good Mac backup
+        n = int(ssd["pending_after"])
+        parts.append(f"SSD: {_plural(n, 'file', 'files')} pending")
+        level = "warning"
     return ("Backup stopped" if stopped else "Backup finished"), ", ".join(parts) + ".", level
 
 

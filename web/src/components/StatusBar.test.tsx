@@ -187,3 +187,17 @@ test('the chip Retry is disabled while a request is pending', () => {
   render(<StatusBar status={device('held_by_other')} onRetry={vi.fn()} retrying />)
   expect(screen.getByRole('button', { name: 'Retry connecting to the phone' })).toBeDisabled()
 })
+
+test('an incomplete SSD copy shows as pending, never as complete or failed', () => {
+  render(
+    <StatusBar
+      status={{
+        ...status,
+        backup: { level: 'ssd_pending', headline: 'Mac complete · SSD: 120 files pending', finished_at: 1, ssd_pending: 120 },
+      }}
+    />,
+  )
+  expect(screen.getByTestId('ssd-pending')).toHaveTextContent('SSD: 120 pending')
+  render(<StatusBar status={{ ...status, backup: { level: 'complete', headline: 'Complete: Mac and SSD', finished_at: 1, ssd_pending: 0 } }} />)
+  expect(screen.getAllByTestId('ssd-pending')).toHaveLength(1)
+})

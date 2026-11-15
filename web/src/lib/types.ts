@@ -43,6 +43,7 @@ export type StatusResponse = {
   ssd: SsdStatus | null // null when no SSD is set up
   mac_folder: { path: string; exists: boolean; free_bytes: number | null }
   jobs: unknown[]
+  backup?: BackupOutcome | null // the last backup's status line
 }
 
 // Shape of every API error body.
@@ -85,6 +86,46 @@ export type JobEvent = {
   error: string | null
   started_at: number | null
   finished_at: number | null
+  ssd?: SsdProgress | null // the Mac → SSD copy alongside this backup
+}
+
+// Mirrors SsdProgress.snapshot() (src/sift/backup/ssdcopy.py).
+export type SsdProgress = {
+  state:
+    | 'waiting_drive'
+    | 'starting'
+    | 'waiting_access'
+    | 'copying'
+    | 'caught_up'
+    | 'paused'
+    | 'not_answering'
+    | 'stopped'
+    | 'done'
+    | 'incomplete'
+    | 'unplugged'
+    | 'full'
+    | 'other_drive'
+    | 'busy'
+    | 'failed'
+  files_done: number
+  bytes_done: number
+  known_files: number
+  known_bytes: number
+  backlog_files: number
+  deferred: number
+  current: string | null
+  current_size: number
+  current_done: number
+  speed_bps: number | null
+  reason: string | null
+}
+
+// The one status line for the last backup (src/sift/backup/outcome.py).
+export type BackupOutcome = {
+  level: 'none' | 'complete' | 'ssd_pending' | 'stopped' | 'failed' | 'discarded'
+  headline: string
+  finished_at: number | null
+  ssd_pending: number | null
 }
 
 export type ToastLevel = 'info' | 'warning' | 'error'
@@ -106,6 +147,17 @@ export type BackupSummary = {
   bytes: number
   warnings: string[]
   error: string | null
+  pull_finished_at?: number | null
+  ssd?: {
+    state: 'none' | 'complete' | 'incomplete' | 'stopped' | 'failed'
+    copied: number
+    bytes: number
+    deferred: number
+    pending_after: number | null
+    finished_at: number | null
+    reason: string | null
+  } | null
+  status?: BackupOutcome | null
 }
 
 export type FailedFile = {

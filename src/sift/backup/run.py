@@ -21,6 +21,7 @@ from pathlib import Path
 
 from sift.backup.destination import sanitize_label
 from sift.backup.lease import DRIVE_LEASE
+from sift.backup.outcome import forget_cached
 from sift.backup.places import one_place
 from sift.backup.puller import RECONNECT_PAUSE_S, Puller, PullStats, Target, pending_items
 from sift.backup.replicator import Dest, Replicator, load_dest
@@ -262,6 +263,7 @@ def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
         )
     finally:
         DRIVE_LEASE.release()
+        forget_cached()
         ctx.db.release_thread()
 
 
@@ -303,6 +305,7 @@ def run_backup(
         raise
     finally:
         ssd_outcome = _close_ssd(ctx, progress, stopped=outcome == "stopped")
+        forget_cached()
         if not dry_run:
             record_summary(
                 ctx.db,

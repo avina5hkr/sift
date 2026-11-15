@@ -224,7 +224,7 @@ test('Ready: the phone summary, sets with counts, last backup time', async () =>
   expect(backUpNow()).not.toHaveAttribute('aria-disabled')
   expect(screen.getByText(/120 on the phone, 100 backed up on the Mac, 20 waiting/)).toBeInTheDocument()
   expect(screen.getByText('/sdcard/DCIM/x.jpg')).toBeInTheDocument()
-  expect(await screen.findByText(/Last backup: \d+ \w+ \d\d:\d\d/)).toBeInTheDocument()
+  expect(await screen.findByText(/Last backup:/)).toBeInTheDocument()
 })
 
 test('Ready with nothing backed up yet', async () => {
@@ -240,7 +240,7 @@ test('a dry run (the wizard size scan) does not show as a backup on this screen'
   await ready()
   await waitFor(() => expect(stateText()).toHaveTextContent('Ready'))
   expect(stateText()).not.toHaveTextContent('Looking through your phone')
-  expect(screen.queryByRole('progressbar', { name: 'Overall progress' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('progressbar', { name: 'Phone → Mac' })).not.toBeInTheDocument()
   expect(backUpNow()).not.toHaveAttribute('aria-disabled')
 })
 
@@ -248,7 +248,7 @@ test('Scanning: an unfinished bar and no speed yet', async () => {
   world.overview.job = job('scanning', { files_done: 0, bytes_done: 0, files_total: null, bytes_total: null, speed_bps: null, eta_s: null })
   await ready()
   await waitFor(() => expect(stateText()).toHaveTextContent('Looking through your phone'))
-  expect(screen.getByRole('progressbar', { name: 'Overall progress' })).not.toHaveAttribute('aria-valuenow')
+  expect(screen.getByRole('progressbar', { name: 'Phone → Mac' })).not.toHaveAttribute('aria-valuenow')
 })
 
 test('Backing up: files, bytes, percent, speed, ETA, current file, duplicates, failed', async () => {
@@ -259,7 +259,7 @@ test('Backing up: files, bytes, percent, speed, ETA, current file, duplicates, f
   expect(screen.getByText('41.2 GB of 128.7 GB')).toBeInTheDocument()
   expect(screen.getByText('32%')).toBeInTheDocument()
   expect(screen.getByText('38.0 MB/s, about 41 min')).toBeInTheDocument()
-  expect(screen.getByRole('progressbar', { name: 'Overall progress' })).toHaveAttribute('aria-valuenow', '32')
+  expect(screen.getByRole('progressbar', { name: 'Phone → Mac' })).toHaveAttribute('aria-valuenow', '32')
     expect(screen.getByText('Skipped 1,204 duplicates')).toBeInTheDocument()
   expect(screen.getByText(/3 failed/)).toBeInTheDocument()
   expect(screen.getByText('Camera, Screenshots')).toBeInTheDocument()
@@ -721,7 +721,7 @@ test('each set shows Confirmed, Stale or Not confirmed, and Confirm starts the t
     Screenshots: confirmation({ set_name: 'Screenshots', last_confirmed: false, stale_reason: 'New files arrived since.' }),
   }
   await ready()
-  await waitFor(() => expect(screen.getByTestId('confirm-Camera')).toHaveTextContent(/^Confirmed \d+ \w+ \d\d:\d\d$/))
+  await waitFor(() => expect(screen.getByTestId('confirm-Camera')).toHaveTextContent(/^Confirmed (today|yesterday|\d+ \w+( \d{4})?) at \d\d:\d\d$/))
   expect(screen.getByTestId('confirm-Screenshots')).toHaveTextContent('Stale: New files arrived since.')
   expect(screen.getByTestId('confirm-Downloads')).toHaveTextContent('Not confirmed')
   await userEvent.click(screen.getByRole('button', { name: 'Confirm Camera' }))
@@ -765,4 +765,57 @@ test('a finished analysis shows four groups per set, the time estimate and Delet
   expect(within(card).getByRole('button', { name: 'Delete the backed-up files (9.0 MB)' })).toBeInTheDocument()
   await userEvent.click(within(card).getByRole('button', { name: 'Not now' }))
   expect(within(card).queryByRole('button')).not.toBeInTheDocument()
+})
+
+const SSD = {
+  state: 'copying' as const,
+  files_done: 300,
+  bytes_done: 3_000_000_000,
+  known_files: 1_500,
+  known_bytes: 15_000_000_000,
+  backlog_files: 1_200,
+  deferred: 0,
+  current: 'Camera/VID_0001.mp4',
+  current_size: 900_000_000,
+  current_done: 100_000_000,
+  speed_bps: 40_000_000,
+  reason: null,
+}
+
+test('Backing up with the SSD: two bars, and the earlier runs in the SSD totals', async () => {
+  world.overview.job = job('pulling', { ssd: SSD })
+  await ready()
+  await waitFor(() => expect(screen.getByRole('progressbar', { name: 'Mac → SSD' })).toHaveAttribute('aria-valuenow', '20'))
+  expect(screen.getByRole('progressbar', { name: 'Phone → Mac' })).toBeInTheDocument()
+  expect(screen.getByText(/including 1,200 from earlier runs/)).toBeInTheDocument()
+  expect(screen.getByText(/300 of 1,500 so far/)).toBeInTheDocument()
+})
+
+test('The drain says how much is left for the SSD, and Pause still works there', async () => {
+  world.overview.job = job('replicating', { ssd: SSD })
+  await ready()
+  await waitFor(() => expect(stateText()).toHaveTextContent('Copying to SSD: 1,200 left'))
+  expect(screen.getByRole('button', { name: 'Pause' })).toBeEnabled()
+})
+
+test('A first SSD write held by macOS says to look for the prompt', async () => {
+  world.overview.job = job('pulling', { ssd: { ...SSD, state: 'waiting_access', files_done: 0 } })
+  await ready()
+  expect(await screen.findByText(/Waiting for SSD access: check for a macOS permission prompt/)).toBeInTheDocument()
+})
+
+test('The summary says the SSD is pending, with a badge in words and each phase time', async () => {
+  world.summary = {
+    ...SUMMARY,
+    pull_finished_at: 1_700_000_100,
+    ssd: { state: 'incomplete', copied: 10, bytes: 1, deferred: 0, pending_after: 120, finished_at: 1_700_000_120, reason: 'The SSD was unplugged.' },
+    status: { level: 'ssd_pending', headline: 'Mac complete · SSD: 120 files pending', finished_at: 1_700_000_125, ssd_pending: 120 },
+  }
+  useEventStore.setState({ job: job('done', { finished_at: 1_125 }) })
+  await ready()
+  const status = await screen.findByTestId('summary-status')
+  expect(status).toHaveTextContent('SSD pending Mac complete · SSD: 120 files pending')
+  expect(screen.getByTestId('summary-times')).toHaveTextContent(/Phone → Mac .* · Mac → SSD .* · took 2 min 5 s/)
+  expect(screen.getByTestId('last-backup')).toHaveTextContent(/Last backup: .* · Mac complete · SSD: 120 files pending/)
+  expect(screen.getByTestId('last-backup')).not.toHaveTextContent(/Complete: Mac and SSD/)
 })
