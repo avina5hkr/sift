@@ -24,6 +24,9 @@ behaviour.
   when it was checked and whether a later backup made it out of date, apart from a check going on
   ("Checking now: 2,200 of 51,106"); a "Not checked yet" group; a stacked bar and a badge in
   words per set, problems first; Hide details folds it.
+- The analysis says where a file really is: "On the Mac, not on the SSD yet" (or the other way)
+  instead of "Not backed up", which now means on no backup at all. Only files on every required
+  backup count as backed up and verified, as before.
 - Times in one format ("today at 18:47"), with the full date on hover; each phase's finish time;
   each set's last copied file, apart from its confirmation.
 - Settings, General, Storage locations: the data folder, settings file, database, Mac backup

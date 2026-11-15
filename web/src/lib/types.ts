@@ -316,6 +316,8 @@ export type AnalyseSet = {
   not_backed_up: AnalyseGroup
   problems: AnalyseGroup
   unchecked?: AnalyseGroup // same size as stored content, not hashed yet
+  mac_only?: AnalyseGroup // safe on the Mac, not yet on the SSD
+  ssd_only?: AnalyseGroup // safe on the SSD, not yet on the Mac
 }
 export type AnalysisResult = {
   sets: Record<string, AnalyseSet>

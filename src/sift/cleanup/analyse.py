@@ -6,7 +6,9 @@ phone's own hash decides (names are never proof). Four groups per set, with coun
 
 - **verified**: the phone's hash equals content that has a replica on every required destination;
 - **not_verified**: same size as an adopted file that is not hashed yet (still being checked);
-- **not_backed_up**: no match, or a copy is missing on a required destination;
+- **mac_only** / **ssd_only**: safely on one backup, not yet on the other required one (the SSD
+  copy is behind, say). Deleting from the phone still needs both, so these are not verified;
+- **not_backed_up**: on no backup at all;
 - **problems**: the phone's hash matches content listed under Problems (damaged copy);
 - **unchecked**: same size as stored content, not hashed yet (a run still going, or stopped).
   "Not backed up" always means checked and missing.
@@ -63,6 +65,8 @@ class SetResult:
     not_backed_up: Group = field(default_factory=Group)
     problems: Group = field(default_factory=Group)
     unchecked: Group = field(default_factory=Group)
+    mac_only: Group = field(default_factory=Group)  # on the Mac, not yet on the SSD
+    ssd_only: Group = field(default_factory=Group)  # on the SSD, not yet on the Mac
 
 
 @dataclass
@@ -99,7 +103,7 @@ def scope_key(config: Config, set_names: Sequence[str]) -> str:
 
 def _index(
     db: Database, config: Config, required: list[str]
-) -> tuple[dict[int, set[str]], set[str], set[int], set[str]]:
+) -> tuple[dict[int, set[str]], set[str], set[int], set[str], dict[str, set[str]]]:
     """Sizes -> stored hashes; hashes on every required destination; sizes of provisional
     adopted files; hashes with an open problem."""
     with db.read() as conn:
@@ -130,7 +134,7 @@ def _index(
         ):
             sizes.setdefault(int(size), set()).add(str(digest))
     full = {h for h, k in where.items() if all(kind in k for kind in required)}
-    return sizes, full, provisional, problems
+    return sizes, full, provisional, problems, where
 
 
 def analyse(
@@ -154,7 +158,7 @@ def analyse(
     picked = {n.casefold() for n in set_names}
     result.left_out_sets = [s.name for s in config.backup.sets if s.name.casefold() not in picked]
     result.total_files = len(listing.files)
-    sizes, full, provisional, problem_hashes = _index(db, config, required_kinds(config))
+    sizes, full, provisional, problem_hashes, where = _index(db, config, required_kinds(config))
     candidates: list[tuple[str, int, str]] = []  # (path, size, set)
     for path, (entry, set_name) in sorted(listing.files.items()):
         res = result.sets.setdefault(set_name, SetResult())
@@ -188,6 +192,10 @@ def analyse(
                 res.problems.add(size)
             elif digest is not None and digest in full:
                 res.verified.add(size)
+            elif digest is not None and "mac" in where.get(digest, ()):
+                res.mac_only.add(size)  # safe on the Mac; the SSD copy is still to come
+            elif digest is not None and "ssd" in where.get(digest, ()):
+                res.ssd_only.add(size)  # safe on the SSD; the Mac copy is still to come
             elif size in provisional:
                 res.not_verified.add(size)
             else:

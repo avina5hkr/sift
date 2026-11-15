@@ -7,11 +7,13 @@ import { DeleteFlow } from '../delete/DeleteFlow'
 import { useDeleteRun } from '../delete/useDeleteRun'
 import { When } from '../When'
 
-type Key = 'verified' | 'not_verified' | 'unchecked' | 'not_backed_up' | 'problems'
+type Key = 'verified' | 'mac_only' | 'ssd_only' | 'not_verified' | 'unchecked' | 'not_backed_up' | 'problems'
 
 // In the order the stacked bar draws them. Colour is never the only signal: each has words.
 const GROUPS: { key: Key; label: string; bar: string }[] = [
   { key: 'verified', label: 'Backed up and verified', bar: 'bg-green-600' },
+  { key: 'mac_only', label: 'On the Mac, not on the SSD yet', bar: 'bg-teal-500' },
+  { key: 'ssd_only', label: 'On the SSD, not on the Mac yet', bar: 'bg-teal-300' },
   { key: 'not_verified', label: 'Not verified yet', bar: 'bg-sky-500' },
   { key: 'unchecked', label: 'Not checked yet', bar: 'bg-neutral-400 dark:bg-neutral-500' },
   { key: 'not_backed_up', label: 'Not backed up', bar: 'bg-amber-500' },
@@ -28,6 +30,8 @@ function sum(sets: AnalyseSet[]): AnalyseSet {
     sets.reduce((g, s) => ({ files: g.files + group(s, k).files, bytes: g.bytes + group(s, k).bytes }), EMPTY)
   return {
     verified: total('verified'),
+    mac_only: total('mac_only'),
+    ssd_only: total('ssd_only'),
     not_verified: total('not_verified'),
     unchecked: total('unchecked'),
     not_backed_up: total('not_backed_up'),
@@ -44,12 +48,16 @@ function badge(set: AnalyseSet): Badge {
     return { rank: 0, icon: '✕', text: `${formatCount(n('problems'))} with problems`, cls: 'bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-200' }
   if (n('not_backed_up'))
     return { rank: 1, icon: '!', text: `${formatCount(n('not_backed_up'))} not backed up`, cls: 'bg-amber-100 text-amber-950 dark:bg-amber-950 dark:text-amber-100' }
+  if (n('mac_only') || n('ssd_only')) {
+    const where = n('mac_only') ? 'not on the SSD yet' : 'not on the Mac yet'
+    return { rank: 2, icon: '◑', text: `${formatCount(n('mac_only') + n('ssd_only'))} ${where}`, cls: 'bg-teal-100 text-teal-950 dark:bg-teal-950 dark:text-teal-100' }
+  }
   if (n('unchecked'))
-    return { rank: 2, icon: '…', text: `${formatCount(n('unchecked'))} not checked yet`, cls: 'bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100' }
+    return { rank: 3, icon: '…', text: `${formatCount(n('unchecked'))} not checked yet`, cls: 'bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100' }
   if (n('not_verified'))
-    return { rank: 3, icon: '◐', text: `${formatCount(n('not_verified'))} not verified yet`, cls: 'bg-sky-100 text-sky-950 dark:bg-sky-950 dark:text-sky-100' }
-  if (n('verified')) return { rank: 4, icon: '✓', text: 'All backed up', cls: 'bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-200' }
-  return { rank: 5, icon: '–', text: 'No files', cls: 'bg-neutral-100 text-neutral-700 dark:bg-neutral-900 dark:text-neutral-300' }
+    return { rank: 4, icon: '◐', text: `${formatCount(n('not_verified'))} not verified yet`, cls: 'bg-sky-100 text-sky-950 dark:bg-sky-950 dark:text-sky-100' }
+  if (n('verified')) return { rank: 5, icon: '✓', text: 'All backed up', cls: 'bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-200' }
+  return { rank: 6, icon: '–', text: 'No files', cls: 'bg-neutral-100 text-neutral-700 dark:bg-neutral-900 dark:text-neutral-300' }
 }
 
 function BadgeChip({ set }: { set: AnalyseSet }) {
@@ -233,6 +241,8 @@ export function AnalysisCard({ latest }: { latest: LatestAnalyses }) {
           </div>
           <p className="mt-1 text-sm">
             {formatCount(totals.verified.files)} of {formatCount(allFiles)} files backed up and verified
+            {group(totals, 'mac_only').files > 0 && ` · ${formatCount(group(totals, 'mac_only').files)} on the Mac, not on the SSD yet`}
+            {group(totals, 'ssd_only').files > 0 && ` · ${formatCount(group(totals, 'ssd_only').files)} on the SSD, not on the Mac yet`}
             {totals.not_backed_up.files > 0 && ` · ${formatCount(totals.not_backed_up.files)} not backed up`}
             {totals.problems.files > 0 && ` · ${formatCount(totals.problems.files)} with problems`}
           </p>

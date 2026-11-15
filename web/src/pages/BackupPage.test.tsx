@@ -881,3 +881,13 @@ test('files deferred for the next run are not counted as left', async () => {
   await waitFor(() => expect(stateText()).toHaveTextContent('Copying to SSD: 1,000 left'))
   expect(screen.getByText(/200 could not be copied this time/)).toBeInTheDocument()
 })
+
+test('files safe on the Mac but not yet on the SSD say exactly that, never "not backed up"', async () => {
+  const set = { verified: g(10, 1), mac_only: g(120, 5_000_000), ssd_only: g(0, 0), not_verified: g(0, 0), not_backed_up: g(0, 0), problems: g(0, 0), unchecked: g(0, 0) }
+  world.analysis = { completed: { ...DONE, result: { ...DONE.result!, sets: { Camera: set } } }, stale_reason: null, active: null, ended: null }
+  await ready()
+  const done = await screen.findByTestId('analysis-completed')
+  expect(done).toHaveTextContent('10 of 130 files backed up and verified · 120 on the Mac, not on the SSD yet')
+  expect(done).not.toHaveTextContent('not backed up')
+  expect(within(done).getAllByText('120 not on the SSD yet').length).toBeGreaterThan(0)
+})

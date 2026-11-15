@@ -170,3 +170,21 @@ def test_an_analysis_left_running_by_a_quit_is_stopped_at_start_and_never_shown_
             conn.execute("SELECT count(*) FROM analysis_run WHERE state = 'running'").fetchone()[0]
             == 0
         )
+
+
+def test_files_on_the_mac_but_not_yet_on_the_ssd_say_so_and_are_never_not_backed_up(
+    rig: Rig,
+) -> None:
+    backed_up(rig, ["Camera"])  # on the Mac only
+    rig.ctx.config.backup.ssd_volume_uuid = "uuid-ssd"  # an SSD is chosen: both are required
+    with rig.ctx.db.tx() as conn:
+        conn.execute(
+            "INSERT INTO destination (kind, root_path, volume_uuid) "
+            "VALUES ('ssd', '/x', 'uuid-ssd')"
+        )
+    rig.transport.phone.add_file(CAMERA + "new_1.jpg", b"brand new one", mtime=1_700_000_000)
+    cam = analyse(rig.ctx.db, rig.ctx.config, rig.transport, ["Camera"]).sets["Camera"]
+    total = sum(1 for p in rig.transport.phone.files if p.startswith(CAMERA))
+    assert cam.mac_only.files == total - 1  # safe on the Mac, the SSD copy still to come
+    assert cam.not_backed_up.files == 1  # only the new file is on no backup at all
+    assert cam.verified.files == 0 and cam.ssd_only.files == 0
