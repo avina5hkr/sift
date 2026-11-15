@@ -367,6 +367,13 @@ def recover_at_startup(ctx: AppContext) -> None:
         reconcile(ctx)
     except Exception:
         _log.exception("Delete-run recovery at startup failed")
+    try:  # a backup Sift quit in the middle of has a summary that says so (plan G7)
+        from sift.backup.summary import summarize_unfinished
+        from sift.core.jobs import STALE_MESSAGE
+
+        summarize_unfinished(ctx.db, int(time.time()), STALE_MESSAGE)
+    except Exception:
+        _log.exception("Backup-summary recovery at startup failed")
 
 
 def build_jobs(ctx: AppContext, notifier: Notifier | None = None) -> JobManager:

@@ -441,3 +441,62 @@ def test_p3_a_later_run_keeps_every_file_of_the_earlier_run(rig: Rig) -> None:
     finished(jobs, jobs.start_backup(ENABLED_SMALL))
     second = tree(rig.root)
     assert all(second.get(rel) == data for rel, data in first.items())  # I1
+
+
+def _ssd_columns(rig: Rig) -> tuple:
+    with rig.ctx.db.read() as conn:
+        return conn.execute(
+            "SELECT outcome, ssd_state, ssd_copied, ssd_pending_after, pull_finished_at, "
+            "ssd_finished_at, ssd_reason FROM run_summary ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+
+def test_the_summary_says_the_ssd_part_was_complete(rig: Rig, tmp_path: Path) -> None:
+    rig.ctx.ssd = FakeSsd(rig, tmp_path / "ssd" / "backup")  # type: ignore[assignment]
+    jobs = rig.jobs()
+    snap = finished(jobs, jobs.start_backup(ENABLED_SMALL))
+    outcome, state, copied, pending, pull_at, ssd_at, _reason = _ssd_columns(rig)
+    assert snap.state is JobState.done and outcome == "done"
+    assert state == "complete" and copied > 0 and pending == 0
+    assert pull_at is not None and ssd_at is not None and ssd_at >= pull_at
+
+
+def test_an_unplugged_ssd_leaves_a_done_run_with_the_ssd_part_incomplete(
+    rig: Rig, tmp_path: Path
+) -> None:
+    fake = FakeSsd(rig, tmp_path / "ssd" / "backup")
+    fake.connected = False
+    rig.ctx.ssd = fake  # type: ignore[assignment]
+    jobs = rig.jobs()
+    snap = finished(jobs, jobs.start_backup(ENABLED_SMALL))
+    outcome, state, _copied, pending, *_ = _ssd_columns(rig)
+    assert snap.state is JobState.done and outcome == "done"  # a good Mac backup is not failed
+    assert state == "incomplete" and pending and pending > 0
+
+
+def test_a_backup_without_an_ssd_chosen_has_no_ssd_part(rig: Rig) -> None:
+    jobs = rig.jobs()
+    finished(jobs, jobs.start_backup(ENABLED_SMALL))
+    assert _ssd_columns(rig)[1] == "none"
+
+
+def test_a_run_sift_quit_in_the_middle_of_gets_a_stopped_summary_at_start(rig: Rig) -> None:
+    from sift.backup.summary import latest_summary, summarize_unfinished
+
+    db = rig.ctx.db
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT INTO destination (kind, root_path, volume_uuid) VALUES ('ssd', '/x', 'U')"
+        )
+        conn.execute(
+            "INSERT INTO job (type, state, params, started_at) VALUES "
+            "('backup', 'failed', '{\"sets\": [\"Camera\"], \"dry_run\": false}', 100)"
+        )
+        conn.execute(
+            "INSERT INTO job (type, state, params, started_at) VALUES "
+            "('backup', 'failed', '{\"sets\": [\"Camera\"], \"dry_run\": true}', 200)"
+        )
+    assert summarize_unfinished(db, 300, "Sift was closed before this backup finished.") == 1
+    s = latest_summary(db)
+    assert s is not None and s["outcome"] == "stopped" and s["ssd"]["state"] == "stopped"
+    assert summarize_unfinished(db, 400, "again") == 0  # never twice

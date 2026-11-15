@@ -181,6 +181,7 @@ class JobSnapshot:
     started_at: int | None
     finished_at: int | None
     current_files: tuple[CurrentFile, ...] = ()  # up to MAX_CURRENT_FILES files in flight
+    ssd: dict[str, Any] | None = None  # the Mac → SSD copy alongside this backup, when any
 
     def as_event(self) -> dict[str, Any]:
         data = asdict(self)
@@ -224,6 +225,8 @@ class _Job:
         self.started_at: int | None = None
         self.finished_at: int | None = None
         self.thread: threading.Thread | None = None
+        # The SSD copy's progress (its own lock inside; called under `cond`, never the reverse).
+        self.ssd_source: Callable[[], dict[str, Any]] | None = None
         # Snapshots are numbered under `cond`; `write_lock` orders their persisting. It is never
         # held while taking `cond`, and nobody holding the database write lock takes it.
         self.seq = 0
@@ -255,6 +258,7 @@ class _Capture:
     started_at: int | None
     finished_at: int | None
     current_files: tuple[CurrentFile, ...] = ()
+    ssd: dict[str, Any] | None = None
 
 
 class JobControl:
@@ -371,6 +375,35 @@ class JobControl:
                 job.samples.popleft()
             if job.last_published is None or now - job.last_published >= PROGRESS_INTERVAL_S:
                 job.last_published = now
+                capture = mgr._capture(job)
+        mgr._flush(job, capture)
+
+    def wait_while_paused(self, timeout_s: float = 1.0) -> bool:
+        """For a helper thread of the job (the SSD worker): wait up to `timeout_s` while a pause
+        is asked for, without changing the job's state (only the job's own thread does that).
+        Returns True while still paused. Never writes, so it is safe from any thread."""
+        job = self._job
+        with job.cond:
+            if job.pause_requested and not job.stop_requested and not job.abandoned:
+                job.cond.wait(timeout_s)
+            return job.pause_requested and not job.stop_requested and not job.abandoned
+
+    def set_ssd_source(self, source: Callable[[], dict[str, Any]] | None) -> None:
+        """Where snapshots read the SSD copy's progress from (`None`: no SSD block)."""
+        with self._job.cond:
+            self._job.ssd_source = source
+
+    def refresh(self) -> None:
+        """Publish the job as it is now (throttled like `report`), e.g. while only the SSD copy
+        moves. Call it from the job's own thread."""
+        self._guard()
+        mgr, job = self._mgr, self._job
+        capture = None
+        with job.cond:
+            if job.abandoned:
+                return
+            now = mgr._clock.monotonic()
+            if job.last_published is None or now - job.last_published >= PROGRESS_INTERVAL_S:
                 capture = mgr._capture(job)
         mgr._flush(job, capture)
 
@@ -873,6 +906,7 @@ class JobManager:
             failed=job.failed,
             current=job.current,
             current_files=job.current_files,
+            ssd=None if job.ssd_source is None else job.ssd_source(),
             measured_speed=self._measured_speed(job),
             pause_requested=job.pause_requested,
             stopped=job.stopped,
@@ -985,6 +1019,7 @@ class JobManager:
             error=c.error,
             started_at=c.started_at,
             finished_at=c.finished_at,
+            ssd=c.ssd,
         )
 
     @staticmethod

@@ -10,6 +10,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from sift.backup.lease import DRIVE_LEASE
 from sift.backup.problems import add_problem
 from sift.backup.replicator import Dest, Replicator, SourceCorrupt, load_dest, ssd_writing
 from sift.backup.staging import regular_file_sha256
@@ -139,7 +140,7 @@ def repair(
         if source is None or not source.root.is_dir():
             continue
         try:
-            with ssd_writing():
+            with DRIVE_LEASE.hold("repair"), ssd_writing():  # one writer per drive at a time
                 final, _reused = replicator.copy_one(
                     source, target, str(digest), str(src_rel), int(size)
                 )

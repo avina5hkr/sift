@@ -14,6 +14,7 @@ from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
 from sift.backup.scanner import ScanNotPending
+from sift.backup.ssdcopy import SsdCopyEnded, SsdCopyStopped
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.backup.verifier import NothingToRepairFrom
 from sift.cleanup.calibration import NothingToCalibrate
@@ -96,6 +97,8 @@ _SENTENCES: tuple[tuple[type[BaseException], str], ...] = (
     (AdbPortBusy, "Another program is using adb's port and is not answering."),
     (AlreadyRunningError, "Sift is already running."),
     (SsdBusy, BUSY_MESSAGE),
+    (SsdCopyStopped, "The copy to the SSD was stopped."),
+    (SsdCopyEnded, "The copy to the SSD did not finish; the rest is copied next time."),
     (TaskBusy, "Sift is busy with another task. Try again when it has finished."),
     (BusClosed, "Sift is closing."),
     (NoPhone, "Connect your phone to start a backup."),

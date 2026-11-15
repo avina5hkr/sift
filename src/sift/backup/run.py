@@ -27,6 +27,8 @@ from sift.backup.replicator import Dest, Replicator, load_dest
 from sift.backup.scanner import ScanResult, scan, space_check
 from sift.backup.sets import resolve_roots
 from sift.backup.skiprules import SkipRules
+from sift.backup.ssdcopy import SsdCopy, SsdOutcome
+from sift.backup.staging import sweep_staging
 from sift.backup.summary import record_summary
 from sift.cleanup.candidates import rebuild_exact
 from sift.core.clock import Clock, SystemClock
@@ -119,6 +121,8 @@ class _Progress:
     device_id: int | None = None
     warnings: list[str] = field(default_factory=list)
     discarded: bool = False  # the owner discarded the scan the guard held: nothing was copied
+    ssd: SsdCopy | None = None  # the SSD copy alongside the pull, when an SSD is chosen
+    pull_finished_at: int | None = None
 
 
 def ssd_dest(ctx: AppContext) -> Dest | None:
@@ -160,43 +164,74 @@ def ssd_pending(ctx: AppContext, mac: Dest) -> int:
         )
 
 
-def replicate_to_ssd(
-    ctx: AppContext, ctl: JobControl, progress: _Progress, clock: Clock | None = None
-) -> None:
-    """After the pull: bring the SSD and the Mac to the same content, or note what is pending."""
-    if not ctx.config.backup.ssd_volume_uuid:
-        return  # no SSD chosen in setup: the Mac is the only destination
-    target = mac_target(ctx.db, ctx.config)
-    mac = Dest(target.dest_id, "mac", target.root)
+def _ssd_for_run(ctx: AppContext, mac: Dest, progress: _Progress) -> Dest | None:
+    """The plugged-in SSD to copy to alongside this run, or None (not plugged in, or a folder
+    on the Mac's own drive, which is not a second copy)."""
     ssd = ssd_dest(ctx)
     if ssd is not None and one_place(mac.root, ssd.root):
         progress.warnings.append(
             "The SSD folder is on the same drive as the Mac folder, so it is not a second copy. "
             "Choose a folder on the SSD in Settings."
         )
+        progress.ssd = None
+        return None
+    return ssd
+
+
+def locate_ssd(ctx: AppContext) -> Callable[[], Dest | None]:
+    """Find the configured SSD again by its volume UUID (after a rename or a remount)."""
+
+    def locate() -> Dest | None:
+        watcher = ctx.ssd
+        poll = getattr(watcher, "poll_once", None)
+        if poll is not None:
+            poll(force=True)
+        return ssd_dest(ctx)
+
+    return locate
+
+
+def finish_ssd(
+    ctx: AppContext, ctl: JobControl, progress: _Progress, clock: Clock | None = None
+) -> None:
+    """After the pull: let the SSD copy finish (the drain), then copy SSD → Mac what the Mac
+    lacks (the reverse phase), or note what is pending."""
+    copy = progress.ssd
+    if copy is None or copy.mac is None:
         return
-    if ssd is None or not DRIVE_LEASE.acquire("backup", timeout_s=0):
+    mac = copy.mac
+    worker = copy.worker
+    if worker is None:
         pending_now = ssd_pending(ctx, mac)
         if pending_now:
             progress.warnings.append(f"Mac done, SSD pending: {pending_now} files.")
         return
-    try:
+    if copy.running():
         ctl.set_state(JobState.replicating)
-        to_ssd, to_mac = Replicator(ctx.db, clock=clock).replicate_union(
-            mac, ssd, should_stop=lambda: ctl.stop_requested
-        )
-    finally:
-        DRIVE_LEASE.release()
-    corrupt = to_ssd.corrupt + to_mac.corrupt
-    failed = to_ssd.failed + to_mac.failed
+        copy.drain()
+    corrupt = failed = 0
+    if worker.end_state in ("done", "incomplete") and DRIVE_LEASE.acquire("backup", timeout_s=0):
+        try:
+            ctl.set_state(JobState.replicating)
+            to_mac = Replicator(ctx.db, clock=clock).replicate(
+                worker.ssd, mac, should_stop=lambda: ctl.stop_requested, before_file=ctl.checkpoint
+            )
+            corrupt, failed = to_mac.corrupt, to_mac.failed
+        finally:
+            DRIVE_LEASE.release()
     if corrupt:
         progress.warnings.append(
             f"{corrupt} backed-up files did not match their checksum. See Backup, Problems."
         )
+    failed += len(worker.deferred)
     if failed:
         progress.warnings.append(
             f"{failed} files could not be copied to the SSD; they will be tried again."
         )
+    if worker.end_state not in ("done", "incomplete") or worker.reason:
+        pending_now = ssd_pending(ctx, mac)
+        if pending_now:
+            progress.warnings.append(f"Mac done, SSD pending: {pending_now} files.")
 
 
 def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
@@ -212,6 +247,7 @@ def replicate_now(ctx: AppContext, should_stop: Callable[[], bool]) -> None:
     if ssd is None or not DRIVE_LEASE.acquire("plug-in replication", timeout_s=0):
         return  # a backup run is replicating already
     try:
+        sweep_staging(ssd.staging)  # the lease holder clears unfinished copies (G5)
         ctx.bus.publish("replication", {"state": "running"})
         to_ssd, to_mac = Replicator(ctx.db).replicate_union(mac, ssd, should_stop=should_stop)
         ctx.bus.publish(
@@ -250,11 +286,13 @@ def run_backup(
     clock = clock or SystemClock()
     started = clock.now()
     progress = _Progress()
+    if not dry_run and ctx.config.backup.ssd_volume_uuid:
+        progress.ssd = SsdCopy(ctx.db, ctl, clock=clock, locate=locate_ssd(ctx))
     outcome = "failed"
     try:
         result = _run(ctx, ctl, sets, dry_run, clock, sleep, reconnect_pause_s, progress)
         if not dry_run and not ctl.stop_requested:
-            replicate_to_ssd(ctx, ctl, progress, clock)
+            finish_ssd(ctx, ctl, progress, clock)
         if not dry_run and progress.device_id is not None:
             rebuild_exact(ctx.db, progress.device_id)  # Review always matches the phone now
         # A stop asked for just as the run ended is still a stop, not a plain "done".
@@ -264,6 +302,7 @@ def run_backup(
         outcome = "stopped"
         raise
     finally:
+        ssd_outcome = _close_ssd(ctx, progress, stopped=outcome == "stopped")
         if not dry_run:
             record_summary(
                 ctx.db,
@@ -276,7 +315,23 @@ def run_backup(
                 finished_at=clock.now(),
                 stats=progress.stats,
                 warnings=progress.warnings,
+                pull_finished_at=progress.pull_finished_at,
+                ssd=ssd_outcome,
             )
+
+
+def _close_ssd(ctx: AppContext, progress: _Progress, *, stopped: bool) -> SsdOutcome | None:
+    """End the SSD copy however the run ended, and say how its part went."""
+    copy = progress.ssd
+    if copy is None:
+        return None
+    try:
+        copy.close()
+        pending_now = ssd_pending(ctx, copy.mac) if copy.mac is not None else None
+        return copy.outcome(stopped=stopped, pending_after=pending_now)
+    except Exception:
+        log.exception("Could not finish the SSD part of the run")
+        return SsdOutcome(state="failed", reason="The SSD copy could not be finished.")
 
 
 def _run(
@@ -342,6 +397,9 @@ def _run(
     if problem is not None:
         raise JobRefused(problem)
 
+    if progress.ssd is not None:
+        mac = Dest(target.dest_id, "mac", target.root)
+        progress.ssd.start(mac, _ssd_for_run(ctx, mac, progress))
     ctl.set_state(JobState.pulling)
     puller = Puller(
         db,
@@ -351,8 +409,14 @@ def _run(
         describe=describe,
         readers=reader_count(config, session),
         reconnect_pause_s=reconnect_pause_s,
+        on_copied=None if progress.ssd is None else progress.ssd.ring,
     )
-    stats = puller.run(ctl, items, progress.stats)
+    try:
+        stats = puller.run(ctl, items, progress.stats)
+    finally:
+        progress.pull_finished_at = clock.now()
+        if progress.ssd is not None:
+            progress.ssd.pull_finished()
     log.info(
         "Backup: %s",
         json.dumps({k: v for k, v in stats.__dict__.items() if k != "warnings"}),

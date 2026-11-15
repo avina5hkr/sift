@@ -3,11 +3,12 @@
 Whoever copies to or from the backup folders (a backup's SSD copy, a plug-in replication) or
 moves files inside them (quarantine, chat-backup deletes, restores) holds the lease meanwhile.
 
-The lease is held for as long as any thread that may still write to a drive is alive. When a
-backup gives up on an SSD copy that is stuck inside the operating system (a permission prompt,
-a hung drive), it hands the lease to that thread instead of releasing it; the thread releases
-it on its way out, if its call ever returns. Until then, Eject, "Safe to unplug" and every other
-holder see the drive as busy: a second writer never starts beside a stuck one.
+The lease is held for as long as any thread that may still write to a drive is alive. A
+backup's SSD copy takes it on its own thread and releases it on its way out; when the backup
+gives up on that copy because it is stuck inside the operating system (a permission prompt, a
+hung drive), the lease stays with the stuck thread, marked as stuck, until its call returns.
+Until then, Eject, "Safe to unplug" and every other holder see the drive as busy: a second
+writer never starts beside a stuck one.
 
 `threading.Lock` (not `RLock`) underneath, so the thread that ends up owning the lease may
 release it even though another thread acquired it.
@@ -70,11 +71,9 @@ class DriveLease:
             self._holder, self._stuck = None, False
         self._lock.release()
 
-    def hand_to_stuck(self, holder: str) -> None:
-        """Record that a thread stuck in the operating system now owns the lease.
-
-        The caller keeps from releasing it; the stuck thread releases it when it ends.
-        """
+    def mark_stuck(self, holder: str) -> None:
+        """Record that the holder is a thread that was given up on while stuck in the operating
+        system. It still owns the lease and releases it when (if) its call returns."""
         with self._meta:
             self._holder, self._stuck = holder, True
 

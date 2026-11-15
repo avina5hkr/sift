@@ -49,7 +49,7 @@ def test_a_stuck_owner_keeps_the_lease_until_its_own_thread_releases_it() -> Non
 
     t = threading.Thread(target=stuck_worker)
     t.start()
-    lease.hand_to_stuck("SSD copy (not answering)")
+    lease.mark_stuck("SSD copy (not answering)")
     assert lease.stuck and lease.held()
     assert not lease.acquire("plug-in", timeout_s=0.1)
     returned.set()

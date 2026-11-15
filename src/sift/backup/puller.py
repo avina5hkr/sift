@@ -268,8 +268,10 @@ class Puller:
         readers: int = 1,
         chunk: int = CHUNK,
         reconnect_pause_s: float = RECONNECT_PAUSE_S,
+        on_copied: Callable[[], None] | None = None,
     ) -> None:
         self._db = db
+        self._on_copied = on_copied  # after each new file is recorded (the SSD copy's doorbell)
         self._target = target
         self._device_id = device_id
         self._clock = clock
@@ -365,6 +367,8 @@ class Puller:
             if outcome is Outcome.copied:
                 stats.copied += 1
                 stats.bytes_copied += item.size
+                if self._on_copied is not None:
+                    self._on_copied()
             elif outcome is Outcome.duplicate:
                 stats.duplicates_skipped += 1  # its bytes were read, then dropped
             elif outcome is Outcome.linked:

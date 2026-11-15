@@ -155,7 +155,7 @@ def test_eject_is_refused_while_a_stuck_copy_holds_the_lease_after_its_job_ended
     client = client_for(ctx)
     h = {"X-Sift-Token": "t0k"}
     assert DRIVE_LEASE.acquire("backup", timeout_s=0)
-    DRIVE_LEASE.hand_to_stuck("SSD copy (not answering)")  # no job is running any more
+    DRIVE_LEASE.mark_stuck("SSD copy (not answering)")  # no job is running any more
     try:
         assert client.get("/api/status", headers=h).json()["ssd"]["safe_to_unplug"] is False
         r = client.post("/api/ssd/eject", headers=h)

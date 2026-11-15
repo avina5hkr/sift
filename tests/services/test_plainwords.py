@@ -16,6 +16,7 @@ from sift.backup.phonepaths import UnstorablePath
 from sift.backup.readers import ReaderTestCancelled
 from sift.backup.replicator import SourceCorrupt
 from sift.backup.scanner import ScanNotPending
+from sift.backup.ssdcopy import SsdCopyEnded, SsdCopyStopped
 from sift.backup.staging import ChecksumMismatch, IncompleteCopy, TargetExists
 from sift.backup.verifier import NothingToRepairFrom
 from sift.cleanup.calibration import NothingToCalibrate
@@ -89,6 +90,8 @@ MAKERS: dict[str, Callable[[str], BaseException]] = {
     "NothingToRepairFrom": NothingToRepairFrom,
     "TaskBusy": TaskBusy,
     "SsdBusy": SsdBusy,
+    "SsdCopyStopped": SsdCopyStopped,
+    "SsdCopyEnded": lambda m: SsdCopyEnded("failed", m),
     "ScanNotPending": ScanNotPending,
     "UnstorablePath": UnstorablePath,
     "ReaderTestCancelled": ReaderTestCancelled,

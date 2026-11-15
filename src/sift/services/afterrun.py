@@ -11,6 +11,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from sift.backup.lease import DRIVE_LEASE
 from sift.backup.replicator import ssd_writing
 from sift.backup.summary import latest_summary
 from sift.core.context import AppContext
@@ -67,11 +68,18 @@ def after_run(
         log.exception("Could not make the daily copy of the database")
     ssd = ctx.ssd.state() if ctx.ssd is not None else None
     if ssd is not None and ssd.connected and ssd.root:
-        try:  # a copy beside the backups after every run, so the SSD alone can rebuild
-            with ssd_writing():
-                run_copy(ctx.db, Path(ssd.root) / ".sift", datetime.now(), keep=SSD_KEEP)
-        except Exception:
-            log.exception("Could not copy the database to the SSD")
+        # A copy beside the backups after every run, so the SSD alone can rebuild. Skipped while
+        # another writer holds the drive (a copy stuck inside macOS would hang this one too).
+        if not DRIVE_LEASE.acquire("database copy", timeout_s=0):
+            log.warning("The SSD is busy; the database copy on it is made after the next run")
+        else:
+            try:
+                with ssd_writing():
+                    run_copy(ctx.db, Path(ssd.root) / ".sift", datetime.now(), keep=SSD_KEEP)
+            except Exception:
+                log.exception("Could not copy the database to the SSD")
+            finally:
+                DRIVE_LEASE.release()
     if closing():
         return
     try:

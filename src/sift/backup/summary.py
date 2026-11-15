@@ -13,6 +13,7 @@ from typing import Any
 
 from sift.backup.phonepaths import from_db, shown
 from sift.backup.puller import PullStats
+from sift.backup.ssdcopy import SsdOutcome
 from sift.core.db import Database
 from sift.services.plainwords import GENERIC
 
@@ -41,17 +42,22 @@ def record_summary(
     finished_at: int,
     stats: PullStats,
     warnings: list[str],
+    pull_finished_at: int | None = None,
+    ssd: SsdOutcome | None = None,
 ) -> None:
     """Save the run's counts. A failure is logged, never raised: it must not end the job.
 
     A discarded run is stored as outcome `stopped` with its flag set (see migration 0004).
     """
+    ssd = ssd or SsdOutcome()
     try:
         with db.tx() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO run_summary (job_id, device_id, sets, outcome, started_at, "
                 "finished_at, new_files, duplicates_skipped, failed, moved_links, changed_files, "
-                "bytes, warnings, discarded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "bytes, warnings, discarded, pull_finished_at, ssd_state, ssd_copied, ssd_bytes, "
+                "ssd_deferred, ssd_pending_after, ssd_finished_at, ssd_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     device_id,
@@ -67,6 +73,14 @@ def record_summary(
                     stats.bytes_copied,
                     json.dumps([*warnings, *stats.warnings]),
                     int(discarded),
+                    pull_finished_at,
+                    ssd.state,
+                    ssd.copied,
+                    ssd.bytes,
+                    ssd.deferred,
+                    ssd.pending_after,
+                    ssd.finished_at,
+                    ssd.reason,
                 ),
             )
     except Exception:
@@ -76,7 +90,8 @@ def record_summary(
 _SUMMARY_COLUMNS = (
     "s.job_id, s.sets, s.outcome, s.started_at, s.finished_at, s.new_files, "
     "s.duplicates_skipped, s.failed, s.moved_links, s.changed_files, s.bytes, s.warnings, j.error, "
-    "s.discarded"
+    "s.discarded, s.pull_finished_at, s.ssd_state, s.ssd_copied, s.ssd_bytes, s.ssd_deferred, "
+    "s.ssd_pending_after, s.ssd_finished_at, s.ssd_reason"
 )
 
 
@@ -131,6 +146,16 @@ def latest_summary(
         "bytes": r[10],
         "warnings": _json_list(r[11], display=True),
         "error": shown(r[12]) if r[12] else r[12],
+        "pull_finished_at": r[14],
+        "ssd": {
+            "state": r[15],
+            "copied": r[16],
+            "bytes": r[17],
+            "deferred": r[18],
+            "pending_after": r[19],
+            "finished_at": r[20],
+            "reason": r[21],
+        },
     }
 
 
@@ -192,3 +217,47 @@ def undo_reset(db: Database, rows: list[tuple[int, str | None, int, str | None]]
             "WHERE id = ? AND state = 'discovered'",
             [(r[1], r[2], r[0]) for r in rows],
         )
+
+
+def summarize_unfinished(db: Database, now: int, message: str) -> int:
+    """At start: a backup that never wrote its summary (Sift quit or crashed mid-run) gets one,
+    as `stopped`, with its SSD part `stopped` when an SSD was chosen. Only jobs newer than the
+    newest summarized one, so a fresh install of this version never invents old runs.
+    Returns how many were added."""
+    with db.tx() as conn:
+        newest = conn.execute("SELECT coalesce(max(job_id), 0) FROM run_summary").fetchone()[0]
+        ssd_chosen = (
+            conn.execute("SELECT 1 FROM destination WHERE kind = 'ssd' LIMIT 1").fetchone()
+            is not None
+        )
+        rows = conn.execute(
+            "SELECT id, params, started_at, finished_at FROM job WHERE type = 'backup' "
+            "AND id > ? AND NOT EXISTS (SELECT 1 FROM run_summary s WHERE s.job_id = job.id) "
+            "ORDER BY id",
+            (newest,),
+        ).fetchall()
+        added = 0
+        for job_id, params, started_at, finished_at in rows:
+            try:
+                p = json.loads(params or "{}")
+            except ValueError:
+                p = {}
+            if not isinstance(p, dict) or p.get("dry_run"):
+                continue
+            sets = p.get("sets") if isinstance(p.get("sets"), list) else []
+            start = int(started_at or now)
+            conn.execute(
+                "INSERT INTO run_summary (job_id, sets, outcome, started_at, finished_at, "
+                "warnings, ssd_state, ssd_reason) VALUES (?, ?, 'stopped', ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    json.dumps(sets),
+                    start,
+                    int(finished_at or now),
+                    json.dumps([message]),
+                    "stopped" if ssd_chosen else "none",
+                    message if ssd_chosen else None,
+                ),
+            )
+            added += 1
+    return added

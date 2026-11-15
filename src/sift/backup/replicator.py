@@ -17,6 +17,7 @@ import os
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from sift.backup.layout import rel_key, resolve_collision
@@ -144,12 +145,68 @@ def pending(db: Database, src: Dest, dst: Dest) -> list[tuple[str, str, int]]:
         ]
 
 
-def _read_uncached(path: Path, staged: StagedFile) -> None:
+@dataclass(frozen=True)
+class PendingRow:
+    rowid: int  # the source replica's rowid: the SSD worker's cursor
+    content_hash: str
+    rel_path: str
+    size: int
+
+
+_PENDING_SQL = (
+    "SELECT r.rowid, r.content_hash, r.rel_path, r.size FROM replica r "
+    "WHERE r.dest_id = ? AND r.rowid > ? AND r.rowid <= ? AND NOT EXISTS "
+    "(SELECT 1 FROM replica o WHERE o.dest_id = ? AND o.content_hash = r.content_hash) "
+    "ORDER BY r.rowid LIMIT ?"
+)
+
+
+def pending_after(
+    db: Database, src: Dest, dst: Dest, cursor: int, limit: int, high: int | None = None
+) -> list[PendingRow]:
+    """Up to `limit` replicas of `src` with no copy on `dst`, in rowid order after `cursor`
+    (and up to `high`, when given). Nothing loads the whole backlog."""
+    upper = (1 << 63) - 1 if high is None else high
+    with db.read() as conn:
+        return [
+            PendingRow(int(r), str(h), str(p), int(s))
+            for r, h, p, s in conn.execute(_PENDING_SQL, (src.id, cursor, upper, dst.id, limit))
+        ]
+
+
+def max_rowid(db: Database, dest: Dest) -> int:
+    """The highest replica rowid of `dest` (0 when it has none)."""
+    with db.read() as conn:
+        row = conn.execute(
+            "SELECT max(rowid) FROM replica WHERE dest_id = ?", (dest.id,)
+        ).fetchone()
+    return int(row[0] or 0)
+
+
+def pending_totals(db: Database, src: Dest, dst: Dest) -> tuple[int, int]:
+    """(files, bytes) of `src` content with no copy on `dst`."""
+    with db.read() as conn:
+        row = conn.execute(
+            "SELECT count(*), coalesce(sum(r.size), 0) FROM replica r WHERE r.dest_id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM replica o WHERE o.dest_id = ? "
+            "AND o.content_hash = r.content_hash)",
+            (src.id, dst.id),
+        ).fetchone()
+    return int(row[0]), int(row[1])
+
+
+def _read_uncached(
+    path: Path, staged: StagedFile, between_chunks: Callable[[int], None] | None = None
+) -> None:
+    """Copy `path` into `staged` with the cache off; `between_chunks(bytes so far)` runs after
+    each chunk and may raise to abandon the copy (the stage is then discarded)."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
         while chunk := os.read(fd, CHUNK):
             staged.write(chunk)
+            if between_chunks is not None:
+                between_chunks(staged.size)
     finally:
         os.close(fd)
 
@@ -198,17 +255,41 @@ class Replicator:
         raise AssertionError("unreachable")
 
     def copy_one(
-        self, src: Dest, dst: Dest, digest: str, rel_path: str, size: int
+        self,
+        src: Dest,
+        dst: Dest,
+        digest: str,
+        rel_path: str,
+        size: int,
+        *,
+        between_chunks: Callable[[int], None] | None = None,
+        before_publish: Callable[[], None] | None = None,
+        record: Callable[[str, str, int], None] | None = None,
     ) -> tuple[str, bool]:
-        """Copy one replica across. Raises SourceCorrupt when the source is not `digest`."""
+        """Copy one replica across. Raises SourceCorrupt when the source is not `digest`.
+
+        The staged sequence is the same for every caller: `.part`, full flush, rename without
+        replacing, the read-back with the cache off, then the row. `between_chunks` and
+        `before_publish` may raise to abandon the copy before anything is published; `record`
+        replaces the plain row insert (the SSD worker records under its commit lock).
+        """
         source = src.root / rel_path
         mtime = int(source.stat().st_mtime)
-        dst.staging.mkdir(parents=True, exist_ok=True)
+        # Never parents: a missing destination root (an unplugged or swapped drive) fails here
+        # instead of a folder being made wherever its path now leads.
+        dst.staging.mkdir(exist_ok=True)
         with StagedFile(dst.staging, expected_size=size) as staged:
-            _read_uncached(source, staged)
+            _read_uncached(source, staged, between_chunks)
             if staged.size == size and staged.sha256 != digest:
                 raise SourceCorrupt(f"{rel_path} on the {src.kind} copy does not match its hash")
+            if before_publish is not None:
+                before_publish()
             final, reused = self._commit(staged, dst, rel_path, digest, mtime)
+        (record or partial(self.record, dst))(digest, final, size)
+        return final, reused
+
+    def record(self, dst: Dest, digest: str, final: str, size: int) -> None:
+        """The replica row of a copy that is published and read back on `dst`."""
         now = self._clock.now()
         with self._db.tx() as conn:
             conn.execute(
@@ -216,7 +297,6 @@ class Replicator:
                 "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (content_hash, dest_id) DO NOTHING",
                 (digest, dst.id, final, rel_key(final), size, now),
             )
-        return final, reused
 
     def replicate(
         self,
@@ -225,8 +305,12 @@ class Replicator:
         *,
         should_stop: Callable[[], bool] = lambda: False,
         on_file: Callable[[int, int], None] | None = None,
+        before_file: Callable[[], None] | None = None,
     ) -> ReplicateStats:
-        """Copy everything `src` has and `dst` lacks. Stops between files when asked."""
+        """Copy everything `src` has and `dst` lacks. Stops between files when asked.
+
+        `before_file` runs before each file (a backup's coordinator pauses there, and raises
+        to stop)."""
         stats = ReplicateStats()
         if not src.root.is_dir() or not dst.root.parent.is_dir():
             return stats
@@ -235,6 +319,8 @@ class Replicator:
         for digest, rel_path, size in pending(self._db, src, dst):
             if should_stop():
                 break
+            if before_file is not None:
+                before_file()
             try:
                 _final, reused = self.copy_one(src, dst, digest, rel_path, size)
             except SourceCorrupt as e:
