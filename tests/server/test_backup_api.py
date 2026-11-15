@@ -902,3 +902,20 @@ def test_a_run_that_fails_in_the_scan_still_belongs_to_its_phone(rig: Rig) -> No
     job_id = rig.run(["Screenshots"])
     summary = rig.get("summary").json()
     assert summary is not None and summary["job_id"] == job_id and summary["outcome"] == "failed"
+
+
+def test_the_ticks_under_this_run_are_remembered_and_settings_stay_as_they_were(rig: Rig) -> None:
+    sets = rig.ctx.config.backup.sets
+    on = next(s for s in sets if s.enabled)
+    off = next(s for s in sets if not s.enabled)
+
+    def ticked() -> dict[str, bool]:
+        return {s["name"]: s["ticked"] for s in rig.get("overview").json()["sets"]}
+
+    assert ticked() == {s.name: s.enabled for s in sets}  # first time: as in Settings
+    assert rig.post("ticks", {"name": on.name, "ticked": False}).status_code == 200
+    assert rig.post("ticks", {"name": off.name.upper(), "ticked": True}).status_code == 200
+    now = ticked()
+    assert now[on.name] is False and now[off.name] is True
+    assert on.enabled and not off.enabled  # Settings unchanged
+    assert rig.post("ticks", {"name": "Nope", "ticked": True}).status_code == 404

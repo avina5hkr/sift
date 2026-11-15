@@ -350,7 +350,19 @@ test('Back up now starts the ticked sets; ticking changes what is sent', async (
   await userEvent.click(screen.getByRole('checkbox', { name: 'Screenshots' }))
   await userEvent.click(screen.getByRole('checkbox', { name: 'Downloads' }))
   await userEvent.click(backUpNow())
-  expect(posts()).toEqual([{ method: 'POST', path: '/api/backup/start', body: { sets: ['Camera', 'Downloads'] } }])
+  expect(posts()).toEqual([
+    { method: 'POST', path: '/api/backup/ticks', body: { name: 'Screenshots', ticked: false } },
+    { method: 'POST', path: '/api/backup/ticks', body: { name: 'Downloads', ticked: true } },
+    { method: 'POST', path: '/api/backup/start', body: { sets: ['Camera', 'Downloads'] } },
+  ])
+})
+
+test('the ticks Sift remembered are shown again when the screen opens', async () => {
+  world.overview.sets = SETS.map((s) => (s.name === 'Camera' ? { ...s, ticked: false } : s.name === 'Downloads' ? { ...s, ticked: true } : s))
+  await ready()
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Camera' })).not.toBeChecked())
+  expect(screen.getByRole('checkbox', { name: 'Downloads' })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'Screenshots' })).toBeChecked() // never changed: as in Settings
 })
 
 test('each set has its own Back up now; a switched-off set explains itself', async () => {

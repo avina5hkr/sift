@@ -29,6 +29,11 @@ behaviour.
   backup count as backed up and verified, as before.
 - Times in one format ("today at 18:47"), with the full date on hover; each phase's finish time;
   each set's last copied file, apart from its confirmation.
+- Quarantine: Clear expired now, and Delete everything in quarantine now (you type the number of
+  files; their backup copies are then gone for good). The number of days files wait can be set on
+  the Quarantine page as well as in Settings, and a change applies to the files already there.
+- The Backup screen remembers which sets you ticked under "This run", also after Sift restarts.
+  Settings is not changed by it.
 - Settings, General, Storage locations: the data folder, settings file, database, Mac backup
   folder and SSD this Sift uses, with Reveal in Finder.
 

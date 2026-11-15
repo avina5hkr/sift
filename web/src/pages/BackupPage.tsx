@@ -115,7 +115,13 @@ export default function BackupPage() {
   })
 
   const [ticked, setTicked] = useState<Record<string, boolean>>({})
-  const selected = sets.filter((s) => ticked[s.name] ?? s.enabled).map((s) => s.name)
+  // The ticks are remembered by Sift (not the browser: the window's address changes each launch).
+  const isTicked = (s: SetStatus) => ticked[s.name] ?? s.ticked ?? s.enabled
+  const selected = sets.filter(isTicked).map((s) => s.name)
+  const saveTick = useMutation({
+    mutationFn: (t: { name: string; ticked: boolean }) => post('/api/backup/ticks', t),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['backup', 'overview'] }),
+  })
 
   const [message, setMessage] = useState<string | null>(null)
   const done = () => void qc.invalidateQueries({ queryKey: ['backup'] })
@@ -325,8 +331,12 @@ export default function BackupPage() {
             <label key={s.name} className="inline-flex items-center gap-1.5">
               <input
                 type="checkbox"
-                checked={ticked[s.name] ?? s.enabled}
-                onChange={(e) => setTicked((t) => ({ ...t, [s.name]: e.target.checked }))}
+                checked={isTicked(s)}
+                onChange={(e) => {
+                  const on = e.target.checked
+                  setTicked((t) => ({ ...t, [s.name]: on }))
+                  saveTick.mutate({ name: s.name, ticked: on })
+                }}
               />
               {s.name}
             </label>

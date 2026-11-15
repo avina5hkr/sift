@@ -349,6 +349,7 @@ def discard(ctx: Ctx, scan_id: int) -> ScanOut:
 class SetStatus(BaseModel):
     name: str
     enabled: bool
+    ticked: bool  # ticked for the next run on the Backup screen (remembered; default: enabled)
     on_phone: int
     backed_up: int
     pending: int
@@ -375,6 +376,47 @@ class OverviewOut(BaseModel):
 
 
 RECENT_FILES = 8
+RUN_TICKS_KEY = "backup_run_ticks"
+
+
+def _run_ticks(ctx: Ctx) -> dict[str, bool]:
+    """The sets the owner last ticked or unticked under "This run" (by name, ignoring case)."""
+    with ctx.db.read() as conn:
+        row = conn.execute("SELECT value FROM setting WHERE key = ?", (RUN_TICKS_KEY,)).fetchone()
+    try:
+        value = json.loads(row[0]) if row else {}
+    except ValueError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {str(k).casefold(): bool(v) for k, v in value.items()}
+
+
+class TickRequest(BaseModel):
+    name: str
+    ticked: bool
+
+
+@router.post("/ticks")
+def save_tick(ctx: Ctx, body: TickRequest) -> dict[str, bool]:
+    """Remember one set's tick under "This run", so the screen shows it again after a restart.
+    Only the ticks change: what Settings has enabled stays as it is."""
+    if body.name.casefold() not in {s.name.casefold() for s in ctx.config.backup.sets}:
+        raise ApiError(404, "unknown_set", "That backup set is not in the settings.")
+    with ctx.db.tx() as conn:
+        row = conn.execute("SELECT value FROM setting WHERE key = ?", (RUN_TICKS_KEY,)).fetchone()
+        try:
+            ticks = json.loads(row[0]) if row else {}
+        except ValueError:
+            ticks = {}
+        if not isinstance(ticks, dict):
+            ticks = {}
+        ticks[body.name.casefold()] = body.ticked
+        conn.execute(
+            "INSERT OR REPLACE INTO setting (key, value) VALUES (?, ?)",
+            (RUN_TICKS_KEY, json.dumps(ticks)),
+        )
+    return {"ticked": body.ticked}
 
 
 @router.get("/overview")
@@ -439,6 +481,7 @@ def overview(ctx: Ctx) -> OverviewOut:
                 "ORDER BY id DESC LIMIT 1",
                 (device_id,),
             ).fetchone()
+    ticks = _run_ticks(ctx)
     sets = []
     for s in ctx.config.backup.sets:
         on_phone, backed_up, pending = counts.get(s.name.casefold(), (0, 0, 0))
@@ -446,6 +489,7 @@ def overview(ctx: Ctx) -> OverviewOut:
             SetStatus(
                 name=s.name,
                 enabled=s.enabled,
+                ticked=ticks.get(s.name.casefold(), s.enabled),
                 on_phone=on_phone,
                 backed_up=backed_up,
                 pending=pending,

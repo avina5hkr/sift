@@ -184,6 +184,7 @@ export type ScanInfo = {
 export type SetStatus = {
   name: string
   enabled: boolean
+  ticked?: boolean // ticked for the next run (remembered by Sift; default: enabled)
   on_phone: number
   backed_up: number
   pending: number
